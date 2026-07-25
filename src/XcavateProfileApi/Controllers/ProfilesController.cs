@@ -310,10 +310,22 @@ public class ProfilesController : ControllerBase
         // Upload to S3
         if (image.Length > 0)
         {
+            // The bucket serves objects publicly, so the Content-Type must never come
+            // from the client (an attacker could store text/html for XSS/phishing).
+            // Derive it from the extension via an image-only allowlist instead.
+            var fileName = Path.GetFileName(image.FileName);
+            var extension = Path.GetExtension(fileName);
+            if (!AllowedImageTypes.TryGetValue(extension, out var contentType))
+            {
+                return BadRequest("Unsupported image type. Allowed: " + string.Join(", ", AllowedImageTypes.Keys));
+            }
+
             using (var stream = image.OpenReadStream())
             {
-                var key = $"profiles/profile_{ss58address}.jpg";
-                var url = await _s3Service.UploadImageAsync("xcavate-profile", key, stream, "image/jpg");
+                // Key is derived from the filename only, so uploading a file with the
+                // same name rewrites the existing object instead of creating a new one
+                var key = $"profiles/{ss58address}/{fileName}";
+                var url = await _s3Service.UploadImageAsync("xcavate-profile", key, stream, contentType);
 
                 // Update profile picture URL
                 profile.ProfilePicture = url;
@@ -325,6 +337,18 @@ public class ProfilesController : ControllerBase
 
         return BadRequest("No image file provided");
     }
+
+    // SVG is deliberately excluded: it can embed scripts and the bucket serves
+    // objects publicly.
+    private static readonly Dictionary<string, string> AllowedImageTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".jpg"] = "image/jpeg",
+        [".jpeg"] = "image/jpeg",
+        [".png"] = "image/png",
+        [".gif"] = "image/gif",
+        [".webp"] = "image/webp",
+        [".bmp"] = "image/bmp",
+    };
 
     private static string ComputeBodyHash(string body)
     {
