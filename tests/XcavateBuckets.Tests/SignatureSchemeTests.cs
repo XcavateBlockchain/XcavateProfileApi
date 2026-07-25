@@ -61,6 +61,27 @@ public class SignatureSchemeTests
     }
 
     [Test]
+    public async Task Sr25519_verifies_a_wrapped_signature_from_a_browser_extension()
+    {
+        var account = SubstrateAccount(0x34);
+
+        // The polkadot-js extension never signs the raw payload: it wraps the payload's hash in
+        // <Bytes>...</Bytes> and signs that byte array as-is. account.SignAsync is the raw signing
+        // primitive (no internal hashing) — CryptoHelper.SignAsync would hash the wrapped bytes
+        // again, producing a signature Verify's fallback branch could never match.
+        var wrapped = "<Bytes>"u8
+            .ToArray()
+            .Concat(CryptoHelper.Hash(Payload))
+            .Concat("</Bytes>"u8.ToArray())
+            .ToArray();
+        var signature = await account.SignAsync(wrapped);
+
+        Assert.That(
+            new Sr25519SignatureScheme().Verify(Payload, signature, account.Value),
+            Is.True);
+    }
+
+    [Test]
     public async Task Sr25519_rejects_a_signature_over_a_different_payload()
     {
         var account = SubstrateAccount(0x33);
