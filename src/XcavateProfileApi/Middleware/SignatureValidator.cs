@@ -1,6 +1,7 @@
 using System.Globalization;
 using XcavateProfile.Client;
 using XcavateProfileApiClient;
+using XcavateProfileApiClient.Signing;
 
 namespace XcavateProfileApi.Middleware;
 
@@ -8,6 +9,17 @@ public class SignatureValidator : ISignatureValidator
 {
     private readonly List<string> _adminAddresses;
     private readonly SignatureValidationOptions _options;
+
+    /// <summary>
+    /// Ordered by cost of recognition; the first scheme that claims the address format wins. The
+    /// two formats do not overlap — SS58 decoding validates a checksum and yields 35 bytes, a
+    /// Solana address is exactly 32 — so the order is for clarity rather than correctness.
+    /// </summary>
+    private static readonly IReadOnlyList<ISignatureScheme> Schemes =
+    [
+        new Sr25519SignatureScheme(),
+        new SolanaSignatureScheme()
+    ];
 
     public SignatureValidator(
         List<string> adminAddresses,
@@ -54,31 +66,35 @@ public class SignatureValidator : ISignatureValidator
             };
         }
 
-        // Construct the signed payload
+        // Construct the signed payload. Identical for both schemes — they differ only in which
+        // bytes of it get signed.
         var payload = CryptoHelper.ConstructPayload(method, path, payloadBody, ts);
 
-        var signatureBytes = Substrate.NetApi.Utils.HexToByteArray(signatureHex);
+        // Decoding happens inside the guarded path on purpose: this is unauthenticated input, and
+        // a malformed signature must produce a 401, not an unhandled exception.
+        if (!SignatureEncoding.TryDecode(signatureHex, out var signatureBytes))
+        {
+            return new SignatureValidationResult
+            {
+                IsValid = false,
+                Error = $"Signature must decode to {SignatureEncoding.SignatureLength} bytes "
+                    + "from 0x-prefixed hex or base58"
+            };
+        }
+
+        var scheme = Schemes.FirstOrDefault(s => s.CanVerify(address));
+        if (scheme is null)
+        {
+            return new SignatureValidationResult
+            {
+                IsValid = false,
+                Error = "Unrecognised address format: expected an SS58 or Solana base58 address"
+            };
+        }
 
         try
         {
-            var isValid = CryptoHelper.VerifySignature(
-                payload,
-                signatureBytes,
-                address);
-
-            if (!isValid)
-            {
-                var wrappedPayloadHash = "<Bytes>"u8
-                    .ToArray()
-                    .Concat(CryptoHelper.Hash(payload))
-                    .Concat("</Bytes>"u8.ToArray())
-                    .ToArray();
-
-                isValid = CryptoHelper.VerifySignature(
-                    input: wrappedPayloadHash,
-                    signature: signatureBytes,
-                    address: address);
-            }
+            var isValid = scheme.Verify(payload, signatureBytes, address);
 
             return new SignatureValidationResult
             {
