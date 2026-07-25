@@ -1,3 +1,4 @@
+using System.Globalization;
 using XcavateProfile.Client;
 using XcavateProfileApiClient;
 
@@ -24,8 +25,16 @@ public class SignatureValidator : ISignatureValidator
         string path,
         IPayloadBody payloadBody)
     {
-        // Parse timestamp and validate freshness
-        if (!DateTime.TryParse(timestamp, out var ts))
+        // Parse timestamp and validate freshness.
+        // AdjustToUniversal keeps the comparison below against DateTime.UtcNow honest: a plain
+        // TryParse of an ISO-8601 "...Z" string yields a Local DateTime, so on any host that is not
+        // itself on UTC the skew came out wrong by the machine's offset and every valid signature
+        // was rejected. AssumeUniversal covers clients that omit the zone designator.
+        if (!DateTime.TryParse(
+                timestamp,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                out var ts))
         {
             return new SignatureValidationResult
             {
