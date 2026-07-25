@@ -40,6 +40,7 @@ public sealed class TestDb : IDisposable
         Options = new BucketOptions();
         Validator = new InputValidator(Options);
         Auth = new AuthorizationService(Db);
+        Namespaces = new NamespaceService(Db, Auth, Validator, Clock);
     }
 
     public BucketDbContext Db { get; }
@@ -51,6 +52,8 @@ public sealed class TestDb : IDisposable
     public InputValidator Validator { get; }
 
     public AuthorizationService Auth { get; }
+
+    public NamespaceService Namespaces { get; }
 
     /// <summary>Inserts a namespace directly, bypassing the service layer.</summary>
     public async Task<Namespace> SeedNamespaceAsync(params string[] managers)
