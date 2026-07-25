@@ -1,8 +1,8 @@
-using Substrate.NetApi;
 using Substrate.NetApi.Model.Types;
 using System.Text;
 using System.Text.Json;
 using XcavateProfileApiClient;
+using XcavateProfileApiClient.Signing;
 
 namespace XcavateProfile.Client;
 
@@ -70,30 +70,43 @@ public class XcavateProfileClient : IDisposable
     }
 
     /// <summary>
-    /// Create a new profile with Sr25519 authentication
+    /// Signs the payload and installs the three auth headers. Kept in one place so every verb
+    /// agrees on the header names and the timestamp format.
     /// </summary>
-    public async Task<Profile> CreateProfileAsync(Profile profile, Account account)
+    private async Task SignRequestAsync(
+        string method, string path, IPayloadBody body, IRequestSigner signer, DateTime timestamp)
+    {
+        var payload = CryptoHelper.ConstructPayload(method, path, body, timestamp);
+        var signature = await signer.SignAsync(payload);
+
+        _httpClient.DefaultRequestHeaders.Clear();
+        _httpClient.DefaultRequestHeaders.Add("X-SS58-Address", signer.Address);
+        _httpClient.DefaultRequestHeaders.Add("X-Signature", signer.EncodeSignature(signature));
+        _httpClient.DefaultRequestHeaders.Add("X-Timestamp", timestamp.ToUniversalTime().ToString("o"));
+    }
+
+    /// <summary>
+    /// Create a new profile, authenticated with the caller's signature
+    /// </summary>
+    public Task<Profile> CreateProfileAsync(Profile profile, Account account)
     {
         if (account == null)
             throw new InvalidOperationException("Account is required for profile creation");
 
-        // Serialize the profile to get the body JSON
+        return CreateProfileAsync(profile, new SubstrateRequestSigner(account));
+    }
+
+    /// <summary>
+    /// Create a new profile using any signature scheme
+    /// </summary>
+    public async Task<Profile> CreateProfileAsync(Profile profile, IRequestSigner signer)
+    {
+        ArgumentNullException.ThrowIfNull(signer);
+
         var bodyJson = JsonSerializer.Serialize(profile, _jsonOptions);
 
-        // Construct the payload
-        var timestamp = DateTime.UtcNow;
-        var payload = CryptoHelper.ConstructPayload("POST", "/api/profiles", profile, timestamp);
+        await SignRequestAsync("POST", "/api/profiles", profile, signer, DateTime.UtcNow);
 
-        // Sign the payload using Account
-        var signature = await CryptoHelper.SignAsync(payload, account);
-
-        // Add authentication headers
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("X-SS58-Address", account.Value);
-        _httpClient.DefaultRequestHeaders.Add("X-Signature", Utils.Bytes2HexString(signature));
-        _httpClient.DefaultRequestHeaders.Add("X-Timestamp", timestamp.ToUniversalTime().ToString("o"));
-
-        // Create the request content
         var content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
 
         var response = await _httpClient.PostAsync("api/profiles", content);
@@ -104,30 +117,28 @@ public class XcavateProfileClient : IDisposable
     }
 
     /// <summary>
-    /// Update an existing profile with Sr25519 authentication
+    /// Update an existing profile, authenticated with the caller's signature
     /// </summary>
-    public async Task<Profile> UpdateProfileAsync(string ss58address, Profile profile, Account? account = null)
+    public Task<Profile> UpdateProfileAsync(string ss58address, Profile profile, Account? account = null)
     {
         if (account == null)
             throw new InvalidOperationException("Account is required for profile update");
 
-        // Serialize the profile to get the body JSON
+        return UpdateProfileAsync(ss58address, profile, new SubstrateRequestSigner(account));
+    }
+
+    /// <summary>
+    /// Update an existing profile using any signature scheme
+    /// </summary>
+    public async Task<Profile> UpdateProfileAsync(string ss58address, Profile profile, IRequestSigner signer)
+    {
+        ArgumentNullException.ThrowIfNull(signer);
+
         var bodyJson = JsonSerializer.Serialize(profile, _jsonOptions);
 
-        // Construct the payload
-        var timestamp = DateTime.UtcNow;
-        var payload = CryptoHelper.ConstructPayload("PUT", $"/api/profiles/{ss58address}", profile, timestamp);
+        await SignRequestAsync(
+            "PUT", $"/api/profiles/{ss58address}", profile, signer, DateTime.UtcNow);
 
-        // Sign the payload using Account
-        var signature = await CryptoHelper.SignAsync(payload, account);
-
-        // Add authentication headers
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("X-SS58-Address", account.Value);
-        _httpClient.DefaultRequestHeaders.Add("X-Signature", Utils.Bytes2HexString(signature));
-        _httpClient.DefaultRequestHeaders.Add("X-Timestamp", timestamp.ToUniversalTime().ToString("o"));
-
-        // Create the request content
         var content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
 
         var response = await _httpClient.PutAsync($"api/profiles/{ss58address}", content);
@@ -138,44 +149,47 @@ public class XcavateProfileClient : IDisposable
     }
 
     /// <summary>
-    /// Delete a profile with Sr25519 authentication
+    /// Delete a profile, authenticated with the caller's signature
     /// </summary>
-    public async Task DeleteProfileAsync(string ss58address, Account? account = null)
+    public Task DeleteProfileAsync(string ss58address, Account? account = null)
     {
         if (account == null)
             throw new InvalidOperationException("Account is required for profile deletion");
 
-        // Construct the payload
-        var timestamp = DateTime.UtcNow;
-        var payload = CryptoHelper.ConstructPayload("DELETE", $"/api/profiles/{ss58address}", new EmptyPayloadBody(), timestamp);
+        return DeleteProfileAsync(ss58address, new SubstrateRequestSigner(account));
+    }
 
-        // Sign the payload using Account
-        var signature = await CryptoHelper.SignAsync(payload, account);
+    /// <summary>
+    /// Delete a profile using any signature scheme
+    /// </summary>
+    public async Task DeleteProfileAsync(string ss58address, IRequestSigner signer)
+    {
+        ArgumentNullException.ThrowIfNull(signer);
 
-        // Add authentication headers
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("X-SS58-Address", account.Value);
-        _httpClient.DefaultRequestHeaders.Add("X-Signature", Utils.Bytes2HexString(signature));
-        _httpClient.DefaultRequestHeaders.Add("X-Timestamp", timestamp.ToUniversalTime().ToString("o"));
+        await SignRequestAsync(
+            "DELETE", $"/api/profiles/{ss58address}", new EmptyPayloadBody(), signer, DateTime.UtcNow);
 
         var response = await _httpClient.DeleteAsync($"api/profiles/{ss58address}");
         response.EnsureSuccessStatusCode();
     }
 
     /// <summary>
-    /// Upload a profile image with Sr25519 authentication
+    /// Upload a profile image, authenticated with the caller's signature
     /// </summary>
-    public async Task<string> UploadImageAsync(string ss58address, Stream imageStream, string filename, Account? account = null)
+    public Task<string> UploadImageAsync(string ss58address, Stream imageStream, string filename, Account? account = null)
     {
         if (account == null)
             throw new InvalidOperationException("Account is required for image upload");
 
-        // Construct the payload
-        var timestamp = DateTime.UtcNow;
-        var payload = CryptoHelper.ConstructPayload("POST", $"/api/profiles/{ss58address}/image", new EmptyPayloadBody(), timestamp);
+        return UploadImageAsync(ss58address, imageStream, filename, new SubstrateRequestSigner(account));
+    }
 
-        // Sign the payload using Account
-        var signature = await CryptoHelper.SignAsync(payload, account);
+    /// <summary>
+    /// Upload a profile image using any signature scheme
+    /// </summary>
+    public async Task<string> UploadImageAsync(string ss58address, Stream imageStream, string filename, IRequestSigner signer)
+    {
+        ArgumentNullException.ThrowIfNull(signer);
 
         // Create the request content
         var content = new MultipartFormDataContent();
@@ -183,11 +197,9 @@ public class XcavateProfileClient : IDisposable
         imageContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(GetImageContentType(filename));
         content.Add(imageContent, "image", filename);
 
-        // Add authentication headers properly
-        _httpClient.DefaultRequestHeaders.Clear();
-        _httpClient.DefaultRequestHeaders.Add("X-SS58-Address", account.Value);
-        _httpClient.DefaultRequestHeaders.Add("X-Signature", Utils.Bytes2HexString(signature));
-        _httpClient.DefaultRequestHeaders.Add("X-Timestamp", timestamp.ToUniversalTime().ToString("o"));
+        // The server hashes an empty body for multipart uploads, so the client must too.
+        await SignRequestAsync(
+            "POST", $"/api/profiles/{ss58address}/image", new EmptyPayloadBody(), signer, DateTime.UtcNow);
 
         var uri = new Uri($"api/profiles/{ss58address}/image", UriKind.Relative);
 
