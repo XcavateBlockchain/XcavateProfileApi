@@ -11,6 +11,7 @@ namespace XcavateProfileApi.GraphQL;
 /// Read side of the bucket API. Field names and the connection shape match what the SubQuery
 /// indexer served, so existing selection sets keep working. Reads need no signature.
 /// </summary>
+[GraphQLName("Query")]
 public class BucketQueries
 {
     [UsePaging(IncludeTotalCount = true)]
@@ -19,7 +20,8 @@ public class BucketQueries
     public IQueryable<Namespace> GetNamespaces(BucketDbContext db) =>
         db.Namespaces.AsNoTracking();
 
-    public Task<Namespace?> GetNamespace(string id, BucketDbContext db, CancellationToken ct) =>
+    public Task<Namespace?> GetNamespace(
+        [GraphQLType<NonNullType<IdType>>] string id, BucketDbContext db, CancellationToken ct) =>
         long.TryParse(id, out var namespaceId)
             ? db.Namespaces.AsNoTracking()
                 .FirstOrDefaultAsync(n => n.NamespaceId == namespaceId, ct)
@@ -31,7 +33,8 @@ public class BucketQueries
     public IQueryable<Bucket> GetBuckets(BucketDbContext db) =>
         db.Buckets.AsNoTracking();
 
-    public Task<Bucket?> GetBucket(string id, BucketDbContext db, CancellationToken ct) =>
+    public Task<Bucket?> GetBucket(
+        [GraphQLType<NonNullType<IdType>>] string id, BucketDbContext db, CancellationToken ct) =>
         long.TryParse(id, out var bucketId)
             ? db.Buckets.AsNoTracking().FirstOrDefaultAsync(b => b.BucketId == bucketId, ct)
             : Task.FromResult<Bucket?>(null);
@@ -42,7 +45,8 @@ public class BucketQueries
     public IQueryable<Message> GetMessages(BucketDbContext db) =>
         db.Messages.AsNoTracking();
 
-    public Task<Message?> GetMessage(string id, BucketDbContext db, CancellationToken ct)
+    public Task<Message?> GetMessage(
+        [GraphQLType<NonNullType<IdType>>] string id, BucketDbContext db, CancellationToken ct)
     {
         if (!EntityId.TrySplit(id, out var bucketId, out var rest)
             || !long.TryParse(rest, out var messageId))
@@ -60,7 +64,8 @@ public class BucketQueries
     public IQueryable<Tag> GetTags(BucketDbContext db) =>
         db.Tags.AsNoTracking();
 
-    public Task<Tag?> GetTag(string id, BucketDbContext db, CancellationToken ct)
+    public Task<Tag?> GetTag(
+        [GraphQLType<NonNullType<IdType>>] string id, BucketDbContext db, CancellationToken ct)
     {
         // Tag names can contain hyphens, so only the first separator is structural.
         if (!EntityId.TrySplit(id, out var bucketId, out var tagName))

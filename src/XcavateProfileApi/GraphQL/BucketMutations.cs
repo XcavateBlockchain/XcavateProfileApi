@@ -14,6 +14,7 @@ namespace XcavateProfileApi.GraphQL;
 /// returns the result. The 15 role-based mutations require a signature; the 5 <c>force*</c>
 /// mutations require an admin address, standing in for the pallet's ForceOrigin.
 /// </summary>
+[GraphQLName("Mutation")]
 public class BucketMutations
 {
     // call_index 0
@@ -230,7 +231,7 @@ public class BucketMutations
 
     // call_index 17
     [RequireAdmin]
-    public Task<bool> ForceAddManager(
+    public Task<NamespaceManager> ForceAddManager(
         long namespaceId,
         string manager,
         BucketDbContext db,

@@ -1,0 +1,905 @@
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+type Query {
+  namespaces(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: NamespaceFilterInput @cost(weight: "10")
+    order: [NamespaceSortInput!] @cost(weight: "10")
+  ): NamespacesConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  namespace(id: ID!): Namespace @cost(weight: "10")
+  buckets(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: BucketFilterInput @cost(weight: "10")
+    order: [BucketSortInput!] @cost(weight: "10")
+  ): BucketsConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  bucket(id: ID!): Bucket @cost(weight: "10")
+  messages(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: MessageFilterInput @cost(weight: "10")
+    order: [MessageSortInput!] @cost(weight: "10")
+  ): MessagesConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  message(id: ID!): Message @cost(weight: "10")
+  tags(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: TagFilterInput @cost(weight: "10")
+    order: [TagSortInput!] @cost(weight: "10")
+  ): TagsConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  tag(id: ID!): Tag @cost(weight: "10")
+  namespaceManagers(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: NamespaceManagerFilterInput @cost(weight: "10")
+    order: [NamespaceManagerSortInput!] @cost(weight: "10")
+  ): NamespaceManagersConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  bucketAdmins(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: BucketAdminFilterInput @cost(weight: "10")
+    order: [BucketAdminSortInput!] @cost(weight: "10")
+  ): BucketAdminsConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  bucketContributors(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: BucketContributorFilterInput @cost(weight: "10")
+    order: [BucketContributorSortInput!] @cost(weight: "10")
+  ): BucketContributorsConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  bucketViewers(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: BucketViewerFilterInput @cost(weight: "10")
+    order: [BucketViewerSortInput!] @cost(weight: "10")
+  ): BucketViewersConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+  tagMessageCounts(
+    "Returns the first _n_ elements from the list."
+    first: Int
+    "Returns the elements in the list that come after the specified cursor."
+    after: String
+    "Returns the last _n_ elements from the list."
+    last: Int
+    "Returns the elements in the list that come before the specified cursor."
+    before: String
+    where: TagMessageCountFilterInput @cost(weight: "10")
+    order: [TagMessageCountSortInput!] @cost(weight: "10")
+  ): TagMessageCountsConnection
+    @listSize(
+      assumedSize: 50
+      slicingArguments: ["first", "last"]
+      slicingArgumentDefaultValue: 10
+      sizedFields: ["edges", "nodes"]
+      requireOneSlicingArgument: false
+    )
+    @cost(weight: "10")
+}
+
+type Mutation {
+  createNamespace(metadata: NamespaceMetadataInput!): Namespace!
+    @cost(weight: "10")
+  addContributor(namespaceId: BigInt!, bucketId: BigInt!, contributor: String!): BucketContributor!
+    @cost(weight: "10")
+  removeContributor(
+    namespaceId: BigInt!
+    bucketId: BigInt!
+    contributor: String!
+  ): Boolean! @cost(weight: "10")
+  addAdmin(namespaceId: BigInt!, bucketId: BigInt!, admin: String!): BucketAdmin!
+    @cost(weight: "10")
+  removeAdmin(namespaceId: BigInt!, bucketId: BigInt!, admin: String!): Boolean!
+    @cost(weight: "10")
+  addManager(namespaceId: BigInt!, newManager: String!): NamespaceManager!
+    @cost(weight: "10")
+  removeManager(namespaceId: BigInt!, oldManager: String!): Boolean!
+    @cost(weight: "10")
+  createBucket(namespaceId: BigInt!, metadata: BucketMetadataInput!): Bucket!
+    @cost(weight: "10")
+  pauseWriting(namespaceId: BigInt!, bucketId: BigInt!): Bucket!
+    @cost(weight: "10")
+  resumeWriting(
+    namespaceId: BigInt!
+    bucketId: BigInt!
+    newEncryptionKey: String!
+  ): Bucket! @cost(weight: "10")
+  createTag(bucketId: BigInt!, newTag: String!): Tag! @cost(weight: "10")
+  rotateKey(namespaceId: BigInt!, bucketId: BigInt!, newEncryptionKey: String!): Bucket!
+    @cost(weight: "10")
+  write(namespaceId: BigInt!, bucketId: BigInt!, message: MessageInput!): Message!
+    @cost(weight: "10")
+  forceRemoveNamespace(namespaceId: BigInt!): Boolean! @cost(weight: "10")
+  forceRemoveBucket(namespaceId: BigInt!, bucketId: BigInt!): Boolean!
+    @cost(weight: "10")
+  forceRemoveTag(bucketId: BigInt!, tag: String!): Boolean! @cost(weight: "10")
+  forceRemoveMessage(bucketId: BigInt!, messageId: BigInt!): Boolean!
+    @cost(weight: "10")
+  forceAddManager(namespaceId: BigInt!, manager: String!): NamespaceManager!
+    @cost(weight: "10")
+  addViewer(namespaceId: BigInt!, bucketId: BigInt!, viewer: String!): BucketViewer!
+    @cost(weight: "10")
+  removeViewer(namespaceId: BigInt!, bucketId: BigInt!, viewer: String!): Boolean!
+    @cost(weight: "10")
+}
+
+type Bucket {
+  id: ID! @cost(weight: "10")
+  bucketId: BigInt!
+  namespaceId: BigInt!
+  namespace: Namespace! @cost(weight: "10")
+  admins: [BucketAdmin!]! @cost(weight: "10")
+  contributors: [BucketContributor!]! @cost(weight: "10")
+  viewers: [BucketViewer!]! @cost(weight: "10")
+  tags: [Tag!]! @cost(weight: "10")
+  messages: [Message!]! @cost(weight: "10")
+  creator: String
+  name: String
+  category: String
+  properties: String
+  isWritable: Boolean!
+  encryptionKey: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type BucketAdmin {
+  id: ID! @cost(weight: "10")
+  bucketIdNumber: BigInt!
+  bucket: Bucket! @cost(weight: "10")
+  subjectId: String!
+  addedAt: DateTime!
+}
+
+"A connection to a list of items."
+type BucketAdminsConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [BucketAdminsEdge!]
+  "A flattened list of the nodes."
+  nodes: [BucketAdmin!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type BucketAdminsEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: BucketAdmin!
+}
+
+type BucketContributor {
+  id: ID! @cost(weight: "10")
+  bucketIdNumber: BigInt!
+  bucket: Bucket! @cost(weight: "10")
+  subjectId: String!
+  addedAt: DateTime!
+}
+
+"A connection to a list of items."
+type BucketContributorsConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [BucketContributorsEdge!]
+  "A flattened list of the nodes."
+  nodes: [BucketContributor!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type BucketContributorsEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: BucketContributor!
+}
+
+"A connection to a list of items."
+type BucketsConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [BucketsEdge!]
+  "A flattened list of the nodes."
+  nodes: [Bucket!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type BucketsEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Bucket!
+}
+
+type BucketViewer {
+  id: ID! @cost(weight: "10")
+  bucketIdNumber: BigInt!
+  bucket: Bucket! @cost(weight: "10")
+  viewerId: String!
+  addedAt: DateTime!
+}
+
+"A connection to a list of items."
+type BucketViewersConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [BucketViewersEdge!]
+  "A flattened list of the nodes."
+  nodes: [BucketViewer!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type BucketViewersEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: BucketViewer!
+}
+
+type Message {
+  id: ID! @cost(weight: "10")
+  messageId: BigInt!
+  messageIdNumber: BigInt! @cost(weight: "10")
+  bucket: Bucket! @cost(weight: "10")
+  contributor: String!
+  reference: String
+  tag: String
+  description: String
+  contentType: String
+  contentHash: String
+  properties: String
+  ipfsContent: String
+  createdAt: DateTime!
+}
+
+"A connection to a list of items."
+type MessagesConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [MessagesEdge!]
+  "A flattened list of the nodes."
+  nodes: [Message!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type MessagesEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Message!
+}
+
+type Namespace {
+  id: ID! @cost(weight: "10")
+  namespaceId: BigInt!
+  managers: [NamespaceManager!]! @cost(weight: "10")
+  buckets: [Bucket!]! @cost(weight: "10")
+  name: String
+  schemaUri: String
+  properties: String
+  creator: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type NamespaceManager {
+  id: ID! @cost(weight: "10")
+  namespaceId: BigInt!
+  namespace: Namespace! @cost(weight: "10")
+  manager: String!
+  addedAt: DateTime!
+}
+
+"A connection to a list of items."
+type NamespaceManagersConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [NamespaceManagersEdge!]
+  "A flattened list of the nodes."
+  nodes: [NamespaceManager!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type NamespaceManagersEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: NamespaceManager!
+}
+
+"A connection to a list of items."
+type NamespacesConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [NamespacesEdge!]
+  "A flattened list of the nodes."
+  nodes: [Namespace!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type NamespacesEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Namespace!
+}
+
+"Information about pagination in a connection."
+type PageInfo {
+  "Indicates whether more edges exist following the set defined by the clients arguments."
+  hasNextPage: Boolean!
+  "Indicates whether more edges exist prior the set defined by the clients arguments."
+  hasPreviousPage: Boolean!
+  "When paginating backwards, the cursor to continue."
+  startCursor: String
+  "When paginating forwards, the cursor to continue."
+  endCursor: String
+}
+
+type Tag {
+  id: ID! @cost(weight: "10")
+  bucketId: BigInt!
+  bucket: Bucket! @cost(weight: "10")
+  messageCount: Int @cost(weight: "10")
+  tagName: String!
+  creator: String
+  createdAt: DateTime!
+}
+
+type TagMessageCount {
+  id: ID! @cost(weight: "10")
+  bucketId: BigInt!
+  bucket: Bucket! @cost(weight: "10")
+  tagName: String!
+  count: Int!
+  updatedAt: DateTime!
+}
+
+"A connection to a list of items."
+type TagMessageCountsConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [TagMessageCountsEdge!]
+  "A flattened list of the nodes."
+  nodes: [TagMessageCount!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type TagMessageCountsEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: TagMessageCount!
+}
+
+"A connection to a list of items."
+type TagsConnection {
+  "Information to aid in pagination."
+  pageInfo: PageInfo!
+  "A list of edges."
+  edges: [TagsEdge!]
+  "A flattened list of the nodes."
+  nodes: [Tag!]
+  "Identifies the total count of items in the connection."
+  totalCount: Int! @cost(weight: "10")
+}
+
+"An edge in a connection."
+type TagsEdge {
+  "A cursor for use in pagination."
+  cursor: String!
+  "The item at the end of the edge."
+  node: Tag!
+}
+
+input BooleanOperationFilterInput {
+  eq: Boolean @cost(weight: "10")
+  neq: Boolean @cost(weight: "10")
+}
+
+input BucketAdminFilterInput {
+  and: [BucketAdminFilterInput!]
+  or: [BucketAdminFilterInput!]
+  bucketId: LongOperationFilterInput
+  bucket: BucketFilterInput
+  subjectId: StringOperationFilterInput
+  addedAt: DateTimeOperationFilterInput
+}
+
+input BucketAdminSortInput {
+  bucketId: SortEnumType @cost(weight: "10")
+  bucket: BucketSortInput @cost(weight: "10")
+  subjectId: SortEnumType @cost(weight: "10")
+  addedAt: SortEnumType @cost(weight: "10")
+}
+
+input BucketContributorFilterInput {
+  and: [BucketContributorFilterInput!]
+  or: [BucketContributorFilterInput!]
+  bucketId: LongOperationFilterInput
+  bucket: BucketFilterInput
+  subjectId: StringOperationFilterInput
+  addedAt: DateTimeOperationFilterInput
+}
+
+input BucketContributorSortInput {
+  bucketId: SortEnumType @cost(weight: "10")
+  bucket: BucketSortInput @cost(weight: "10")
+  subjectId: SortEnumType @cost(weight: "10")
+  addedAt: SortEnumType @cost(weight: "10")
+}
+
+input BucketFilterInput {
+  and: [BucketFilterInput!]
+  or: [BucketFilterInput!]
+  bucketId: LongOperationFilterInput
+  namespaceId: LongOperationFilterInput
+  namespace: NamespaceFilterInput
+  creator: StringOperationFilterInput
+  name: StringOperationFilterInput
+  category: StringOperationFilterInput
+  properties: StringOperationFilterInput
+  isWritable: BooleanOperationFilterInput
+  encryptionKey: StringOperationFilterInput
+  createdAt: DateTimeOperationFilterInput
+  updatedAt: DateTimeOperationFilterInput
+  admins: ListFilterInputTypeOfBucketAdminFilterInput
+  contributors: ListFilterInputTypeOfBucketContributorFilterInput
+  viewers: ListFilterInputTypeOfBucketViewerFilterInput
+  tags: ListFilterInputTypeOfTagFilterInput
+  messages: ListFilterInputTypeOfMessageFilterInput
+}
+
+input BucketMetadataInput {
+  name: String!
+  category: String!
+  properties: [PropertyInput!]
+}
+
+input BucketSortInput {
+  bucketId: SortEnumType @cost(weight: "10")
+  namespaceId: SortEnumType @cost(weight: "10")
+  namespace: NamespaceSortInput @cost(weight: "10")
+  creator: SortEnumType @cost(weight: "10")
+  name: SortEnumType @cost(weight: "10")
+  category: SortEnumType @cost(weight: "10")
+  properties: SortEnumType @cost(weight: "10")
+  isWritable: SortEnumType @cost(weight: "10")
+  encryptionKey: SortEnumType @cost(weight: "10")
+  createdAt: SortEnumType @cost(weight: "10")
+  updatedAt: SortEnumType @cost(weight: "10")
+}
+
+input BucketViewerFilterInput {
+  and: [BucketViewerFilterInput!]
+  or: [BucketViewerFilterInput!]
+  bucketId: LongOperationFilterInput
+  bucket: BucketFilterInput
+  viewerId: StringOperationFilterInput
+  addedAt: DateTimeOperationFilterInput
+}
+
+input BucketViewerSortInput {
+  bucketId: SortEnumType @cost(weight: "10")
+  bucket: BucketSortInput @cost(weight: "10")
+  viewerId: SortEnumType @cost(weight: "10")
+  addedAt: SortEnumType @cost(weight: "10")
+}
+
+input DateTimeOperationFilterInput {
+  eq: DateTime @cost(weight: "10")
+  neq: DateTime @cost(weight: "10")
+  in: [DateTime] @cost(weight: "10")
+  nin: [DateTime] @cost(weight: "10")
+  gt: DateTime @cost(weight: "10")
+  ngt: DateTime @cost(weight: "10")
+  gte: DateTime @cost(weight: "10")
+  ngte: DateTime @cost(weight: "10")
+  lt: DateTime @cost(weight: "10")
+  nlt: DateTime @cost(weight: "10")
+  lte: DateTime @cost(weight: "10")
+  nlte: DateTime @cost(weight: "10")
+}
+
+input IntOperationFilterInput {
+  eq: Int @cost(weight: "10")
+  neq: Int @cost(weight: "10")
+  in: [Int] @cost(weight: "10")
+  nin: [Int] @cost(weight: "10")
+  gt: Int @cost(weight: "10")
+  ngt: Int @cost(weight: "10")
+  gte: Int @cost(weight: "10")
+  ngte: Int @cost(weight: "10")
+  lt: Int @cost(weight: "10")
+  nlt: Int @cost(weight: "10")
+  lte: Int @cost(weight: "10")
+  nlte: Int @cost(weight: "10")
+}
+
+input ListFilterInputTypeOfBucketAdminFilterInput {
+  all: BucketAdminFilterInput @cost(weight: "10")
+  none: BucketAdminFilterInput @cost(weight: "10")
+  some: BucketAdminFilterInput @cost(weight: "10")
+  any: Boolean @cost(weight: "10")
+}
+
+input ListFilterInputTypeOfBucketContributorFilterInput {
+  all: BucketContributorFilterInput @cost(weight: "10")
+  none: BucketContributorFilterInput @cost(weight: "10")
+  some: BucketContributorFilterInput @cost(weight: "10")
+  any: Boolean @cost(weight: "10")
+}
+
+input ListFilterInputTypeOfBucketFilterInput {
+  all: BucketFilterInput @cost(weight: "10")
+  none: BucketFilterInput @cost(weight: "10")
+  some: BucketFilterInput @cost(weight: "10")
+  any: Boolean @cost(weight: "10")
+}
+
+input ListFilterInputTypeOfBucketViewerFilterInput {
+  all: BucketViewerFilterInput @cost(weight: "10")
+  none: BucketViewerFilterInput @cost(weight: "10")
+  some: BucketViewerFilterInput @cost(weight: "10")
+  any: Boolean @cost(weight: "10")
+}
+
+input ListFilterInputTypeOfMessageFilterInput {
+  all: MessageFilterInput @cost(weight: "10")
+  none: MessageFilterInput @cost(weight: "10")
+  some: MessageFilterInput @cost(weight: "10")
+  any: Boolean @cost(weight: "10")
+}
+
+input ListFilterInputTypeOfNamespaceManagerFilterInput {
+  all: NamespaceManagerFilterInput @cost(weight: "10")
+  none: NamespaceManagerFilterInput @cost(weight: "10")
+  some: NamespaceManagerFilterInput @cost(weight: "10")
+  any: Boolean @cost(weight: "10")
+}
+
+input ListFilterInputTypeOfTagFilterInput {
+  all: TagFilterInput @cost(weight: "10")
+  none: TagFilterInput @cost(weight: "10")
+  some: TagFilterInput @cost(weight: "10")
+  any: Boolean @cost(weight: "10")
+}
+
+input LongOperationFilterInput {
+  eq: Long @cost(weight: "10")
+  neq: Long @cost(weight: "10")
+  in: [Long] @cost(weight: "10")
+  nin: [Long] @cost(weight: "10")
+  gt: Long @cost(weight: "10")
+  ngt: Long @cost(weight: "10")
+  gte: Long @cost(weight: "10")
+  ngte: Long @cost(weight: "10")
+  lt: Long @cost(weight: "10")
+  nlt: Long @cost(weight: "10")
+  lte: Long @cost(weight: "10")
+  nlte: Long @cost(weight: "10")
+}
+
+input MessageFilterInput {
+  and: [MessageFilterInput!]
+  or: [MessageFilterInput!]
+  bucket: BucketFilterInput
+  messageId: LongOperationFilterInput
+  contributor: StringOperationFilterInput
+  reference: StringOperationFilterInput
+  tag: StringOperationFilterInput
+  description: StringOperationFilterInput
+  contentType: StringOperationFilterInput
+  contentHash: StringOperationFilterInput
+  properties: StringOperationFilterInput
+  ipfsContent: StringOperationFilterInput
+  createdAt: DateTimeOperationFilterInput
+}
+
+input MessageInput {
+  reference: String!
+  tag: String
+  ipfsContent: String
+  metadata: MessageMetadataInput!
+}
+
+input MessageMetadataInput {
+  description: String!
+  contentType: String!
+  contentHash: String!
+  properties: [PropertyInput!]
+}
+
+input MessageSortInput {
+  bucket: BucketSortInput @cost(weight: "10")
+  messageId: SortEnumType @cost(weight: "10")
+  contributor: SortEnumType @cost(weight: "10")
+  reference: SortEnumType @cost(weight: "10")
+  tag: SortEnumType @cost(weight: "10")
+  description: SortEnumType @cost(weight: "10")
+  contentType: SortEnumType @cost(weight: "10")
+  contentHash: SortEnumType @cost(weight: "10")
+  properties: SortEnumType @cost(weight: "10")
+  ipfsContent: SortEnumType @cost(weight: "10")
+  createdAt: SortEnumType @cost(weight: "10")
+}
+
+input NamespaceFilterInput {
+  and: [NamespaceFilterInput!]
+  or: [NamespaceFilterInput!]
+  namespaceId: LongOperationFilterInput
+  name: StringOperationFilterInput
+  schemaUri: StringOperationFilterInput
+  properties: StringOperationFilterInput
+  creator: StringOperationFilterInput
+  createdAt: DateTimeOperationFilterInput
+  updatedAt: DateTimeOperationFilterInput
+  managers: ListFilterInputTypeOfNamespaceManagerFilterInput
+  buckets: ListFilterInputTypeOfBucketFilterInput
+}
+
+input NamespaceManagerFilterInput {
+  and: [NamespaceManagerFilterInput!]
+  or: [NamespaceManagerFilterInput!]
+  namespaceId: LongOperationFilterInput
+  namespace: NamespaceFilterInput
+  manager: StringOperationFilterInput
+  addedAt: DateTimeOperationFilterInput
+}
+
+input NamespaceManagerSortInput {
+  namespaceId: SortEnumType @cost(weight: "10")
+  namespace: NamespaceSortInput @cost(weight: "10")
+  manager: SortEnumType @cost(weight: "10")
+  addedAt: SortEnumType @cost(weight: "10")
+}
+
+input NamespaceMetadataInput {
+  name: String!
+  schemaUri: String
+  properties: [PropertyInput!]
+}
+
+input NamespaceSortInput {
+  namespaceId: SortEnumType @cost(weight: "10")
+  name: SortEnumType @cost(weight: "10")
+  schemaUri: SortEnumType @cost(weight: "10")
+  properties: SortEnumType @cost(weight: "10")
+  creator: SortEnumType @cost(weight: "10")
+  createdAt: SortEnumType @cost(weight: "10")
+  updatedAt: SortEnumType @cost(weight: "10")
+}
+
+input PropertyInput {
+  key: String!
+  value: String!
+}
+
+input StringOperationFilterInput {
+  and: [StringOperationFilterInput!]
+  or: [StringOperationFilterInput!]
+  eq: String @cost(weight: "10")
+  neq: String @cost(weight: "10")
+  contains: String @cost(weight: "20")
+  ncontains: String @cost(weight: "20")
+  in: [String] @cost(weight: "10")
+  nin: [String] @cost(weight: "10")
+  startsWith: String @cost(weight: "20")
+  nstartsWith: String @cost(weight: "20")
+  endsWith: String @cost(weight: "20")
+  nendsWith: String @cost(weight: "20")
+}
+
+input TagFilterInput {
+  and: [TagFilterInput!]
+  or: [TagFilterInput!]
+  bucketId: LongOperationFilterInput
+  bucket: BucketFilterInput
+  tagName: StringOperationFilterInput
+  creator: StringOperationFilterInput
+  createdAt: DateTimeOperationFilterInput
+}
+
+input TagMessageCountFilterInput {
+  and: [TagMessageCountFilterInput!]
+  or: [TagMessageCountFilterInput!]
+  bucketId: LongOperationFilterInput
+  bucket: BucketFilterInput
+  tagName: StringOperationFilterInput
+  count: IntOperationFilterInput
+  updatedAt: DateTimeOperationFilterInput
+}
+
+input TagMessageCountSortInput {
+  bucketId: SortEnumType @cost(weight: "10")
+  bucket: BucketSortInput @cost(weight: "10")
+  tagName: SortEnumType @cost(weight: "10")
+  count: SortEnumType @cost(weight: "10")
+  updatedAt: SortEnumType @cost(weight: "10")
+}
+
+input TagSortInput {
+  bucketId: SortEnumType @cost(weight: "10")
+  bucket: BucketSortInput @cost(weight: "10")
+  tagName: SortEnumType @cost(weight: "10")
+  creator: SortEnumType @cost(weight: "10")
+  createdAt: SortEnumType @cost(weight: "10")
+}
+
+enum SortEnumType {
+  ASC
+  DESC
+}
+
+"A 64-bit integer serialized as a string, matching SubQuery's BigInt scalar."
+scalar BigInt
+
+"The `DateTime` scalar type represents a date and time with time zone offset information."
+scalar DateTime
+  @specifiedBy(url: "https://scalars.graphql.org/chillicream/date-time.html")
+
+"The `Long` scalar type represents a signed 64-bit integer."
+scalar Long
+  @specifiedBy(url: "https://scalars.graphql.org/chillicream/long.html")
+
+"The purpose of the `cost` directive is to define a `weight` for GraphQL types, fields, and arguments. Static analysis can use these weights when calculating the overall cost of a query or response."
+directive @cost(
+  "The `weight` argument defines what value to add to the overall cost for every appearance, or possible appearance, of a type, field, argument, etc."
+  weight: String!
+) on
+  | SCALAR
+  | OBJECT
+  | FIELD_DEFINITION
+  | ARGUMENT_DEFINITION
+  | ENUM
+  | INPUT_FIELD_DEFINITION
+
+"The purpose of the `@listSize` directive is to either inform the static analysis about the size of returned lists (if that information is statically available), or to point the analysis to where to find that information."
+directive @listSize(
+  "The `assumedSize` argument can be used to statically define the maximum length of a list returned by a field."
+  assumedSize: Int
+  "The `slicingArguments` argument can be used to define which of the field's arguments with numeric type are slicing arguments, so that their value determines the size of the list returned by that field. It may specify a list of multiple slicing arguments."
+  slicingArguments: [String!]
+  "The `slicingArgumentDefaultValue` argument can be used to define a default value for a slicing argument, which is used if the argument is not present in a query."
+  slicingArgumentDefaultValue: Int
+  "The `sizedFields` argument can be used to define that the value of the `assumedSize` argument or of a slicing argument does not affect the size of a list returned by a field itself, but that of a list returned by one of its sub-fields."
+  sizedFields: [String!]
+  "The `requireOneSlicingArgument` argument can be used to inform the static analysis that it should expect that exactly one of the defined slicing arguments is present in a query. If that is not the case (i.e., if none or multiple slicing arguments are present), the static analysis may throw an error."
+  requireOneSlicingArgument: Boolean = true
+) on FIELD_DEFINITION

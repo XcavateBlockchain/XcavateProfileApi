@@ -56,6 +56,48 @@ public class GraphQLSchemaTests
         return schema.ToString();
     }
 
+    /// <summary>
+    /// Writes the SDL to a version-controlled snapshot. Committing it makes schema changes visible
+    /// in review, and it is the input StrawberryShake generates the client from.
+    /// </summary>
+    [Test]
+    public async Task Schema_snapshot_is_up_to_date()
+    {
+        var sdl = await BuildSdlAsync();
+
+        var repositoryRoot = FindRepositoryRoot();
+        var snapshotPath = Path.Combine(repositoryRoot, "docs", "graphql", "schema.graphql");
+        Directory.CreateDirectory(Path.GetDirectoryName(snapshotPath)!);
+
+        var existing = File.Exists(snapshotPath) ? await File.ReadAllTextAsync(snapshotPath) : null;
+
+        if (existing != sdl)
+        {
+            await File.WriteAllTextAsync(snapshotPath, sdl);
+            Assert.That(existing, Is.Not.Null.And.Not.Empty,
+                $"schema snapshot was missing and has been written to {snapshotPath}; "
+                + "commit it and re-run");
+            Assert.Fail(
+                $"schema snapshot at {snapshotPath} was stale and has been refreshed. "
+                + "Review the diff and commit it.");
+        }
+
+        Assert.Pass();
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(TestContext.CurrentContext.TestDirectory);
+
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "XcavateProfile.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName
+            ?? throw new InvalidOperationException("Could not locate the repository root.");
+    }
+
     [Test]
     public async Task Schema_declares_all_nine_bucket_entities()
     {

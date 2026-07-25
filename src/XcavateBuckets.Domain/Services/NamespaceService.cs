@@ -123,26 +123,31 @@ public class NamespaceService(
     }
 
     /// <summary>Adds a manager without a caller check. Ports <c>force_add_manager</c>.</summary>
-    public async Task ForceAddManagerAsync(long namespaceId, string manager, CancellationToken ct)
+    public async Task<NamespaceManager> ForceAddManagerAsync(
+        long namespaceId, string manager, CancellationToken ct)
     {
         validator.Required(manager, validator.Options.MaxNameLen, "manager");
         await auth.EnsureNamespaceExistsAsync(namespaceId, ct);
 
-        var exists = await db.NamespaceManagers
-            .AnyAsync(m => m.NamespaceId == namespaceId && m.Manager == manager, ct);
+        var existing = await db.NamespaceManagers
+            .FirstOrDefaultAsync(m => m.NamespaceId == namespaceId && m.Manager == manager, ct);
 
-        if (exists)
+        if (existing is not null)
         {
-            return;
+            return existing;
         }
 
-        db.NamespaceManagers.Add(new NamespaceManager
+        var entity = new NamespaceManager
         {
             NamespaceId = namespaceId,
             Manager = manager,
             AddedAt = clock.GetUtcNow().UtcDateTime
-        });
+        };
+
+        db.NamespaceManagers.Add(entity);
         await db.SaveChangesAsync(ct);
+
+        return entity;
     }
 
     /// <summary>
