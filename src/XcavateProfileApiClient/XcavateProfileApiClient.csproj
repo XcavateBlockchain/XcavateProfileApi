@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="MessagePack" Version="3.1.8" />
+    <PackageReference Include="StrawberryShake.Server" Version="16.5.1" />
     <PackageReference Include="Substrate.NET.API" Version="0.9.24-rc6" />
   </ItemGroup>
 

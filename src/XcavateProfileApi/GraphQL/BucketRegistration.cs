@@ -54,5 +54,15 @@ public static class BucketRegistration
             .BindRuntimeType<long, BigIntType>()
             .AddFiltering()
             .AddSorting()
-            .AddErrorFilter<BucketErrorFilter>();
+            .AddErrorFilter<BucketErrorFilter>()
+            // Hot Chocolate 16 enforces query cost by default, and its budget is far too small for
+            // the nested reads this schema is meant to serve: the indexer's consumers routinely ask
+            // for buckets plus their admins, tags and messages in one request, and every unpaged
+            // relation list is costed at an assumed 50 items. Enforcement stays on as a
+            // denial-of-service ceiling, just with a limit that ordinary queries fit inside.
+            .ModifyCostOptions(options =>
+            {
+                options.MaxFieldCost = 100_000;
+                options.MaxTypeCost = 100_000;
+            });
 }

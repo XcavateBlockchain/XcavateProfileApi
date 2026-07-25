@@ -35,6 +35,28 @@ public class GraphQLIntegrationTests
     private static Account Bob() => NewAccount(0x22);
 
     [Test]
+    public async Task Client_signing_handler_is_accepted_by_the_server()
+    {
+        var alice = Alice();
+        await using var host = await GraphQLHost.StartAsync();
+        using var client = host.CreateSigningClient(alice);
+
+        var body = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["query"] = """mutation { createNamespace(metadata: { name: "via-handler" }) { id name creator } }"""
+        });
+
+        var response = await client.PostAsync(
+            "/graphql", new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+        var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        Assert.That(result.FirstErrorCode(), Is.Null, result.RootElement.ToString());
+        Assert.That(result.Data("createNamespace").GetProperty("creator").GetString(),
+            Is.EqualTo(alice.Value),
+            "SigningHttpMessageHandler and GraphQLSignatureMiddleware must agree on the payload");
+    }
+
+    [Test]
     public async Task Unsigned_query_succeeds()
     {
         await using var host = await GraphQLHost.StartAsync();

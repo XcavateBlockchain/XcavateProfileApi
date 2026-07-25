@@ -15,6 +15,7 @@ using XcavateProfile.Client;
 using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
+using XcavateProfileApiClient;
 
 namespace XcavateBuckets.Tests;
 
@@ -36,6 +37,24 @@ public sealed class GraphQLHost : IAsyncDisposable
     }
 
     public HttpClient Client { get; }
+
+    /// <summary>
+    /// An HttpClient that signs through the shipped <see cref="SigningHttpMessageHandler"/> rather
+    /// than this fixture's own signing code, so client and server are verified against each other.
+    /// </summary>
+    public HttpClient CreateSigningClient(Account account)
+    {
+        var handler = new SigningHttpMessageHandler(account)
+        {
+            InnerHandler = _host.GetTestServer().CreateHandler()
+        };
+
+        return new HttpClient(handler) { BaseAddress = new Uri("http://localhost") };
+    }
+
+    /// <summary>A raw handler onto the test server, for wrapping in the client's own pipeline.</summary>
+    public HttpMessageHandler CreateTestMessageHandler() =>
+        _host.GetTestServer().CreateHandler();
 
     public static async Task<GraphQLHost> StartAsync(params string[] adminAddresses)
     {

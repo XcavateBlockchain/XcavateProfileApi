@@ -1,0 +1,253 @@
+# Operations the generated XcavateBucketsClient exposes. Reads need no signature; the mutations go
+# through SigningHttpMessageHandler.
+
+query GetNamespaces($first: Int, $after: String) {
+  namespaces(first: $first, after: $after) {
+    totalCount
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      id
+      namespaceId
+      name
+      schemaUri
+      properties
+      creator
+      createdAt
+      managers {
+        id
+        manager
+        addedAt
+      }
+    }
+  }
+}
+
+query GetNamespaceById($id: ID!) {
+  namespace(id: $id) {
+    id
+    namespaceId
+    name
+    schemaUri
+    properties
+    creator
+    createdAt
+    buckets {
+      id
+      bucketId
+      name
+      category
+      isWritable
+    }
+  }
+}
+
+query GetBuckets($where: BucketFilterInput, $first: Int) {
+  buckets(where: $where, first: $first) {
+    totalCount
+    nodes {
+      id
+      bucketId
+      namespaceId
+      name
+      category
+      properties
+      isWritable
+      encryptionKey
+      creator
+      createdAt
+      admins {
+        subjectId
+      }
+      contributors {
+        subjectId
+      }
+      viewers {
+        viewerId
+      }
+      tags {
+        tagName
+        messageCount
+      }
+    }
+  }
+}
+
+query GetBucketById($id: ID!) {
+  bucket(id: $id) {
+    id
+    bucketId
+    namespaceId
+    name
+    category
+    isWritable
+    encryptionKey
+    namespace {
+      id
+      name
+    }
+    messages {
+      id
+      messageId
+      contributor
+      reference
+      tag
+      description
+      contentType
+      contentHash
+      ipfsContent
+      createdAt
+    }
+  }
+}
+
+query GetMessages($where: MessageFilterInput, $first: Int) {
+  messages(where: $where, first: $first) {
+    totalCount
+    nodes {
+      id
+      messageId
+      contributor
+      reference
+      tag
+      description
+      contentType
+      contentHash
+      ipfsContent
+      createdAt
+    }
+  }
+}
+
+mutation CreateNamespace($metadata: NamespaceMetadataInput!) {
+  createNamespace(metadata: $metadata) {
+    id
+    namespaceId
+    name
+    creator
+  }
+}
+
+mutation CreateBucket($namespaceId: BigInt!, $metadata: BucketMetadataInput!) {
+  createBucket(namespaceId: $namespaceId, metadata: $metadata) {
+    id
+    bucketId
+    name
+    category
+    isWritable
+  }
+}
+
+mutation AddManager($namespaceId: BigInt!, $newManager: String!) {
+  addManager(namespaceId: $namespaceId, newManager: $newManager) {
+    id
+    manager
+  }
+}
+
+mutation AddAdmin($namespaceId: BigInt!, $bucketId: BigInt!, $admin: String!) {
+  addAdmin(namespaceId: $namespaceId, bucketId: $bucketId, admin: $admin) {
+    id
+    subjectId
+  }
+}
+
+mutation AddContributor($namespaceId: BigInt!, $bucketId: BigInt!, $contributor: String!) {
+  addContributor(namespaceId: $namespaceId, bucketId: $bucketId, contributor: $contributor) {
+    id
+    subjectId
+  }
+}
+
+mutation AddViewer($namespaceId: BigInt!, $bucketId: BigInt!, $viewer: String!) {
+  addViewer(namespaceId: $namespaceId, bucketId: $bucketId, viewer: $viewer) {
+    id
+    viewerId
+  }
+}
+
+mutation CreateTag($bucketId: BigInt!, $newTag: String!) {
+  createTag(bucketId: $bucketId, newTag: $newTag) {
+    id
+    tagName
+    messageCount
+  }
+}
+
+mutation ResumeWriting($namespaceId: BigInt!, $bucketId: BigInt!, $newEncryptionKey: String!) {
+  resumeWriting(
+    namespaceId: $namespaceId
+    bucketId: $bucketId
+    newEncryptionKey: $newEncryptionKey
+  ) {
+    id
+    isWritable
+    encryptionKey
+  }
+}
+
+mutation PauseWriting($namespaceId: BigInt!, $bucketId: BigInt!) {
+  pauseWriting(namespaceId: $namespaceId, bucketId: $bucketId) {
+    id
+    isWritable
+  }
+}
+
+mutation RotateKey($namespaceId: BigInt!, $bucketId: BigInt!, $newEncryptionKey: String!) {
+  rotateKey(namespaceId: $namespaceId, bucketId: $bucketId, newEncryptionKey: $newEncryptionKey) {
+    id
+    isWritable
+    encryptionKey
+  }
+}
+
+mutation WriteMessage($namespaceId: BigInt!, $bucketId: BigInt!, $message: MessageInput!) {
+  write(namespaceId: $namespaceId, bucketId: $bucketId, message: $message) {
+    id
+    messageId
+    contributor
+    reference
+    tag
+  }
+}
+
+mutation RemoveContributor($namespaceId: BigInt!, $bucketId: BigInt!, $contributor: String!) {
+  removeContributor(namespaceId: $namespaceId, bucketId: $bucketId, contributor: $contributor)
+}
+
+mutation RemoveAdmin($namespaceId: BigInt!, $bucketId: BigInt!, $admin: String!) {
+  removeAdmin(namespaceId: $namespaceId, bucketId: $bucketId, admin: $admin)
+}
+
+mutation RemoveViewer($namespaceId: BigInt!, $bucketId: BigInt!, $viewer: String!) {
+  removeViewer(namespaceId: $namespaceId, bucketId: $bucketId, viewer: $viewer)
+}
+
+mutation RemoveManager($namespaceId: BigInt!, $oldManager: String!) {
+  removeManager(namespaceId: $namespaceId, oldManager: $oldManager)
+}
+
+mutation ForceRemoveMessage($bucketId: BigInt!, $messageId: BigInt!) {
+  forceRemoveMessage(bucketId: $bucketId, messageId: $messageId)
+}
+
+mutation ForceRemoveTag($bucketId: BigInt!, $tag: String!) {
+  forceRemoveTag(bucketId: $bucketId, tag: $tag)
+}
+
+mutation ForceRemoveBucket($namespaceId: BigInt!, $bucketId: BigInt!) {
+  forceRemoveBucket(namespaceId: $namespaceId, bucketId: $bucketId)
+}
+
+mutation ForceRemoveNamespace($namespaceId: BigInt!) {
+  forceRemoveNamespace(namespaceId: $namespaceId)
+}
+
+mutation ForceAddManager($namespaceId: BigInt!, $manager: String!) {
+  forceAddManager(namespaceId: $namespaceId, manager: $manager) {
+    id
+    manager
+  }
+}
