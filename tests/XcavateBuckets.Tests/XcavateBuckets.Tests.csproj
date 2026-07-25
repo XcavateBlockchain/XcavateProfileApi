@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\XcavateBuckets.Domain\XcavateBuckets.Domain.csproj" />
+    <ProjectReference Include="..\..\src\XcavateProfileApi\XcavateProfileApi.csproj" />
   </ItemGroup>
 
 </Project>

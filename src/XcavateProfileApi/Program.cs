@@ -1,7 +1,12 @@
 using DotNetEnv;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
+using XcavateBuckets.Domain;
+using XcavateBuckets.Domain.Data;
+using XcavateBuckets.Domain.Services;
 using XcavateProfileApi.Data;
+using XcavateProfileApi.GraphQL;
+using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Services;
 using XcavateProfileApi.Swagger;
@@ -41,6 +46,43 @@ builder.Services.AddSwaggerGen(c =>
 var connectionString = builder.Configuration.GetConnectionString("Default");
 builder.Services.AddDbContext<ProfileDbContext>(options =>
     options.UseNpgsql(connectionString));
+
+// Bucket pallet port: same database, separate migrations history so the two contexts stay independent
+builder.Services.AddDbContext<BucketDbContext>(options =>
+    options.UseNpgsql(connectionString, npgsql =>
+        npgsql.MigrationsHistoryTable(BucketDbContext.MigrationsHistoryTable)));
+
+builder.Services.AddSingleton(new BucketOptions());
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddScoped<InputValidator>();
+builder.Services.AddScoped<AuthorizationService>();
+builder.Services.AddScoped<NamespaceService>();
+builder.Services.AddScoped<BucketService>();
+builder.Services.AddScoped<MembershipService>();
+builder.Services.AddScoped<TagService>();
+builder.Services.AddScoped<MessageService>();
+
+builder.Services.AddScoped<CallerContext>();
+builder.Services.AddScoped<ICallerContext>(sp => sp.GetRequiredService<CallerContext>());
+
+builder.Services
+    .AddGraphQLServer()
+    .AddQueryType<BucketQueries>()
+    .AddMutationType<BucketMutations>()
+    .AddType<BigIntType>()
+    .AddType<NamespaceType>()
+    .AddType<NamespaceManagerType>()
+    .AddType<BucketType>()
+    .AddType<BucketAdminType>()
+    .AddType<BucketContributorType>()
+    .AddType<BucketViewerType>()
+    .AddType<TagType>()
+    .AddType<TagMessageCountType>()
+    .AddType<MessageType>()
+    .BindRuntimeType<long, BigIntType>()
+    .AddFiltering()
+    .AddSorting()
+    .AddErrorFilter<BucketErrorFilter>();
 
 // Configure AWS S3 client for Hetzner Object Storage
 builder.Services.AddSingleton<IS3Service, S3Service>(sp =>
@@ -93,10 +135,14 @@ app.Use(async (context, next) =>
 
 app.UseAuthorization();
 
+// Must run before MapGraphQL so the caller is resolved by the time resolvers execute.
+app.UseMiddleware<GraphQLSignatureMiddleware>();
+
 // Apply migrations on startup with retry
 using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<ProfileDbContext>();
+    var bucketContext = scope.ServiceProvider.GetRequiredService<BucketDbContext>();
     var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
     var maxRetries = 5;
@@ -108,6 +154,7 @@ using (var scope = app.Services.CreateScope())
         {
             logger.LogInformation("Applying database migrations (attempt {Attempt}/{MaxRetries})", attempt, maxRetries);
             context.Database.Migrate();
+            bucketContext.Database.Migrate();
             logger.LogInformation("Database migrations completed successfully");
             break;
         }
@@ -129,6 +176,7 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapControllers();
+app.MapGraphQL();
 
 // Add health check endpoint
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))

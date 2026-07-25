@@ -7,6 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="HotChocolate.AspNetCore" Version="16.5.1" />
+    <PackageReference Include="HotChocolate.Data.EntityFramework" Version="16.5.1" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
@@ -21,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\XcavateProfileApiClient\XcavateProfileApiClient.csproj" />
+    <ProjectReference Include="..\XcavateBuckets.Domain\XcavateBuckets.Domain.csproj" />
   </ItemGroup>
 
 </Project>
