@@ -1,8 +1,15 @@
 using System.Linq;
 using System.Text.Json;
+using Solnet.Wallet;
 using Substrate.NET.Wallet.Keyring;
+using Substrate.NetApi;
 using Substrate.NetApi.Model.Types;
+using XcavateProfile.Client;
+using XcavateProfileApiClient.Signing;
 using static Substrate.NetApi.Mnemonic;
+using Account = Substrate.NetApi.Model.Types.Account;
+using SolMnemonic = Solnet.Wallet.Bip39.Mnemonic;
+using SolWordList = Solnet.Wallet.Bip39.WordList;
 
 namespace XcavateBuckets.Tests;
 
@@ -313,5 +320,75 @@ public class GraphQLIntegrationTests
                                              """, alice);
 
         Assert.That(result.FirstErrorCode(), Is.EqualTo("BUCKET_IS_LOCKED"));
+    }
+
+    private static Solnet.Wallet.Account SolanaAccount(byte entropyFill)
+    {
+        var mnemonic = string.Join(
+            " ", MnemonicFromEntropy(Enumerable.Repeat(entropyFill, 16).ToArray(), BIP39Wordlist.English));
+
+        return new Wallet(new SolMnemonic(mnemonic, SolWordList.English)).Account;
+    }
+
+    /// <summary>
+    /// End-to-end proof through the shipped handler and the shipped middleware: the Solana signer
+    /// emits base58, so this also exercises the base58 branch of SignatureEncoding.
+    /// </summary>
+    [Test]
+    public async Task Solana_signing_handler_is_accepted_by_the_server()
+    {
+        var solana = SolanaAccount(0x51);
+        await using var host = await GraphQLHost.StartAsync();
+        using var client = host.CreateSigningClient(new SolanaRequestSigner(solana));
+
+        var body = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["query"] = """mutation { createNamespace(metadata: { name: "via-solana" }) { id name creator } }"""
+        });
+
+        var response = await client.PostAsync(
+            "/graphql", new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+        var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        Assert.That(result.FirstErrorCode(), Is.Null, result.RootElement.ToString());
+        Assert.That(result.Data("createNamespace").GetProperty("creator").GetString(),
+            Is.EqualTo(solana.PublicKey.Key),
+            "the Solana address must become the authenticated caller");
+    }
+
+    [Test]
+    public async Task Solana_signed_mutation_over_a_tampered_body_is_rejected()
+    {
+        var solana = SolanaAccount(0x52);
+        await using var host = await GraphQLHost.StartAsync();
+
+        // Sign one document, send another.
+        var signer = new SolanaRequestSigner(solana);
+        var timestamp = DateTime.UtcNow;
+        var signedBody = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["query"] = """mutation { createNamespace(metadata: { name: "signed" }) { id } }"""
+        });
+        var sentBody = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["query"] = """mutation { createNamespace(metadata: { name: "sent" }) { id } }"""
+        });
+
+        var bodyHash = Utils.Bytes2HexString(CryptoHelper.Hash(signedBody));
+        var signature = await signer.SignAsync(
+            $"POST:/graphql:{bodyHash}:{timestamp.ToUniversalTime():o}");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/graphql")
+        {
+            Content = new StringContent(sentBody, System.Text.Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("X-SS58-Address", signer.Address);
+        request.Headers.Add("X-Signature", signer.EncodeSignature(signature));
+        request.Headers.Add("X-Timestamp", timestamp.ToUniversalTime().ToString("o"));
+
+        var response = await host.Client.SendAsync(request);
+        var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        Assert.That(result.FirstErrorCode(), Is.EqualTo("INVALID_SIGNATURE"));
     }
 }
