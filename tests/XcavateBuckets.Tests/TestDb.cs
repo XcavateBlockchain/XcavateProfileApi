@@ -42,6 +42,9 @@ public sealed class TestDb : IDisposable
         Auth = new AuthorizationService(Db);
         Namespaces = new NamespaceService(Db, Auth, Validator, Clock);
         Buckets = new BucketService(Db, Auth, Validator, Clock);
+        Memberships = new MembershipService(Db, Auth, Validator, Clock);
+        Tags = new TagService(Db, Auth, Validator, Clock);
+        Messages = new MessageService(Db, Auth, Validator, Clock);
     }
 
     public BucketDbContext Db { get; }
@@ -57,6 +60,12 @@ public sealed class TestDb : IDisposable
     public NamespaceService Namespaces { get; }
 
     public BucketService Buckets { get; }
+
+    public MembershipService Memberships { get; }
+
+    public TagService Tags { get; }
+
+    public MessageService Messages { get; }
 
     /// <summary>Inserts a namespace directly, bypassing the service layer.</summary>
     public async Task<Namespace> SeedNamespaceAsync(params string[] managers)
