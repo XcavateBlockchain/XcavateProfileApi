@@ -242,7 +242,7 @@ type Message {
   contentType: String
   contentHash: String              # 32-byte hex
   properties: String
-  ipfsContent: String              # see "IPFS content resolution"
+  ipfsContent: String              # text content, stored as supplied at write time
   createdAt: DateTime!
 }
 ```
@@ -310,6 +310,7 @@ input MessageMetadataInput {
 input MessageInput {
   reference: String!
   tag: String
+  ipfsContent: String              # optional; stored verbatim, no pallet equivalent
   metadata: MessageMetadataInput!
 }
 
@@ -385,9 +386,9 @@ Each mutation runs inside a single database transaction, so multi-table writes �
 
 ### Input validation
 
-The pallet's `BoundedVec`/`BoundedBTreeMap` limits become validated options on
-`BucketOptions`, with these defaults (to be reconciled against the runtime's actual `Config`
-values):
+The pallet's `BoundedVec`/`BoundedBTreeMap` limits become validated options on `BucketOptions`.
+Off-chain there is no weight budget to protect, so these are deliberately generous sanity bounds
+rather than mirrors of the runtime's constants:
 
 | Option | Pallet constant | Default |
 |---|---|---|
@@ -398,6 +399,8 @@ values):
 | `MaxPropertyKeyLen` | `T::MaxPropertyKeyLen` | 64 |
 | `MaxPropertyValueLen` | `T::MaxPropertyValueLen` | 512 |
 | `MaxTagLen` | `T::MaxStringInputLengthTag` | 64 |
+| `MaxReferenceLen` | `T::Reference` (runtime-defined type, not a length constant) | 512 |
+| `MaxIpfsContentLen` | — (no pallet equivalent) | 1048576 (1 MiB) |
 
 Fixed-width hex fields, from `[u8; 32]` in `types.rs`:
 
@@ -463,16 +466,16 @@ API-layer codes: `UNAUTHORIZED` (missing or invalid signature), `INVALID_SIGNATU
 
 Not ported: `UNABLE_TO_PAY_FEES` — there are no fees off-chain.
 
-## IPFS content resolution
+## Message content
 
-`Message.ipfsContent` exists for schema compatibility. The indexer fetched message content from
-IPFS and stored the text for `text/plain` messages only, leaving it null otherwise or on fetch
-failure.
+`Message.ipfsContent` is a plain stored column. The indexer had to fetch it from IPFS because the
+chain only carried a reference; here the caller supplies it on `write` via
+`MessageInput.ipfsContent` and the API stores it verbatim. Null when not supplied. The API makes no
+outbound IPFS requests and does not validate that the content matches `reference` or `contentHash`.
 
-Here it resolves lazily through an optional gateway: when `BucketOptions.IpfsGatewayUrl` is
-configured and the message's `contentType` is `text/plain`, the resolver fetches
-`{gateway}/{reference}` and returns the text; otherwise, or on any fetch failure, it returns null.
-Unconfigured gateway means the field is always null and no outbound requests are made.
+`MessageInput.ipfsContent` has no pallet equivalent — the pallet's `MessageInput` carries only
+`reference`, `tag` and `metadata_input`. Messages are immutable once written (the pallet has no
+update extrinsic), so `ipfsContent` is set at write time or never.
 
 ## Testing
 
@@ -489,8 +492,3 @@ NUnit, matching the repo's existing test project.
    alongside the existing `ProfileApiTests`, covering the happy path per mutation plus rejection
    cases: missing headers, bad signature, stale timestamp, non-admin calling a `force*` mutation,
    and a non-manager/non-admin/non-contributor calling role-gated mutations.
-
-## Open items
-
-- The `MaxNameLen`/`MaxUriLen`/etc. defaults above are guesses; reconcile them with the Xcavate
-  runtime's `pallet_bucket::Config` before release.
