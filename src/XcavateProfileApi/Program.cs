@@ -52,37 +52,8 @@ builder.Services.AddDbContext<BucketDbContext>(options =>
     options.UseNpgsql(connectionString, npgsql =>
         npgsql.MigrationsHistoryTable(BucketDbContext.MigrationsHistoryTable)));
 
-builder.Services.AddSingleton(new BucketOptions());
-builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddScoped<InputValidator>();
-builder.Services.AddScoped<AuthorizationService>();
-builder.Services.AddScoped<NamespaceService>();
-builder.Services.AddScoped<BucketService>();
-builder.Services.AddScoped<MembershipService>();
-builder.Services.AddScoped<TagService>();
-builder.Services.AddScoped<MessageService>();
-
-builder.Services.AddScoped<CallerContext>();
-builder.Services.AddScoped<ICallerContext>(sp => sp.GetRequiredService<CallerContext>());
-
-builder.Services
-    .AddGraphQLServer()
-    .AddQueryType<BucketQueries>()
-    .AddMutationType<BucketMutations>()
-    .AddType<BigIntType>()
-    .AddType<NamespaceType>()
-    .AddType<NamespaceManagerType>()
-    .AddType<BucketType>()
-    .AddType<BucketAdminType>()
-    .AddType<BucketContributorType>()
-    .AddType<BucketViewerType>()
-    .AddType<TagType>()
-    .AddType<TagMessageCountType>()
-    .AddType<MessageType>()
-    .BindRuntimeType<long, BigIntType>()
-    .AddFiltering()
-    .AddSorting()
-    .AddErrorFilter<BucketErrorFilter>();
+builder.Services.AddBucketDomain();
+builder.Services.AddBucketGraphQL();
 
 // Configure AWS S3 client for Hetzner Object Storage
 builder.Services.AddSingleton<IS3Service, S3Service>(sp =>
