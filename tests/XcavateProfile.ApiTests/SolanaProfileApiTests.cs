@@ -40,7 +40,7 @@ public class SolanaProfileApiTests
         {
             await client.DeleteProfileAsync(signer.Address, signer);
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
             // 404 — nothing to clean up.
         }
@@ -134,7 +134,13 @@ public class SolanaProfileApiTests
         Assert.That(url, Does.Contain("solana-test.png"));
     }
 
-    /// <summary>A Solana address in ADMIN_ADDRESSES gets the same privileges as an SS58 one.</summary>
+    /// <summary>
+    /// A Solana address in ADMIN_ADDRESSES gets the same privileges as an SS58 one. This test
+    /// depends on an environment fact the compiler can't check: the server's ADMIN_ADDRESSES
+    /// must contain SolanaAccounts.Admin's address, and the API must have been restarted after
+    /// that was set, since Env.Load (Program.cs) only runs once at startup. See the 403 handling
+    /// below for what that looks like when it is not the case.
+    /// </summary>
     [Test]
     public async Task Solana_admin_can_update_another_users_profileAsync()
     {
@@ -151,9 +157,19 @@ public class SolanaProfileApiTests
         await _client!.CreateProfileAsync(profile, user);
 
         profile.Bio = "Edited by a Solana admin";
-        var result = await _client.UpdateProfileAsync(user.Address, profile, admin);
 
-        Assert.That(result.Bio, Is.EqualTo("Edited by a Solana admin"));
+        try
+        {
+            var result = await _client.UpdateProfileAsync(user.Address, profile, admin);
+            Assert.That(result.Bio, Is.EqualTo("Edited by a Solana admin"));
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Forbidden)
+        {
+            Assert.Fail(
+                $"Got 403 Forbidden updating another user's profile as a Solana admin ({admin.Address}). "
+                + "This test requires the server's ADMIN_ADDRESSES to contain that address, and the API "
+                + "must be restarted after changing .env, since Env.Load only runs once at startup.");
+        }
     }
 
     /// <summary>A Solana caller must not be able to write someone else's profile.</summary>
