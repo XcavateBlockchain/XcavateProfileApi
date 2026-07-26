@@ -1,7 +1,9 @@
 # Bucket Pallet → C# GraphQL API — Design
 
 **Date:** 2026-07-25
-**Status:** Approved
+**Status:** Implemented — shipped in `src/XcavateBuckets.Domain` and
+`src/XcavateProfileApi/GraphQL`, merged to `master` in `db70f6c`. This document is kept as the
+design record; the current API surface is described in [README.md](../../../README.md).
 
 ## Goal
 

@@ -10,6 +10,9 @@ This document explains the Sr25519 authentication system, Blake2 hashing impleme
 5. [Signed Payload Format](#signed-payload-format)
 6. [Admin Authorization](#admin-authorization)
 7. [Security Considerations](#security-considerations)
+8. [Debugging Signatures](#debugging-signatures)
+9. [API Format Examples](#api-format-examples)
+10. [Troubleshooting](#troubleshooting)
 
 ## Overview
 
@@ -207,7 +210,15 @@ Admins have elevated privileges:
 
 - **Can update any profile** (not just their own)
 - **Can delete any profile** (not just their own)
+- **Can upload an image to any profile**
 - **Bypass ownership verification**
+
+The same list also gates the bucket GraphQL API. The five `force*` mutations
+(`forceRemoveNamespace`, `forceRemoveBucket`, `forceRemoveTag`, `forceRemoveMessage`,
+`forceAddManager`) carry `[RequireAdmin]` and stand in for the pallet's `ForceOrigin`; a signed
+but non-admin caller gets a `FORBIDDEN` error. Every other bucket mutation authorizes on the
+caller's role within the namespace or bucket — manager, admin, contributor or viewer — not on this
+list. See [README.md](README.md#graphql-api--buckets).
 
 ### Admin Check Implementation
 
@@ -324,28 +335,6 @@ and Solana signatures and validates them through the same `SignatureValidator` t
 11. Server checks timestamp (within 5 minutes)
 12. Server authorizes based on ownership or admin status
 ```
-
-## Migration Guide
-
-### From JWT to Signature-based Auth
-
-1. **Remove JWT middleware**
-   - Remove token validation
-   - Remove token refresh logic
-
-2. **Add Signature Validator**
-   - Implement signature verification
-   - Add header parsing middleware
-
-3. **Update Client Code**
-   - Generate signatures for each request
-   - Add X-* headers
-   - Compute body hash
-
-4. **Test Thoroughly**
-   - Verify signature generation/verification
-   - Test replay attack prevention
-   - Test admin authorization
 
 ## Troubleshooting
 

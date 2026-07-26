@@ -1,19 +1,8 @@
-## Ignore Visual Studio temporary files, build results, and archives
-## See: https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
-
-## Visual Studio cache/options directory
-.vs/
-.vscode/
-*.user
-*.obj
-*.bin
-*.log
-*.tmp
-*.tmp/
-*.suo
-*.sln.docstates
+## Based on https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
 ## Build results
+[Bb]in/
+[Oo]bj/
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
@@ -24,77 +13,62 @@ x86/
 [Aa][Rr][Mm]/
 [Aa][Rr][Mm]64/
 bld/
-[Bb]in/
-[Oo]bj/
+artifacts/
+
+## IDE / editor state
+.vs/
+.vscode/
+.idea/
+*.user
+*.csproj.user
+*.csproj.user.*
+*.sln.user
+*.suo
+*.sln.docstates
+*.swp
+*.swo
+*~
+
+## Transient files
+*.log
 [Ll]og/
 [Ll]ogs/
-
-## Visual Studio 2015/2017 cache/options directory
-.vs/
-*.Cache
 *.tmp
+*.tmp/
 *.temp
-*.aps
 *.pid
-*.sbr
-*.bsc
-
-## MSTest test results
-*.mht
-*.mht
-*.trx
-*.html
-*.deployment
+*.Cache
 
 ## Test results
+## `dotnet test` writes here by default; run_e2e_tests.sh redirects into test-reports/.
+TestResults/
+test-reports/
+*.trx
+*.testresults
+_testresult*
 *.coverage
-*.nunit
-*.xml
+*.coveragexml
+cobertura.xml
+coverage/
+.dotnet-coverage/
 
-## Node.js
+## NuGet
+*.nupkg
+*.snupkg
+**/packages/
+project.lock.json
+project.fragment.lock.json
+
+## Node.js (GraphQL tooling)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-## NuGet Packages
-*.nupkg
-*.snupkg
-**/packages/
-*.nuget.props
-*.nuget.targets
-project.lock.json
-project.fragment.lock.json
-artifacts/
-
-## Docker
-*.env
+## Secrets — real configuration never gets committed; .env.example is the template.
 .env
-
-## dotnet-coverage
-.dotnet-coverage/
-
-## IDE
-.idea/
-*.swp
-*.swo
-*~
+*.env
 
 ## OS
 .DS_Store
 Thumbs.db
-
-## Local Settings
-*.csproj.user
-*.csproj.user.*
-*.sln.user
-
-## Coverage
-cobertura.xml
-coverage/
-*.coveragexml
-
-## Test Results
-*.trx
-*.testresults
-_testresult*

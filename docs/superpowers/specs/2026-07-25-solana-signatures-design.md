@@ -1,7 +1,9 @@
 # Solana Signature Support — Design
 
 **Date:** 2026-07-25
-**Status:** Approved
+**Status:** Implemented — shipped in `src/XcavateProfileApiClient/Signing`, with dual-scheme
+dispatch in `SignatureValidator`. This document is kept as the design record; the current wire
+format is described in [README.md](../../../README.md#authentication).
 
 ## Goal
 

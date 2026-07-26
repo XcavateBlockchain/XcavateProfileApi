@@ -31,11 +31,7 @@ public static class CryptoHelper
     /// <returns>The signature as a byte array</returns>
     public static async Task<byte[]> SignAsync(string input, IAccount account)
     {
-        Console.WriteLine($"Signing input: {input}");
-
         var hash = Hash(input);
-
-        Console.WriteLine($"Signing input: {Utils.Bytes2HexString(hash)}");
 
         var signature = await account.SignAsync(hash);
 
@@ -51,8 +47,6 @@ public static class CryptoHelper
     /// <returns>True if the signature is valid</returns>
     public static bool VerifySignature(string input, byte[] signature, string address)
     {
-        Console.WriteLine($"Verifying signature for input: {input}");
-
         var hash = Hash(input);
 
         return VerifySignature(hash, signature, address);
@@ -60,8 +54,6 @@ public static class CryptoHelper
 
     public static bool VerifySignature(byte[] input, byte[] signature, string address)
     {
-        Console.WriteLine($"Verifying signature for input: {Utils.Bytes2HexString(input)}");
-
         var publicKey = Substrate.NetApi.Utils.GetPublicKeyFrom(address);
 
         var verification = Sr25519v091.Verify(signature, publicKey, input);
