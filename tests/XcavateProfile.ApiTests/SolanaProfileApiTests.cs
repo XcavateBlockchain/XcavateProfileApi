@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using System;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
 using XcavateProfile.Client;
@@ -173,7 +174,9 @@ public class SolanaProfileApiTests
 
         profile.Nickname = "hacked";
 
-        Assert.ThrowsAsync<HttpRequestException>(
+        var ex = Assert.ThrowsAsync<HttpRequestException>(
             async () => await _client.UpdateProfileAsync(owner.Address, profile, attacker));
+
+        Assert.That(ex!.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden));
     }
 }
