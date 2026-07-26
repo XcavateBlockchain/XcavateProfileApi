@@ -4,6 +4,7 @@ WORKDIR /app
 # Copy project files
 COPY src/XcavateProfileApi/XcavateProfileApi.csproj src/XcavateProfileApi/
 COPY src/XcavateProfileApiClient/XcavateProfileApiClient.csproj src/XcavateProfileApiClient/
+COPY src/XcavateBuckets.Domain/XcavateBuckets.Domain.csproj src/XcavateBuckets.Domain/
 COPY tests/XcavateProfile.ApiTests/XcavateProfile.ApiTests.csproj tests/XcavateProfile.ApiTests/
 
 # Restore dependencies
@@ -12,6 +13,8 @@ RUN dotnet restore src/XcavateProfileApi/XcavateProfileApi.csproj
 # Copy remaining source code
 COPY src/ src/
 COPY tests/ tests/
+# StrawberryShake codegen reads this schema via src/XcavateProfileApiClient/Buckets/.graphqlrc.json
+COPY docs/graphql/ docs/graphql/
 
 # Build the project
 RUN dotnet build src/XcavateProfileApi/XcavateProfileApi.csproj -c Release --no-restore
