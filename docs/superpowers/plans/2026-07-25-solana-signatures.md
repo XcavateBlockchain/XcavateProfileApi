@@ -1,5 +1,11 @@
 # Solana Signature Support Implementation Plan
 
+> **Status: COMPLETE — this plan has been fully executed.** The work landed on
+> `feature/solana-signatures` across `a24cf93`..`0c808ce`. The unchecked `- [ ]` boxes below were
+> tracked in the implementing session, not in this file, so do not read them as outstanding work.
+> This document is retained as the implementation record; for the wire format as it now stands see
+> [README.md](../../../README.md#authentication).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let callers authenticate against XcavateProfileApi with a Solana keypair (ed25519, base58 address) in addition to the existing sr25519/SS58 scheme, on both the REST and GraphQL surfaces.

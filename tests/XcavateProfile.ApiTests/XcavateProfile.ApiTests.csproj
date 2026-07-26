@@ -7,10 +7,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="NUnit" Version="4.2.2" />
-    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <!-- Keep these aligned with tests/XcavateBuckets.Tests so both suites run on one test host. -->
+    <PackageReference Include="NUnit" Version="4.3.2" />
+    <PackageReference Include="NUnit3TestAdapter" Version="5.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.0" />
     <PackageReference Include="Substrate.NET.Wallet" Version="1.0.8" />
+    <PackageReference Include="Solnet.Wallet" Version="6.1.0" />
   </ItemGroup>
 
   <ItemGroup>

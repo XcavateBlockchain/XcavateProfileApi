@@ -16,6 +16,7 @@ using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApiClient;
+using XcavateProfileApiClient.Signing;
 
 namespace XcavateBuckets.Tests;
 
@@ -42,9 +43,12 @@ public sealed class GraphQLHost : IAsyncDisposable
     /// An HttpClient that signs through the shipped <see cref="SigningHttpMessageHandler"/> rather
     /// than this fixture's own signing code, so client and server are verified against each other.
     /// </summary>
-    public HttpClient CreateSigningClient(Account account)
+    public HttpClient CreateSigningClient(Account account) =>
+        CreateSigningClient(new SubstrateRequestSigner(account));
+
+    public HttpClient CreateSigningClient(IRequestSigner signer)
     {
-        var handler = new SigningHttpMessageHandler(account)
+        var handler = new SigningHttpMessageHandler(signer)
         {
             InnerHandler = _host.GetTestServer().CreateHandler()
         };
@@ -107,10 +111,15 @@ public sealed class GraphQLHost : IAsyncDisposable
     /// </summary>
     public Task<JsonDocument> SignedAsync(
         string query, Account signer, object? variables = null, DateTime? timestamp = null) =>
+        SendAsync(query, variables, new SubstrateRequestSigner(signer), timestamp);
+
+    /// <summary>The same, for any scheme.</summary>
+    public Task<JsonDocument> SignedAsync(
+        string query, IRequestSigner signer, object? variables = null, DateTime? timestamp = null) =>
         SendAsync(query, variables, signer, timestamp);
 
     private async Task<JsonDocument> SendAsync(
-        string query, object? variables, Account? signer, DateTime? timestamp = null)
+        string query, object? variables, IRequestSigner? signer, DateTime? timestamp = null)
     {
         var payload = variables is null
             ? new Dictionary<string, object> { ["query"] = query }
@@ -129,10 +138,10 @@ public sealed class GraphQLHost : IAsyncDisposable
             var ts = timestamp ?? DateTime.UtcNow;
             var bodyHash = Utils.Bytes2HexString(CryptoHelper.Hash(body));
             var signed = $"POST:/graphql:{bodyHash}:{ts.ToUniversalTime():o}";
-            var signature = await CryptoHelper.SignAsync(signed, signer);
+            var signature = await signer.SignAsync(signed);
 
-            request.Headers.Add("X-SS58-Address", signer.Value);
-            request.Headers.Add("X-Signature", Utils.Bytes2HexString(signature));
+            request.Headers.Add("X-SS58-Address", signer.Address);
+            request.Headers.Add("X-Signature", signer.EncodeSignature(signature));
             request.Headers.Add("X-Timestamp", ts.ToUniversalTime().ToString("o"));
         }
 

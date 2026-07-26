@@ -11,7 +11,7 @@ namespace XcavateProfileApi.GraphQL.Auth;
 public sealed class RequireSignatureAttribute : ObjectFieldDescriptorAttribute
 {
     protected override void OnConfigure(
-        IDescriptorContext context, IObjectFieldDescriptor descriptor, MemberInfo member)
+        IDescriptorContext context, IObjectFieldDescriptor descriptor, MemberInfo? member)
     {
         descriptor.Use(next => async middlewareContext =>
         {
@@ -31,7 +31,7 @@ public sealed class RequireSignatureAttribute : ObjectFieldDescriptorAttribute
 public sealed class RequireAdminAttribute : ObjectFieldDescriptorAttribute
 {
     protected override void OnConfigure(
-        IDescriptorContext context, IObjectFieldDescriptor descriptor, MemberInfo member)
+        IDescriptorContext context, IObjectFieldDescriptor descriptor, MemberInfo? member)
     {
         descriptor.Use(next => async middlewareContext =>
         {

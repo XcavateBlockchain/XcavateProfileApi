@@ -1,5 +1,11 @@
 # Bucket Pallet GraphQL API Implementation Plan
 
+> **Status: COMPLETE — this plan has been fully executed.** The work landed on `master` in
+> `db70f6c` (`Merge branch 'feature/bucket-graphql-api'`). The unchecked `- [ ]` boxes below were
+> tracked in the implementing session, not in this file, so do not read them as outstanding work.
+> This document is retained as the implementation record; for the API as it now stands see
+> [README.md](../../../README.md#graphql-api--buckets).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Port Substrate `pallet-bucket` into a standalone C# Hot Chocolate GraphQL API that owns its data in PostgreSQL, serves the SubQuery indexer's entity shapes for reads, and gates 20 mutations behind the repo's existing sr25519 header auth.

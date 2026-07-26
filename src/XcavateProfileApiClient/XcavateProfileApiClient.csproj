@@ -8,9 +8,21 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MessagePack" Version="3.1.8" />
+    <PackageReference Include="Solnet.Wallet" Version="6.1.0" />
     <PackageReference Include="StrawberryShake.Server" Version="16.5.1" />
-    <PackageReference Include="Substrate.NET.API" Version="0.9.24-rc6" />
+    <PackageReference Include="Substrate.NET.API" Version="0.9.24" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      No code here uses MessagePack. This reference exists only to raise the version that
+      Substrate.NET.API drags in transitively: it asks for MessagePack 2.5.108, which carries
+      two high and ten moderate advisories. Because this project is the package every consumer
+      references, pinning here also fixes the resolved version for them. Do not remove it as
+      "unused" — deleting it silently reinstates all twelve advisories solution-wide.
+      Verify with "dotnet list" on the solution, asking for vulnerable transitive packages.
+    -->
+    <PackageReference Include="MessagePack" Version="3.1.8" />
   </ItemGroup>
 
 </Project>

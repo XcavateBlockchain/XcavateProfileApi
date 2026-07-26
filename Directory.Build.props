@@ -1,0 +1,22 @@
+<Project>
+
+  <PropertyGroup>
+    <!--
+      Substrate.NET.API depends on StreamJsonRpc, which pulls in
+      Microsoft.VisualStudio.Threading.Analyzers. No project here opted into the vs-threading
+      rules, but they run anyway and produced 264 warnings across the solution:
+
+        VSTHRD200 (258x) - "use an Async suffix" on NUnit test methods and GraphQL resolvers,
+                           where the current names are deliberate. Renaming resolvers would
+                           change the GraphQL schema, so the rule is actively wrong here.
+        VSTHRD103 (6x)   - synchronous SQLite open/query in test setup, which is fine in tests.
+
+      Silencing the two rule IDs is deliberate. Note that ExcludeAssets="analyzers" on a
+      PackageReference does not work for this: it filters a single edge of the dependency graph,
+      and these analyzers also arrive via StreamJsonRpc -> Microsoft.VisualStudio.Threading ->
+      Microsoft.VisualStudio.Threading.Analyzers.
+    -->
+    <NoWarn>$(NoWarn);VSTHRD200;VSTHRD103</NoWarn>
+  </PropertyGroup>
+
+</Project>

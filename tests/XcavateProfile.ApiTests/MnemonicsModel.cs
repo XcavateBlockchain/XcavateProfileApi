@@ -1,93 +1,23 @@
-﻿using Substrate.NET.Wallet;
+using Substrate.NET.Wallet;
 using Substrate.NET.Wallet.Keyring;
-using Substrate.NetApi.Extensions;
 using Substrate.NetApi.Model.Types;
-using static Substrate.NetApi.Mnemonic;
 
-namespace XcavateProfile.ApiTests
+namespace XcavateProfile.ApiTests;
+
+/// <summary>
+/// Turns a BIP39 phrase from <see cref="TestMnemonics"/> into a Substrate sr25519
+/// <see cref="Account"/>. The Solana counterpart is <see cref="SolanaAccounts"/>.
+/// </summary>
+public static class MnemonicsModel
 {
-    public class MnemonicsModel
+    private static readonly Meta META = new() { Name = "XcavateProfile.ApiTests" };
+
+    public static Account GetAccountFromMnemonics(string mnemonics)
     {
-        private static readonly Meta META = new Meta() { Name = "PlutoFramework" };
+        var keyring = new Keyring();
 
-        public static string[] GenerateMnemonicsArray()
-        {
-            return MnemonicFromEntropy(new byte[16].Populate(), BIP39Wordlist.English);
-        }
+        Wallet wallet = keyring.AddFromMnemonic(mnemonics, META, KeyType.Sr25519);
 
-        public static string GenerateMnemonics()
-        {
-            var mnemonicsArray = GenerateMnemonicsArray();
-            string mnemonics = string.Empty;
-
-            foreach (string mnemonic in mnemonicsArray)
-            {
-                mnemonics += " " + mnemonic;
-            }
-
-            return mnemonics.Trim();
-        }
-
-        public static Account GenerateNewAccount()
-        {
-            var mnemonics = GenerateMnemonics();
-
-            return GetAccountFromMnemonics(mnemonics);
-        }
-
-        public static (Account, string) GenerateNewAccountAndMnemonics()
-        {
-            var mnemonics = GenerateMnemonics();
-
-            return (GetAccountFromMnemonics(mnemonics), mnemonics);
-        }
-
-        public static Account GetAccountFromMnemonics(string mnemonics)
-        {
-            var keyring = new Keyring();
-
-            Wallet wallet = keyring.AddFromMnemonic(mnemonics, META, Substrate.NetApi.Model.Types.KeyType.Sr25519);
-
-            return wallet.Account;
-        }
-
-        public static Account GetAccountFromMnemonics(string mnemonics, Substrate.NetApi.Model.Types.KeyType keyType)
-        {
-            var keyring = new Keyring();
-
-            Wallet wallet = keyring.AddFromMnemonic(mnemonics, META, keyType);
-
-            return wallet.Account;
-        }
-
-        public static string ExportJson(string mnemonics, string password)
-        {
-            var keyring = new Substrate.NET.Wallet.Keyring.Keyring();
-
-            Wallet wallet = keyring.AddFromMnemonic(mnemonics, META, Substrate.NetApi.Model.Types.KeyType.Sr25519);
-
-            return wallet.ToJson("PlutoFramework", password);
-        }
-
-        /// <summary>
-        /// Imports the Json string and returns Wallet
-        /// </summary>
-        /// <param name="password"></param>
-        /// <returns></returns>
-        public static Wallet? ImportJson(string json, string password)
-        {
-            var keyring = new Substrate.NET.Wallet.Keyring.Keyring();
-
-            // Later remove .Replace(..)
-            Wallet wallet = keyring.AddFromJson(json.Replace("\"3\"", "3"));
-
-            if (!wallet.Unlock(password))
-            {
-                return null;
-            }
-
-            return wallet;
-        }
+        return wallet.Account;
     }
 }
-

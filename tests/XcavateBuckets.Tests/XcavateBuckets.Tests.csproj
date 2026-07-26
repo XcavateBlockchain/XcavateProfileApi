@@ -20,6 +20,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      Raises the SQLite native bundle that Microsoft.EntityFrameworkCore.Sqlite pulls in
+      transitively. It resolves to 2.1.11, which GHSA-2m69-gcr7-jv3q covers (vulnerable at or
+      below 2.1.11); 2.1.12 is the patched build. Test-only, so nothing ships with this, but
+      without the pin every build of the solution emits NU1903.
+    -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="NUnit.Framework" />
   </ItemGroup>
 
