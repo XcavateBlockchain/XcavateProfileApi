@@ -53,19 +53,78 @@ A comprehensive system for Substrate/Polkadot profile registration and managemen
 
 ## Authentication
 
-All state-changing requests (POST/PUT/DELETE) require Sr25519 signature verification:
+All state-changing requests (POST/PUT/DELETE) require a signature — Sr25519 (Substrate SS58) or
+Solana ed25519:
 
 ### Authentication Headers
-- `X-SS58-Address`: The Substrate SS58 address of the signer
-- `X-Signature`: Hex-encoded Sr25519 signature
-- `X-Timestamp`: ISO 8601 timestamp (replay attack prevention)
 
-### Signed Payload Format
+| Header | Value |
+|--------|-------|
+| `X-SS58-Address` | The signer's address — a Substrate **SS58** address or a Solana **base58** address |
+| `X-Signature` | The signature, as `0x`-prefixed hex **or** base58. Must decode to 64 bytes |
+| `X-Timestamp` | ISO-8601 UTC, within 5 minutes of server time |
+
+The server infers the scheme from the address format — the two are unambiguous, so there is no
+scheme header to set.
+
+**Both schemes sign the same payload string:**
+
 ```
-<method>:<path>:<body_hash>:<timestamp>
+{METHOD}:{path}:{blake2b_128_hex_of_body}:{timestamp}
 ```
 
-Where `<body_hash>` is the Blake2 hash of the request body.
+They differ only in what is passed to the signing function:
+
+| Scheme | Address | Signed bytes |
+|--------|---------|--------------|
+| sr25519 | SS58 | `blake2b(utf8(payload), 128)` — a 16-byte digest |
+| Solana ed25519 | base58, 32 bytes | `utf8(payload)` — the string itself, unhashed |
+
+Solana signs the string unhashed so a wallet's approval popup shows readable text rather than
+binary. Note that the body-hash *segment* is still Blake2b-128 in both cases — a JS caller needs
+`blakejs` even on the Solana signing path.
+
+Two details are easy to get wrong, and both break signature verification silently, because the
+payload has to match the server's reconstruction byte-for-byte, not just represent the same value:
+
+- **Body hash casing**: the server hex-encodes it as uppercase, `0x`-prefixed digits (what
+  `Utils.Bytes2HexString` emits) — JavaScript's `Number.prototype.toString(16)` produces lowercase,
+  so it must be upper-cased.
+- **Timestamp precision**: the server re-serializes `X-Timestamp` using .NET's round-trip format,
+  which always pads to 7 fractional-second digits (`.fffffffZ`). `Date.prototype.toISOString()`
+  gives only 3, so pad it before signing.
+
+The example below handles both.
+
+**Signing from a browser wallet:**
+
+```javascript
+// npm install bs58 blakejs
+import bs58 from 'bs58';
+import { blake2b } from 'blakejs';
+
+// Browser-native hex encoding (avoids a Buffer polyfill) — upper-cased to match what the
+// server's Utils.Bytes2HexString produces.
+const hex = (bytes) =>
+  '0x' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+const body = JSON.stringify({ query: '...' });
+const bodyHash = hex(blake2b(new TextEncoder().encode(body), null, 16));
+
+// Pad to 7 fractional digits so this matches the payload the server reconstructs (see above).
+const timestamp = new Date().toISOString().replace('Z', '0000Z');
+
+const payload = `POST:/graphql:${bodyHash}:${timestamp}`;
+
+const { signature } = await window.solana.signMessage(
+  new TextEncoder().encode(payload), 'utf8');
+
+const headers = {
+  'X-SS58-Address': window.solana.publicKey.toBase58(),
+  'X-Signature': bs58.encode(signature),
+  'X-Timestamp': timestamp,
+};
+```
 
 ### Signature Verification
 1. Server computes Blake2 hash of the request body
@@ -260,7 +319,7 @@ Admin addresses are configured via the `ADMIN_ADDRESSES` environment variable. A
 - Delete any profile
 - Bypass profile ownership checks
 
-**Format**: Comma-separated list of SS58 addresses
+**Format**: Comma-separated list of addresses. SS58 and Solana base58 addresses can be mixed freely.
 ```
 ADMIN_ADDRESSES=5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W,5DZ1xN32y6fV5bQ8j7K4m5L6n7M8o9P0q1R2s3T4u5V6
 ```

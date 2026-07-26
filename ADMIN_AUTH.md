@@ -97,8 +97,8 @@ All state-changing requests must include specific authentication headers:
 
 | Header | Description | Format |
 |--------|-------------|--------|
-| `X-SS58-Address` | The signer's Substrate address | `5...` (SS58 format) |
-| `X-Signature` | Hex-encoded Sr25519 signature | 128 hex characters |
+| `X-SS58-Address` | The signer's address — Substrate SS58 or Solana base58 | `5...` or `DQJZ...` |
+| `X-Signature` | The 64-byte signature, `0x`-hex or base58 | `0xB8AA...` or `4h96nSR...` |
 | `X-Timestamp` | ISO 8601 UTC timestamp | `2024-01-15T10:30:45.123Z` |
 
 ### Example Request
@@ -172,7 +172,7 @@ Admin addresses are configured via the `ADMIN_ADDRESSES` environment variable.
 ### Configuration
 
 ```env
-# Format: comma-separated SS58 addresses
+# Format: comma-separated addresses (SS58 and/or Solana base58)
 ADMIN_ADDRESSES=5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W,5DZ1xN32y6fV5bQ8j7K4m5L6n7M8o9P0q1R2s3T4u5V6
 ```
 
