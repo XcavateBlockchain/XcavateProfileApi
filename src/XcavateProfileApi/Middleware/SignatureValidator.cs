@@ -11,9 +11,15 @@ public class SignatureValidator : ISignatureValidator
     private readonly SignatureValidationOptions _options;
 
     /// <summary>
-    /// Ordered by cost of recognition; the first scheme that claims the address format wins. The
-    /// two formats do not overlap — SS58 decoding validates a checksum and yields 35 bytes, a
-    /// Solana address is exactly 32 — so the order is for clarity rather than correctness.
+    /// The first scheme that claims the address format wins. The list order is not a cost
+    /// ordering — if anything it runs backwards, since sr25519 recognition
+    /// (<c>Utils.GetPublicKeyFrom</c>) does a base58 decode plus a blake2b checksum verify,
+    /// while Solana recognition (Solnet's <c>PublicKey</c>) only checks the decoded length.
+    /// Order does not affect correctness because the two formats never overlap: a valid,
+    /// checksummed SS58 address decodes to exactly 32 bytes via
+    /// <c>Utils.GetPublicKeyFrom</c>, while Solnet's <c>PublicKey</c> — which performs no
+    /// checksum check — yields 32 bytes only for a genuine Solana address, and 35 bytes
+    /// (undecoded prefix + key + checksum) if handed an SS58 string instead.
     /// </summary>
     private static readonly IReadOnlyList<ISignatureScheme> Schemes =
     [
@@ -70,8 +76,10 @@ public class SignatureValidator : ISignatureValidator
         // bytes of it get signed.
         var payload = CryptoHelper.ConstructPayload(method, path, payloadBody, ts);
 
-        // Decoding happens inside the guarded path on purpose: this is unauthenticated input, and
-        // a malformed signature must produce a 401, not an unhandled exception.
+        // TryDecode cannot throw: it wraps its own work in an internal try/catch and returns
+        // false for anything malformed, which is what turns a bad signature into a 401 instead
+        // of an unhandled exception. That safety comes from TryDecode itself — this call runs
+        // before the try block below (which guards scheme.Verify), not inside it.
         if (!SignatureEncoding.TryDecode(signatureHex, out var signatureBytes))
         {
             return new SignatureValidationResult
