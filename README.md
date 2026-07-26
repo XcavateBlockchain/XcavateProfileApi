@@ -96,7 +96,7 @@ payload has to match the server's reconstruction byte-for-byte, not just represe
 
 The example below handles both.
 
-**Signing from a browser wallet:**
+**Signing GraphQL requests from a browser wallet:**
 
 ```javascript
 // npm install bs58 blakejs
@@ -125,6 +125,38 @@ const headers = {
   'X-Timestamp': timestamp,
 };
 ```
+
+**REST is different from GraphQL.** The example above hashes the literal request body, which
+is what `GraphQLSignatureMiddleware.cs` does on `/graphql`. The REST controllers do not:
+`ProfilesController.cs` hands the *deserialized* `Profile` object to the validator, and
+`Profile.Hash()` (`Profile.cs`) re-serializes it with `System.Text.Json` before hashing —
+it never sees the bytes you actually sent. To compute a matching hash from a browser you must
+reproduce that serialization exactly:
+
+- **Field order** is declaration order, not alphabetical or object-literal order:
+  `ss58address`, `nickname`, `bio`, `profilePicture`, `x25519Key`.
+- **Nulls are emitted, not omitted** — an unset `bio` or `profilePicture` must serialize as
+  `"bio":null`. `JSON.stringify` drops `undefined` properties instead of writing `null`, which
+  will not match.
+- **No whitespace** — compact JSON, same as the GraphQL example above.
+
+```javascript
+// Field order, nulls, and compactness all have to match System.Text.Json's output exactly.
+const canonical = JSON.stringify({
+  ss58address: ss58address,
+  nickname: nickname ?? null,
+  bio: bio ?? null,
+  profilePicture: profilePicture ?? null,
+  x25519Key: x25519Key,
+});
+const bodyHash = hex(blake2b(new TextEncoder().encode(canonical), null, 16));
+```
+
+Safest approach: build this exact object, in this exact field order, and both send it as the
+request body and hash it for the payload — do not construct the request body separately from
+the hash input. A plain `JSON.stringify(profileObject)` on a hand-built object will only match
+by coincidence. Any mismatch here fails as a plain 401 with no further diagnostic; the server
+does not report which part of the payload it disagreed with.
 
 ### Signature Verification
 1. Server computes Blake2 hash of the request body
