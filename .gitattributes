@@ -1,0 +1,4 @@
+# The GraphQL schema snapshot is a generated artefact that is committed for review and is the
+# input StrawberryShake generates the client from. Store it with LF everywhere so it does not
+# churn depending on which platform last regenerated it.
+*.graphql text eol=lf

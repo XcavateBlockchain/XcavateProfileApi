@@ -63,13 +63,15 @@ public class GraphQLSchemaTests
     [Test]
     public async Task Schema_snapshot_is_up_to_date()
     {
-        var sdl = await BuildSdlAsync();
+        var sdl = NormalizeLineEndings(await BuildSdlAsync());
 
         var repositoryRoot = FindRepositoryRoot();
         var snapshotPath = Path.Combine(repositoryRoot, "docs", "graphql", "schema.graphql");
         Directory.CreateDirectory(Path.GetDirectoryName(snapshotPath)!);
 
-        var existing = File.Exists(snapshotPath) ? await File.ReadAllTextAsync(snapshotPath) : null;
+        var existing = File.Exists(snapshotPath)
+            ? NormalizeLineEndings(await File.ReadAllTextAsync(snapshotPath))
+            : null;
 
         if (existing != sdl)
         {
@@ -84,6 +86,14 @@ public class GraphQLSchemaTests
 
         Assert.Pass();
     }
+
+    /// <summary>
+    /// HotChocolate serialises the SDL through a <see cref="StringWriter"/>, so it uses
+    /// <see cref="Environment.NewLine"/>: CRLF on Windows, LF on the Linux CI runner. Without this the
+    /// snapshot differs on every line depending on who last regenerated it. The snapshot is stored with
+    /// LF, which .gitattributes keeps stable.
+    /// </summary>
+    private static string NormalizeLineEndings(string sdl) => sdl.Replace("\r\n", "\n");
 
     private static string FindRepositoryRoot()
     {
