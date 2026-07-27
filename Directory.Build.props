@@ -19,4 +19,23 @@
     <NoWarn>$(NoWarn);VSTHRD200;VSTHRD103</NoWarn>
   </PropertyGroup>
 
+  <!--
+    Shared NuGet metadata for the published client SDKs. Inert for the API and test projects,
+    which are not packable. Package id, description and tags are per-project.
+  -->
+  <PropertyGroup>
+    <Authors>Xcavate</Authors>
+    <Company>Xcavate</Company>
+    <Copyright>Copyright © Xcavate</Copyright>
+    <PackageProjectUrl>https://github.com/Xcavate/XcavateProfile</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Xcavate/XcavateProfile</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- Lets consumers step into the SDK from a stack trace without a local checkout. -->
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
 </Project>

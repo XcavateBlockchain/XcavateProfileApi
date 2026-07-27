@@ -1,0 +1,16 @@
+{
+  "schema": "../../../docs/graphql/schema.graphql",
+  "documents": "Operations.graphql",
+  "extensions": {
+    "strawberryShake": {
+      "name": "XcavateBucketsClient",
+      "namespace": "XcavateProfileApiClient.Buckets",
+      "url": "http://localhost:5000/graphql",
+      "dependencyInjection": true,
+      "records": {
+        "inputs": false,
+        "entities": false
+      }
+    }
+  }
+}

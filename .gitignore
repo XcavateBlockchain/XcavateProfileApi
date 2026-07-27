@@ -59,6 +59,10 @@ coverage/
 project.lock.json
 project.fragment.lock.json
 
+## Copied into the Solana client at build time from src/XcavateProfileApiClient/Buckets, which
+## holds the canonical operations. See CopySharedGraphQLOperations in the .csproj.
+src/XcavateProfileApiSolanaClient/Buckets/Operations.graphql
+
 ## Node.js (GraphQL tooling)
 node_modules/
 npm-debug.log*

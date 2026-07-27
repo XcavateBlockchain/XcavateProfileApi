@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A separate suite because it has to be: XcavateProfileApiSolanaClient and XcavateProfileApiClient
+    define the same types in the same namespaces, so no project can reference both. That is also
+    what makes this suite worth having - it is the only place the Solana package is compiled against
+    on its own, which is exactly how a consumer will get it.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Keep these aligned with the other suites so all three run on one test host. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.0" />
+    <PackageReference Include="NUnit" Version="4.3.2" />
+    <PackageReference Include="NUnit.Analyzers" Version="4.7.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="5.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="NUnit.Framework" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\XcavateProfileApiSolanaClient\XcavateProfileApiSolanaClient.csproj" />
+  </ItemGroup>
+
+</Project>

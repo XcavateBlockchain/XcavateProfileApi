@@ -7,6 +7,10 @@ namespace XcavateProfileApiClient.Signing;
 /// The original scheme, unchanged: sign the Blake2b-128 digest of the payload with sr25519, keyed
 /// by an SS58 address.
 /// </summary>
+/// <remarks>
+/// Lives under <c>Substrate/</c> rather than <c>Signing/</c> because that folder is what
+/// XcavateProfileApiSolanaClient excludes; the namespace is unchanged.
+/// </remarks>
 public sealed class Sr25519SignatureScheme : ISignatureScheme
 {
     private const int PublicKeyLength = 32;

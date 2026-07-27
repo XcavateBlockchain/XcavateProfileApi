@@ -13,8 +13,9 @@ Both APIs authenticate state-changing requests with wallet signatures — **Subs
 
 - **Runtime**: .NET 10, ASP.NET Core, Entity Framework Core, PostgreSQL
 - **GraphQL server**: Hot Chocolate 16
-- **Client SDK**: `XcavateProfileApiClient` (published to NuGet) — REST client, a
-  StrawberryShake-generated GraphQL client, and the signing primitives both use
+- **Client SDK**: `XcavateProfileApiClient` and `XcavateProfileApiSolanaClient` (both published to
+  NuGet) — REST client, a StrawberryShake-generated GraphQL client, and the signing primitives
+  both use
 - **Storage**: Hetzner Object Storage (S3-compatible) for profile pictures
 - **CI/CD**: Docker image to ghcr.io + deploy to Hetzner; NuGet package publishing
 
@@ -22,8 +23,9 @@ Both APIs authenticate state-changing requests with wallet signatures — **Subs
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                       XcavateProfileApiClient                        │
-│  IRequestSigner: SubstrateRequestSigner (sr25519, hex)               │
+│   XcavateProfileApiClient  ·  XcavateProfileApiSolanaClient          │
+│   (one source tree, two packages — see "Client SDK packages")        │
+│  IRequestSigner: SubstrateRequestSigner (sr25519, hex)   [Polkadot]  │
 │                  SolanaRequestSigner    (ed25519, base58)            │
 │  XcavateProfileClient ......... REST profile client                  │
 │  XcavateBucketsClient ........ StrawberryShake GraphQL client        │
@@ -63,7 +65,9 @@ keypair.
 | `src/XcavateProfileApi` | Web host: REST controllers, GraphQL schema, signature middleware, S3 |
 | `src/XcavateBuckets.Domain` | Bucket entities, `BucketDbContext`, migrations, domain services |
 | `src/XcavateProfileApiClient` | Client SDK (NuGet): REST client, generated GraphQL client, signing |
-| `tests/XcavateBuckets.Tests` | 176 domain, schema, GraphQL and signature tests (in-memory SQLite) |
+| `src/XcavateProfileApiSolanaClient` | The same SDK packaged without Substrate — no sources of its own |
+| `tests/XcavateBuckets.Tests` | 192 domain, schema, GraphQL, signature and hash-compatibility tests (in-memory SQLite) |
+| `tests/XcavateProfileApiSolanaClient.Tests` | 23 tests over the Solana package: signing, request shape, absent Substrate |
 | `tests/XcavateProfile.ApiTests` | End-to-end REST tests against a running API |
 
 ## REST API — profiles
@@ -317,8 +321,13 @@ dotnet ef migrations add <Name> --project src/XcavateBuckets.Domain \
 ## Testing
 
 ```bash
-# Domain, schema, GraphQL and signature tests — no database or server needed (in-memory SQLite)
+# Domain, schema, GraphQL, signature and hash-compatibility tests
+# — no database or server needed (in-memory SQLite)
 dotnet test tests/XcavateBuckets.Tests
+
+# The Solana package on its own: signing, request shape, and the absence of Substrate.
+# A separate suite because it cannot reference both client packages at once.
+dotnet test tests/XcavateProfileApiSolanaClient.Tests
 
 # End-to-end REST tests: starts PostgreSQL and the API, runs the suite, tears everything down
 ./run_e2e_tests.sh
@@ -331,8 +340,46 @@ schemes are exercised end to end.
 
 ## Using the C# client SDK
 
+### Client SDK packages
+
+Two packages ship from one source tree, `src/XcavateProfileApiClient`:
+
+| Package | Signs with | Dependencies |
+|---|---|---|
+| `XcavateProfileApiClient` | sr25519 **and** Solana ed25519 | Substrate.NET.API, Solnet.Wallet, StrawberryShake, Blake2Core |
+| `XcavateProfileApiSolanaClient` | Solana ed25519 only | Solnet.Wallet, StrawberryShake, Blake2Core |
+
+`src/XcavateProfileApiSolanaClient` contains no `.cs` files. Its project compiles the same sources
+minus `src/XcavateProfileApiClient/Substrate/`, which holds every type and partial-class member that
+touches `Substrate.NET.API` — the sr25519 signer and scheme, and the `Account` convenience overloads
+on `XcavateProfileClient` and `SigningHttpMessageHandler`. Dropping that folder drops
+`Substrate.NET.API` and, with it, StreamJsonRpc, Serilog, Newtonsoft.Json and the MessagePack
+advisories the other package has to pin around.
+
+Everything else — namespaces, type names, the `IRequestSigner` overloads — is identical, so moving
+between the packages is a one-line change. The corollary is that **a project must reference one or
+the other, never both**: they define the same types.
+
+The GraphQL operations cannot be shared by reference the way the `.cs` files are, because
+StrawberryShake resolves its `documents` glob against the project directory it is pointed at.
+`Buckets/Operations.graphql` is therefore copied into the Solana project at build time from the
+canonical copy under `XcavateProfileApiClient`, and the copy is gitignored so the two cannot drift.
+
+Two guards exist because the packages are wire-compatible only by construction, not by compilation:
+
+- `PayloadHashCompatibilityTests` (in `tests/XcavateBuckets.Tests`) asserts that `CryptoHelper`'s
+  Blake2Core-and-`Convert.ToHexString` path is byte-identical to Substrate's `HashExtension.Blake2`
+  and `Utils.Bytes2HexString`. The hash goes into the signed payload, so a difference of one hex
+  digit's case would silently reject every signature the deployed server accepts.
+- `PackageContentsTests` (in `tests/XcavateProfileApiSolanaClient.Tests`) asserts the built assembly
+  references nothing named Substrate, Schnorrkel, MessagePack, StreamJsonRpc, Serilog or Newtonsoft.
+  `Substrate/` is excluded by path, which the compiler does not enforce, so a new sr25519 type added
+  outside that folder would otherwise reinstate the dependency unnoticed.
+
 ```bash
 dotnet add package XcavateProfileApiClient
+# or, for a Solana-only application
+dotnet add package XcavateProfileApiSolanaClient
 ```
 
 ### Profiles (REST)
@@ -382,6 +429,21 @@ ed25519 and emits base58:
 await client.CreateProfileAsync(profile, new SolanaRequestSigner(solanaAccount));
 ```
 
+In `XcavateProfileApiSolanaClient` the `IRequestSigner` overloads are the entire write API; the
+`Account` ones above do not exist there. Code that signs through `IRequestSigner` compiles unchanged
+against either package.
+
+Every method takes an optional `CancellationToken`. A client is safe to use from concurrent calls,
+and a second constructor accepts a caller-owned `HttpClient` — an `IHttpClientFactory` one, for
+instance — which `Dispose` leaves open:
+
+```csharp
+var client = new XcavateProfileClient(options, httpClientFactory.CreateClient("xcavate"));
+```
+
+Failed requests throw `HttpRequestException` carrying both the status code and the server's
+explanation of the refusal.
+
 ### Buckets (GraphQL)
 
 The generated client is registered through DI. `SigningHttpMessageHandler` signs the outgoing
@@ -418,13 +480,19 @@ rebuilding.
 
 ```csharp
 byte[] digest    = CryptoHelper.Hash(input);                            // Blake2b-128
+string hex       = CryptoHelper.HashHex(input);                         // 0x-prefixed, uppercase
 string payload   = CryptoHelper.ConstructPayload(method, path, body, timestamp);
-byte[] signature = await CryptoHelper.SignAsync(payload, account);      // sr25519
+byte[] signature = await CryptoHelper.SignAsync(payload, account);      // sr25519, Polkadot package
 bool ok          = CryptoHelper.VerifySignature(payload, signature, address);
 ```
 
-`body` is an `IPayloadBody` — the `Profile` being sent, or `EmptyPayloadBody` — not a
-pre-computed hash string.
+`body` is an `IPayloadBody` — the `Profile` being sent, or `EmptyPayloadBody.Instance` — not a
+pre-computed hash string. `path` is the **decoded** path, matching the route value the server binds;
+the client percent-encodes the request URI separately, so a nickname containing a space or a slash
+is looked up correctly without changing what was signed.
+
+`Hash` and `HashHex` are chain-agnostic and present in both packages; `SignAsync` and
+`VerifySignature` are sr25519 and ship only in `XcavateProfileApiClient`.
 
 ## Data model
 
@@ -455,8 +523,11 @@ pushes it to `ghcr.io`, then over SSH resets the Hetzner checkout, regenerates `
 secrets, brings Docker Compose back up, and verifies `/health`.
 
 ### `.github/workflows/nuget.yml`
-Same triggers. Packs `src/XcavateProfileApiClient` and pushes to NuGet.org. Versioning is
-`1.0.<run_number>` for branch builds and the git tag for releases.
+Same triggers. Runs the two hermetic test suites, then packs both
+`src/XcavateProfileApiClient` and `src/XcavateProfileApiSolanaClient` at the same version and pushes
+them — with their `.snupkg` symbol packages — to NuGet.org. Versioning is `1.0.<run_number>` for
+branch builds and the git tag for releases. The tests run first because a push to NuGet.org cannot
+be withdrawn.
 
 ### Required GitHub secrets
 

@@ -1,72 +1,45 @@
-using Substrate.NET.Schnorrkel;
-using Substrate.NetApi;
-using Substrate.NetApi.Model.Types;
+using Blake2Core;
 using System.Text;
 using XcavateProfileApiClient;
 
 namespace XcavateProfile.Client;
 
 /// <summary>
-/// Helper class for cryptographic operations such as hashing, signing, and verifying signatures
+/// The hashing and payload-construction seam shared by the client, the server and both signature
+/// schemes. Chain-agnostic on purpose: the sr25519 signing and verification helpers live in the
+/// partial under <c>Substrate/</c>, which the Solana-only package does not compile.
 /// </summary>
-public static class CryptoHelper
+public static partial class CryptoHelper
 {
     /// <summary>
-    /// Compute Blake2b hash of a string
+    /// Blake2b-128. Matches <c>Substrate.NetApi.HashExtension.Blake2(bytes, 128)</c>, which is the
+    /// same Blake2Core implementation reached directly rather than through Substrate.NET.API — that
+    /// indirection is the only thing the Solana package would otherwise need the whole Substrate
+    /// stack for.
     /// </summary>
-    public static byte[] Hash(string input)
-    {
-        var encodedInput = Encoding.UTF8.GetBytes(input);
+    private const int HashSizeInBits = 128;
 
-        var hash = HashExtension.Blake2(encodedInput, 128);
-
-        return hash;
-    }
+    /// <summary>Compute the Blake2b-128 hash of a string.</summary>
+    public static byte[] Hash(string input) =>
+        Blake2B.ComputeHash(
+            Encoding.UTF8.GetBytes(input),
+            new Blake2BConfig { OutputSizeInBits = HashSizeInBits });
 
     /// <summary>
-    /// Sign a payload string using the Sr25519 signature scheme with the provided Account's private key
+    /// The hash as the <c>0x</c>-prefixed uppercase hex the payload format expects. Use this when
+    /// implementing <see cref="IPayloadBody"/> — hand-rolling the encoding is how a body hash ends
+    /// up subtly different from the server's.
     /// </summary>
-    /// <param name="input">The input string to sign</param>
-    /// <param name="account">The Account instance containing the keypair</param>
-    /// <returns>The signature as a byte array</returns>
-    public static async Task<byte[]> SignAsync(string input, IAccount account)
-    {
-        var hash = Hash(input);
-
-        var signature = await account.SignAsync(hash);
-
-        return signature;
-    }
+    public static string HashHex(string input) => Hex.ToPrefixedString(Hash(input));
 
     /// <summary>
-    /// Verify a signature using Sr25519 signature scheme
+    /// Construct the signed payload string for authentication.
+    /// Format: <c>method:path:body_hash:timestamp</c>.
     /// </summary>
-    /// <param name="input">The original message</param>
-    /// <param name="signature">The signature as a byte array</param>
-    /// <param name="address">The address associated with the public key</param>
-    /// <returns>True if the signature is valid</returns>
-    public static bool VerifySignature(string input, byte[] signature, string address)
-    {
-        var hash = Hash(input);
-
-        return VerifySignature(hash, signature, address);
-    }
-
-    public static bool VerifySignature(byte[] input, byte[] signature, string address)
-    {
-        var publicKey = Substrate.NetApi.Utils.GetPublicKeyFrom(address);
-
-        var verification = Sr25519v091.Verify(signature, publicKey, input);
-
-        return verification;
-    }
-
-    /// <summary>
-    /// Construct the signed payload string for authentication
-    /// Format: method:path:body_hash:timestamp
-    /// </summary>
-    public static string ConstructPayload(string method, string path, IPayloadBody body, DateTime timestamp)
-    {
-        return $"{method}:{path}:{body.Hash()}:{timestamp.ToUniversalTime():o}";
-    }
+    /// <remarks>
+    /// <paramref name="path"/> must be the decoded path, matching the route value the server binds
+    /// — not the percent-encoded form that goes into the request URI.
+    /// </remarks>
+    public static string ConstructPayload(string method, string path, IPayloadBody body, DateTime timestamp) =>
+        $"{method}:{path}:{body.Hash()}:{timestamp.ToUniversalTime():o}";
 }

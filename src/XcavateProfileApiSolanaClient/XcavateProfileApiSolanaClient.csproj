@@ -1,0 +1,92 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Solana-only build of the client SDK.
+
+    This project owns no .cs files of its own. It compiles the same sources as
+    XcavateProfileApiClient, minus that project's Substrate/ folder, and so exposes an identical
+    API under identical namespaces - a consumer swaps the package reference and their code still
+    compiles. What it does not carry is Substrate.NET.API, and with it StreamJsonRpc, Serilog,
+    Newtonsoft.Json and MessagePack.
+
+    Two packages therefore define the same type names. That is intentional and the reason they are
+    not meant to be referenced together: pick the one matching the chain the application signs for.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RootNamespace>XcavateProfileApiClient</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>XcavateProfileApiSolanaClient</PackageId>
+    <Title>Xcavate Profile API client (Solana)</Title>
+    <Description>
+      Client SDK for the Xcavate Profile API for Solana applications: a REST client for profiles, a
+      StrawberryShake GraphQL client for buckets, and ed25519 request signing over base58 addresses.
+      Same API and namespaces as XcavateProfileApiClient, without the Substrate.NET.API dependency.
+    </Description>
+    <PackageTags>xcavate;solana;ed25519;solnet;graphql;profile;api-client</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!--
+    Shared sources. bin/ and obj/ are excluded explicitly because the glob reaches into another
+    project's directory, where the default exclusions do not apply - without this, that project's
+    generated GraphQL client and AssemblyInfo would be compiled in twice over.
+  -->
+  <PropertyGroup>
+    <SharedClientDir>$(MSBuildThisFileDirectory)..\XcavateProfileApiClient\</SharedClientDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(SharedClientDir)**\*.cs"
+             Exclude="$(SharedClientDir)Substrate\**\*.cs;$(SharedClientDir)bin\**\*.cs;$(SharedClientDir)obj\**\*.cs"
+             LinkBase="Shared" />
+  </ItemGroup>
+
+  <!--
+    The GraphQL operations cannot be shared by reference the way the .cs files are: StrawberryShake's
+    generator is invoked as "dotnet-graphql generate <project directory>" and resolves the
+    "documents" glob in .graphqlrc.json against that directory, so a "../" path is not an option.
+    The canonical copy therefore stays in XcavateProfileApiClient and is copied in here at build
+    time - the copy is gitignored, so the two clients cannot drift apart.
+  -->
+  <PropertyGroup>
+    <SharedGraphQLOperations>$(SharedClientDir)Buckets\Operations.graphql</SharedGraphQLOperations>
+    <LocalGraphQLOperations>$(MSBuildThisFileDirectory)Buckets\Operations.graphql</LocalGraphQLOperations>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      StrawberryShake's own "**/*.graphql" glob runs during evaluation, when the copy does not yet
+      exist on a clean clone - and its codegen target is gated on @(GraphQL) being non-empty, so
+      without this explicit item the generated client is silently skipped on the first build.
+      The Remove keeps it to a single item once the copy is on disk and the glob does match.
+    -->
+    <GraphQL Remove="Buckets\Operations.graphql" />
+    <GraphQL Include="Buckets\Operations.graphql" />
+  </ItemGroup>
+
+  <Target Name="CopySharedGraphQLOperations"
+          BeforeTargets="GenerateGraphQLCode;_GenerateGraphQLCode"
+          Inputs="$(SharedGraphQLOperations)"
+          Outputs="$(LocalGraphQLOperations)">
+    <Copy SourceFiles="$(SharedGraphQLOperations)"
+          DestinationFiles="$(LocalGraphQLOperations)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="Blake2Core" Version="1.0.0" />
+    <PackageReference Include="Solnet.Wallet" Version="6.1.0" />
+    <PackageReference Include="StrawberryShake.Server" Version="16.5.1" />
+  </ItemGroup>
+
+</Project>

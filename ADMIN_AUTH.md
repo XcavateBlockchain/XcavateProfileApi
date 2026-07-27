@@ -72,19 +72,23 @@ The Blake2 hashing algorithm is used for hashing request bodies in the signature
 
 ### Implementation
 
-`CryptoHelper.Hash` (`src/XcavateProfileApiClient/CryptoHelper.cs`) wraps
-`Substrate.NET.Schnorrkel`'s Blake2 extension, hashing to 128 bits (16 bytes):
+`CryptoHelper.Hash` (`src/XcavateProfileApiClient/CryptoHelper.cs`) hashes to 128 bits (16 bytes)
+with Blake2b:
 
 ```csharp
-using Substrate.NetApi;
 using XcavateProfile.Client;
 
 // Hash a string to a 16-byte Blake2b-128 digest
 byte[] hashBytes = CryptoHelper.Hash(inputString);
 
 // Hex-encode it the same way the server does: 0x-prefixed, UPPERCASE
-var hashHex = Utils.Bytes2HexString(hashBytes); // e.g. "0xA1B2C3D4..."
+var hashHex = CryptoHelper.HashHex(inputString); // e.g. "0xA1B2C3D4..."
 ```
+
+`HashHex` exists so nothing has to re-derive that encoding: it is byte-for-byte
+`Substrate.NetApi.Utils.Bytes2HexString(HashExtension.Blake2(utf8, 128))`, which is what the
+deployed server has always verified, and `PayloadHashCompatibilityTests` pins it there. Both
+client packages expose it; only `XcavateProfileApiClient` can reach the Substrate helpers.
 
 This is exactly what `Profile.Hash()` does for REST request bodies, and what
 `GraphQLSignatureMiddleware` does for the raw GraphQL request body.
@@ -99,7 +103,7 @@ one:
 ```csharp
 using XcavateProfileApiClient;
 
-IPayloadBody body = new EmptyPayloadBody();
+IPayloadBody body = EmptyPayloadBody.Instance;   // stateless; new EmptyPayloadBody() also works
 body.Hash(); // == "" — not Blake2b("") or any 0x-prefixed value
 ```
 
@@ -151,11 +155,12 @@ var client = new XcavateProfileClient(new XcavateProfileClientOptions { ApiUrl =
 // sr25519, from a Substrate.NetApi Account:
 await client.CreateProfileAsync(profile, account);
 
-// Or explicitly via any IRequestSigner (this is also how Solana signing is selected):
+// Or explicitly via any IRequestSigner (this is also how Solana signing is selected, and the
+// only form available in XcavateProfileApiSolanaClient):
 await client.CreateProfileAsync(profile, new SubstrateRequestSigner(account));
 ```
 
-Internally (`src/XcavateProfileApiClient/XcavateProfileApiClient.cs`) this builds the payload
+Internally (`src/XcavateProfileApiClient/XcavateProfileClient.cs`) this builds the payload
 via `CryptoHelper.ConstructPayload(method, path, body, timestamp)` — `body` is an
 `IPayloadBody` such as the `Profile` itself, not a pre-computed hash string — signs it with the
 chosen `IRequestSigner`, and sets `X-SS58-Address`, `X-Signature` and `X-Timestamp`.

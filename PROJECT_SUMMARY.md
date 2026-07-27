@@ -50,23 +50,34 @@ XcavateProfile/
 │   │   ├── BucketErrorCode.cs          # ports the pallet's Error enum
 │   │   ├── BucketException.cs, BucketOptions.cs, InputValidator.cs
 │   │
-│   └── XcavateProfileApiClient/        # Client SDK, published to NuGet
-│       ├── XcavateProfileApiClient.cs  # XcavateProfileClient (REST)
-│       ├── XcavateProfileClientOptions.cs
-│       ├── Profile.cs                  # the REST model; also an IPayloadBody
-│       ├── CryptoHelper.cs             # Blake2b-128 hashing, payload construction, sr25519
-│       ├── IPayloadBody.cs, EmptyPayloadBody.cs
-│       ├── SigningHttpMessageHandler.cs  # signs outgoing /graphql requests
-│       ├── Signing/
-│       │   ├── ISignatureScheme.cs     # server side: verify
-│       │   ├── IRequestSigner.cs       # client side: sign
-│       │   ├── Sr25519SignatureScheme.cs, SolanaSignatureScheme.cs
-│       │   ├── SubstrateRequestSigner.cs, SolanaRequestSigner.cs
-│       │   └── SignatureEncoding.cs    # hex or base58, fails closed
-│       └── Buckets/                    # StrawberryShake config + Operations.graphql
+│   ├── XcavateProfileApiClient/        # Client SDK, published to NuGet
+│   │   ├── XcavateProfileClient.cs     # REST client
+│   │   ├── XcavateProfileClientOptions.cs
+│   │   ├── Profile.cs                  # the REST model; also an IPayloadBody
+│   │   ├── CryptoHelper.cs             # Blake2b-128 hashing, payload construction
+│   │   ├── Hex.cs, JsonDefaults.cs     # the wire encodings, in one place each
+│   │   ├── IPayloadBody.cs, EmptyPayloadBody.cs
+│   │   ├── SigningHttpMessageHandler.cs  # signs outgoing /graphql requests
+│   │   ├── Signing/
+│   │   │   ├── ISignatureScheme.cs     # server side: verify
+│   │   │   ├── IRequestSigner.cs       # client side: sign
+│   │   │   ├── SolanaSignatureScheme.cs, SolanaRequestSigner.cs
+│   │   │   ├── RequestSigning.cs       # header names + attaching them
+│   │   │   └── SignatureEncoding.cs    # hex or base58, fails closed
+│   │   ├── Substrate/                  # everything touching Substrate.NET.API, excluded
+│   │   │   │                           # from the Solana package
+│   │   │   ├── Sr25519SignatureScheme.cs, SubstrateRequestSigner.cs
+│   │   │   ├── CryptoHelper.Substrate.cs         # sr25519 sign / verify
+│   │   │   ├── XcavateProfileClient.Substrate.cs # Account overloads
+│   │   │   └── SigningHttpMessageHandler.Substrate.cs
+│   │   └── Buckets/                    # StrawberryShake config + Operations.graphql
+│   │
+│   └── XcavateProfileApiSolanaClient/  # The same SDK minus Substrate/, published to NuGet.
+│       └── (project file + .graphqlrc.json only — no sources of its own)
 │
 ├── tests/
-│   ├── XcavateBuckets.Tests/           # 176 tests, in-memory SQLite, no server needed
+│   ├── XcavateBuckets.Tests/           # 192 tests, in-memory SQLite, no server needed
+│   ├── XcavateProfileApiSolanaClient.Tests/  # 23 tests over the Solana package alone
 │   └── XcavateProfile.ApiTests/        # E2E REST tests against a running API
 │
 ├── docs/
@@ -151,6 +162,13 @@ Two namespaces coexist in the assembly for historical reasons: `XcavateProfile.C
 (`XcavateProfileClient`, `XcavateProfileClientOptions`, `Profile`, `CryptoHelper`) and
 `XcavateProfileApiClient` (`IPayloadBody`, `SigningHttpMessageHandler`, `Signing/*`). Consolidating
 them would be a breaking change for package consumers, so it has not been done.
+
+The SDK ships as two packages from this one source tree. `XcavateProfileApiSolanaClient` compiles
+the same files minus `Substrate/`, giving Solana consumers the identical API without
+`Substrate.NET.API` — and so without StreamJsonRpc, Serilog, Newtonsoft.Json or MessagePack. That
+split is why `CryptoHelper` reaches Blake2Core and `Convert.ToHexString` directly instead of
+Substrate's `HashExtension` and `Utils`: the digest is identical (pinned by
+`PayloadHashCompatibilityTests`) but no longer requires the Substrate stack to compute.
 
 ## Authentication flow
 

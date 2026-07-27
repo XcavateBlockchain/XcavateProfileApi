@@ -7,7 +7,30 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <PackageId>XcavateProfileApiClient</PackageId>
+    <Title>Xcavate Profile API client (Polkadot)</Title>
+    <Description>
+      Client SDK for the Xcavate Profile API: a REST client for profiles, a StrawberryShake GraphQL
+      client for buckets, and request signing. Signs with Substrate sr25519 or Solana ed25519.
+      For Solana-only applications, XcavateProfileApiSolanaClient offers the same API without the
+      Substrate.NET.API dependency.
+    </Description>
+    <PackageTags>xcavate;polkadot;substrate;sr25519;solana;graphql;profile;api-client</PackageTags>
+  </PropertyGroup>
+
   <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Blake2Core is referenced directly rather than reached through Substrate.NET.API's
+      HashExtension. It is the very same implementation - Substrate.NET.API depends on this exact
+      package - so the payload digest is unchanged, but going straight to it is what lets the
+      Solana-only package share this source without the Substrate stack.
+    -->
+    <PackageReference Include="Blake2Core" Version="1.0.0" />
     <PackageReference Include="Solnet.Wallet" Version="6.1.0" />
     <PackageReference Include="StrawberryShake.Server" Version="16.5.1" />
     <PackageReference Include="Substrate.NET.API" Version="0.9.24" />
@@ -21,6 +44,9 @@
       references, pinning here also fixes the resolved version for them. Do not remove it as
       "unused" — deleting it silently reinstates all twelve advisories solution-wide.
       Verify with "dotnet list" on the solution, asking for vulnerable transitive packages.
+
+      XcavateProfileApiSolanaClient needs no such pin: it excludes Substrate/, so MessagePack
+      never enters its graph at all.
     -->
     <PackageReference Include="MessagePack" Version="3.1.8" />
   </ItemGroup>

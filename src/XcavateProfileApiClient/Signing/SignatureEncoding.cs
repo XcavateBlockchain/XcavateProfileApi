@@ -1,5 +1,4 @@
 using Solnet.Wallet.Utilities;
-using Substrate.NetApi;
 
 namespace XcavateProfileApiClient.Signing;
 
@@ -25,17 +24,17 @@ public static class SignatureEncoding
             return false;
         }
 
+        // The prefix is matched case-insensitively but stripped before decoding, so "0X…" is
+        // accepted rather than misparsed as hex digits.
+        if (signature.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            return Hex.TryDecodeExact(signature.AsSpan(2), SignatureLength, out bytes);
+        }
+
         try
         {
-            // Utils.HexToByteArray only strips a lowercase "0x" prefix internally: given "0X..." it
-            // fails to strip it and misparses the whole string (confirmed empirically). We detect
-            // the prefix case-insensitively but always hand the helper the bare hex body ourselves.
-            var decoded = signature.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-                ? Utils.HexToByteArray(signature[2..])
-                : Encoders.Base58.DecodeData(signature);
+            var decoded = Encoders.Base58.DecodeData(signature);
 
-            // Utils.HexToByteArray does not validate hex digits — "0xZZ" comes back as one byte
-            // rather than an exception — so this length check is what actually rejects garbage.
             if (decoded.Length != SignatureLength)
             {
                 return false;
@@ -46,7 +45,7 @@ public static class SignatureEncoding
         }
         catch (Exception)
         {
-            // NotSupportedException from odd-length hex, FormatException from invalid base58.
+            // FormatException from invalid base58 characters.
             return false;
         }
     }

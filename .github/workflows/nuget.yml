@@ -10,10 +10,10 @@ on:
 
 jobs:
   publish-nuget:
-    name: Publish NuGet Package
+    name: Publish NuGet Packages
     runs-on: ubuntu-latest
     environment: XcavateProfile
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,17 +34,31 @@ jobs:
             echo "version=${VERSION}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build package
+      # Both suites are hermetic — no database, no docker, no running API. They guard what the
+      # packages promise: that the payload hash is byte-identical to the Substrate helpers it
+      # replaced, and that the Solana package carries no Substrate dependency. A push to NuGet.org
+      # cannot be taken back, so this runs before packing.
+      - name: Test
         run: |
-          dotnet pack src/XcavateProfileApiClient/XcavateProfileApiClient.csproj \
-            -c Release \
-            -p:PackageVersion=${{ steps.version.outputs.version }} \
-            -o ./nupkgs
+          dotnet test tests/XcavateBuckets.Tests -c Release
+          dotnet test tests/XcavateProfileApiSolanaClient.Tests -c Release
 
+      # Two packages, same version, built from the same sources. XcavateProfileApiSolanaClient omits
+      # the Substrate signing path so Solana consumers do not take a dependency on Substrate.NET.API.
+      - name: Build packages
+        run: |
+          for project in XcavateProfileApiClient XcavateProfileApiSolanaClient; do
+            dotnet pack "src/${project}/${project}.csproj" \
+              -c Release \
+              -p:PackageVersion=${{ steps.version.outputs.version }} \
+              -o ./nupkgs
+          done
+
+      # The matching .snupkg symbol packages are pushed alongside each .nupkg automatically.
       - name: Push to NuGet
         run: dotnet nuget push ./nupkgs/*.nupkg -s https://api.nuget.org/v3/index.json -k ${{ secrets.NUGET_API_KEY }} --skip-duplicate
 
-      - name: Upload package as artifact
+      - name: Upload packages as artifact
         uses: actions/upload-artifact@v4
         with:
           name: nuget-packages

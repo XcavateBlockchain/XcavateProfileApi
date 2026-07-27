@@ -1,5 +1,3 @@
-using Substrate.NetApi;
-using Substrate.NetApi.Model.Types;
 using XcavateProfile.Client;
 using XcavateProfileApiClient.Signing;
 
@@ -14,17 +12,17 @@ namespace XcavateProfileApiClient;
 /// Reads are public, so an unsigned client works for queries; supply a signer only when the client
 /// needs to send mutations.
 /// </remarks>
-public sealed class SigningHttpMessageHandler : DelegatingHandler
+public sealed partial class SigningHttpMessageHandler : DelegatingHandler
 {
     private const string GraphQLPath = "/graphql";
 
     private readonly IRequestSigner _signer;
 
-    public SigningHttpMessageHandler(IRequestSigner signer) => _signer = signer;
-
-    /// <summary>Convenience overload for the sr25519 path, which every existing caller uses.</summary>
-    public SigningHttpMessageHandler(Account account) : this(new SubstrateRequestSigner(account))
+    public SigningHttpMessageHandler(IRequestSigner signer)
     {
+        ArgumentNullException.ThrowIfNull(signer);
+
+        _signer = signer;
     }
 
     protected override async Task<HttpResponseMessage> SendAsync(
@@ -35,20 +33,9 @@ public sealed class SigningHttpMessageHandler : DelegatingHandler
             // Buffer the body first: the signature is over these bytes, and the content must still
             // be readable afterwards for the actual send.
             var body = await request.Content.ReadAsStringAsync(cancellationToken);
-            var timestamp = DateTime.UtcNow;
 
-            var payload = CryptoHelper.ConstructPayload(
-                "POST", GraphQLPath, new RawBody(body), timestamp);
-
-            var signature = await _signer.SignAsync(payload);
-
-            request.Headers.Remove("X-SS58-Address");
-            request.Headers.Remove("X-Signature");
-            request.Headers.Remove("X-Timestamp");
-
-            request.Headers.Add("X-SS58-Address", _signer.Address);
-            request.Headers.Add("X-Signature", _signer.EncodeSignature(signature));
-            request.Headers.Add("X-Timestamp", timestamp.ToString("o"));
+            await RequestSigning.ApplyAsync(
+                request, _signer, "POST", GraphQLPath, new RawBody(body), DateTime.UtcNow);
         }
 
         return await base.SendAsync(request, cancellationToken);
@@ -57,6 +44,6 @@ public sealed class SigningHttpMessageHandler : DelegatingHandler
     /// <summary>Hashes the serialized request body through the shared payload-hashing seam.</summary>
     private sealed class RawBody(string body) : IPayloadBody
     {
-        public string Hash() => Utils.Bytes2HexString(CryptoHelper.Hash(body));
+        public string Hash() => CryptoHelper.HashHex(body);
     }
 }
