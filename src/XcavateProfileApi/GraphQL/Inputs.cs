@@ -14,7 +14,7 @@ public sealed record BucketMetadataInput(
     IReadOnlyList<PropertyInput>? Properties);
 
 public sealed record MessageMetadataInput(
-    string Description,
+    string? Description,
     string ContentType,
     string ContentHash,
     IReadOnlyList<PropertyInput>? Properties);

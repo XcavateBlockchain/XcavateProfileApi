@@ -77,6 +77,31 @@ public class MessageServiceTests
     }
 
     [Test]
+    public async Task WriteAsync_accepts_a_missing_description()
+    {
+        var request = Request() with { Description = null };
+
+        var message = await _fixture.Messages.WriteAsync(
+            TestDb.Carol, _ns.NamespaceId, _bucket.BucketId, request, Ct);
+
+        Assert.That(message.Description, Is.Null);
+    }
+
+    [Test]
+    public void WriteAsync_rejects_an_over_long_description()
+    {
+        var request = Request() with
+        {
+            Description = new string('x', _fixture.Options.MaxNameLen + 1)
+        };
+
+        var ex = Assert.ThrowsAsync<BucketException>(() => _fixture.Messages.WriteAsync(
+            TestDb.Carol, _ns.NamespaceId, _bucket.BucketId, request, Ct))!;
+
+        Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.InvalidInput));
+    }
+
+    [Test]
     public async Task WriteAsync_stores_supplied_ipfs_content_verbatim()
     {
         var message = await _fixture.Messages.WriteAsync(

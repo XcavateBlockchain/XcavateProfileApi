@@ -740,7 +740,7 @@ input MessageInput {
 }
 
 input MessageMetadataInput {
-  description: String!
+  description: String
   contentType: String!
   contentHash: String!
   properties: [PropertyInput!]

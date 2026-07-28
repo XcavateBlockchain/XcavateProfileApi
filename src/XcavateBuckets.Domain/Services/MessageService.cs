@@ -13,7 +13,7 @@ public sealed record MessageWriteRequest(
     string Reference,
     string? Tag,
     string? IpfsContent,
-    string Description,
+    string? Description,
     string ContentType,
     string ContentHash,
     IEnumerable<KeyValuePair<string, string>>? Properties);
@@ -41,7 +41,7 @@ public class MessageService(
         CancellationToken ct)
     {
         validator.Required(request.Reference, validator.Options.MaxReferenceLen, "reference");
-        validator.Required(request.Description, validator.Options.MaxNameLen, "description");
+        validator.Text(request.Description, validator.Options.MaxNameLen, "description");
         validator.Required(request.ContentType, validator.Options.MaxCategoryLen, "contentType");
         validator.Hex32Value(request.ContentHash, "contentHash");
         validator.Text(request.Tag, validator.Options.MaxTagLen, "tag");
