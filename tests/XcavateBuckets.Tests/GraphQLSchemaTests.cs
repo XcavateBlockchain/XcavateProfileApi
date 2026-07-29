@@ -189,8 +189,28 @@ public class GraphQLSchemaTests
     {
         var sdl = await BuildSdlAsync();
 
-        Assert.That(sdl, Does.Contain("namespace: Namespace!"),
-            "the indexer's @derivedFrom(field: \"namespace\") pointed at a field Bucket lacked");
+        var start = sdl.IndexOf("type Bucket ", StringComparison.Ordinal);
+        Assert.That(start, Is.GreaterThanOrEqualTo(0));
+        var bucketBlock = sdl[start..sdl.IndexOf('}', start)];
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(bucketBlock, Does.Contain("namespace: Namespace"),
+                "the indexer's @derivedFrom(field: \"namespace\") pointed at a field Bucket lacked");
+            Assert.That(bucketBlock, Does.Not.Contain("namespace: Namespace!"),
+                "standalone buckets have no namespace, so the relation is nullable");
+        });
+    }
+
+    [Test]
+    public async Task CreateBucket_accepts_an_omitted_namespace()
+    {
+        var sdl = await BuildSdlAsync();
+
+        Assert.That(sdl,
+            Does.Contain("createBucket(namespaceId: BigInt metadata: BucketMetadataInput!)")
+                .Or.Contain("createBucket(namespaceId: BigInt, metadata: BucketMetadataInput!)"),
+            "namespaceId must be optional so a bucket can be created outside any namespace");
     }
 
     [Test]

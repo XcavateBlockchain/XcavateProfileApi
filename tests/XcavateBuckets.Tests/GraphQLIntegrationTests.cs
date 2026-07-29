@@ -210,6 +210,33 @@ public class GraphQLIntegrationTests
     }
 
     [Test]
+    public async Task Bucket_without_a_namespace_is_created_by_any_signed_caller()
+    {
+        var bob = Bob();
+        await using var host = await GraphQLHost.StartAsync();
+
+        var result = await host.SignedAsync(
+            """
+            mutation {
+              createBucket(metadata: { name: "standalone", category: "personal" }) {
+                id namespaceId creator namespace { id }
+              }
+            }
+            """, bob);
+
+        Assert.That(result.FirstErrorCode(), Is.Null, result.RootElement.ToString());
+        var bucket = result.Data("createBucket");
+        Assert.Multiple(() =>
+        {
+            Assert.That(bucket.GetProperty("namespaceId").ValueKind,
+                Is.EqualTo(JsonValueKind.Null));
+            Assert.That(bucket.GetProperty("namespace").ValueKind,
+                Is.EqualTo(JsonValueKind.Null));
+            Assert.That(bucket.GetProperty("creator").GetString(), Is.EqualTo(bob.Value));
+        });
+    }
+
+    [Test]
     public async Task Full_lifecycle_writes_and_reads_a_message_through_nested_selection()
     {
         var alice = Alice();

@@ -32,7 +32,7 @@ public class BucketMutations
     // call_index 1
     [RequireSignature]
     public Task<BucketContributor> AddContributor(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string contributor,
         ICallerContext caller,
@@ -45,7 +45,7 @@ public class BucketMutations
     // call_index 2
     [RequireSignature]
     public Task<bool> RemoveContributor(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string contributor,
         ICallerContext caller,
@@ -58,7 +58,7 @@ public class BucketMutations
     // call_index 3
     [RequireSignature]
     public Task<BucketAdmin> AddAdmin(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string admin,
         ICallerContext caller,
@@ -71,7 +71,7 @@ public class BucketMutations
     // call_index 4
     [RequireSignature]
     public Task<bool> RemoveAdmin(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string admin,
         ICallerContext caller,
@@ -108,7 +108,7 @@ public class BucketMutations
     // call_index 7
     [RequireSignature]
     public Task<Bucket> CreateBucket(
-        long namespaceId,
+        long? namespaceId,
         BucketMetadataInput metadata,
         ICallerContext caller,
         BucketDbContext db,
@@ -121,7 +121,7 @@ public class BucketMutations
     // call_index 8
     [RequireSignature]
     public Task<Bucket> PauseWriting(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         ICallerContext caller,
         BucketDbContext db,
@@ -133,7 +133,7 @@ public class BucketMutations
     // call_index 9
     [RequireSignature]
     public Task<Bucket> ResumeWriting(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string newEncryptionKey,
         ICallerContext caller,
@@ -158,7 +158,7 @@ public class BucketMutations
     // call_index 11
     [RequireSignature]
     public Task<Bucket> RotateKey(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string newEncryptionKey,
         ICallerContext caller,
@@ -171,7 +171,7 @@ public class BucketMutations
     // call_index 12
     [RequireSignature]
     public Task<Message> Write(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         MessageInput message,
         ICallerContext caller,
@@ -202,7 +202,7 @@ public class BucketMutations
     // call_index 14
     [RequireAdmin]
     public Task<bool> ForceRemoveBucket(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         BucketDbContext db,
         BucketService buckets,
@@ -242,7 +242,7 @@ public class BucketMutations
     // call_index 18
     [RequireSignature]
     public Task<BucketViewer> AddViewer(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string viewer,
         ICallerContext caller,
@@ -255,7 +255,7 @@ public class BucketMutations
     // call_index 19
     [RequireSignature]
     public Task<bool> RemoveViewer(
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string viewer,
         ICallerContext caller,

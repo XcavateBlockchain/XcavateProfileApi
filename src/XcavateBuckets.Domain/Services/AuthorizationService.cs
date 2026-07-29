@@ -61,13 +61,31 @@ public class AuthorizationService(BucketDbContext db)
     /// <summary>
     /// Loads a bucket by its namespace and id. The pallet keys <c>Buckets</c> by
     /// <c>(namespace_id, bucket_id)</c>, so a bucket that exists under a different namespace must
-    /// read as missing rather than as someone else's bucket.
+    /// read as missing rather than as someone else's bucket. A null namespace id addresses only
+    /// standalone buckets, keeping that exact-match rule for buckets outside any namespace.
     /// </summary>
-    public async Task<Bucket> GetBucketAsync(long namespaceId, long bucketId, CancellationToken ct)
+    public async Task<Bucket> GetBucketAsync(long? namespaceId, long bucketId, CancellationToken ct)
     {
         var bucket = await db.Buckets
             .FirstOrDefaultAsync(b => b.NamespaceId == namespaceId && b.BucketId == bucketId, ct);
 
         return bucket ?? throw BucketException.UnknownBucket();
+    }
+
+    /// <summary>
+    /// The manager-level check for a loaded bucket. In a namespace, that is the namespace manager;
+    /// for a standalone bucket there is no namespace to manage, so the bucket's creator takes the
+    /// role. Keeps the pallet's asymmetry — bucket admins still cannot appoint admins.
+    /// </summary>
+    public async Task EnsureCanManageBucketAsync(Bucket bucket, string subject, CancellationToken ct)
+    {
+        if (bucket.NamespaceId is long namespaceId)
+        {
+            await EnsureIsManagerAsync(namespaceId, subject, ct);
+        }
+        else if (bucket.Creator != subject)
+        {
+            throw BucketException.NotManager();
+        }
     }
 }

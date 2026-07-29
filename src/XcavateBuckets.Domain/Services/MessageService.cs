@@ -35,7 +35,7 @@ public class MessageService(
     /// </summary>
     public async Task<Message> WriteAsync(
         string caller,
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         MessageWriteRequest request,
         CancellationToken ct)

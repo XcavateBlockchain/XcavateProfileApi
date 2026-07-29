@@ -12,7 +12,8 @@ namespace XcavateBuckets.Domain.Services;
 /// <remarks>
 /// The pallet is deliberately asymmetric here: admins are appointed by a <em>namespace manager</em>,
 /// while contributors and viewers are appointed by a <em>bucket admin</em>. Collapsing those two
-/// roles would let any admin promote themselves indefinitely.
+/// roles would let any admin promote themselves indefinitely. For a standalone bucket (no
+/// namespace) the bucket's creator takes the manager role, keeping that asymmetry intact.
 /// </remarks>
 public class MembershipService(
     BucketDbContext db,
@@ -21,11 +22,11 @@ public class MembershipService(
     TimeProvider clock)
 {
     public async Task<BucketAdmin> AddAdminAsync(
-        string caller, long namespaceId, long bucketId, string admin, CancellationToken ct)
+        string caller, long? namespaceId, long bucketId, string admin, CancellationToken ct)
     {
         validator.Required(admin, validator.Options.MaxNameLen, "admin");
-        await auth.GetBucketAsync(namespaceId, bucketId, ct);
-        await auth.EnsureIsManagerAsync(namespaceId, caller, ct);
+        var bucket = await auth.GetBucketAsync(namespaceId, bucketId, ct);
+        await auth.EnsureCanManageBucketAsync(bucket, caller, ct);
 
         var existing = await db.BucketAdmins
             .FirstOrDefaultAsync(a => a.BucketId == bucketId && a.SubjectId == admin, ct);
@@ -47,10 +48,10 @@ public class MembershipService(
     }
 
     public async Task RemoveAdminAsync(
-        string caller, long namespaceId, long bucketId, string admin, CancellationToken ct)
+        string caller, long? namespaceId, long bucketId, string admin, CancellationToken ct)
     {
-        await auth.GetBucketAsync(namespaceId, bucketId, ct);
-        await auth.EnsureIsManagerAsync(namespaceId, caller, ct);
+        var bucket = await auth.GetBucketAsync(namespaceId, bucketId, ct);
+        await auth.EnsureCanManageBucketAsync(bucket, caller, ct);
 
         var entity = await db.BucketAdmins
             .FirstOrDefaultAsync(a => a.BucketId == bucketId && a.SubjectId == admin, ct);
@@ -64,7 +65,7 @@ public class MembershipService(
     }
 
     public async Task<BucketContributor> AddContributorAsync(
-        string caller, long namespaceId, long bucketId, string contributor, CancellationToken ct)
+        string caller, long? namespaceId, long bucketId, string contributor, CancellationToken ct)
     {
         validator.Required(contributor, validator.Options.MaxNameLen, "contributor");
         await auth.GetBucketAsync(namespaceId, bucketId, ct);
@@ -90,7 +91,7 @@ public class MembershipService(
     }
 
     public async Task RemoveContributorAsync(
-        string caller, long namespaceId, long bucketId, string contributor, CancellationToken ct)
+        string caller, long? namespaceId, long bucketId, string contributor, CancellationToken ct)
     {
         await auth.GetBucketAsync(namespaceId, bucketId, ct);
         await auth.EnsureIsAdminAsync(bucketId, caller, ct);
@@ -107,7 +108,7 @@ public class MembershipService(
     }
 
     public async Task<BucketViewer> AddViewerAsync(
-        string caller, long namespaceId, long bucketId, string viewer, CancellationToken ct)
+        string caller, long? namespaceId, long bucketId, string viewer, CancellationToken ct)
     {
         validator.Hex32Value(viewer, "viewer");
         await auth.GetBucketAsync(namespaceId, bucketId, ct);
@@ -133,7 +134,7 @@ public class MembershipService(
     }
 
     public async Task RemoveViewerAsync(
-        string caller, long namespaceId, long bucketId, string viewer, CancellationToken ct)
+        string caller, long? namespaceId, long bucketId, string viewer, CancellationToken ct)
     {
         await auth.GetBucketAsync(namespaceId, bucketId, ct);
         await auth.EnsureIsAdminAsync(bucketId, caller, ct);

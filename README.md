@@ -134,6 +134,14 @@ writing a message also moves a tag counter and the bucket's next message id.
 - **On-chain fees are not ported.** `FeeNamespace`/`FeeBucket`/`FeeMessage`/`FeeTag` and the
   `UnableToPayFees` error have no off-chain analogue.
 
+**Standalone buckets (off-chain extension):** `createBucket` may omit `namespaceId`, letting any
+signed caller create a bucket outside every namespace — the pallet's `(NamespaceId, BucketId)`
+double map cannot represent this. Such a bucket is addressed by passing a null (or omitted)
+`namespaceId` to the bucket mutations, and its **creator stands in for the namespace manager**:
+only the creator may `addAdmin`/`removeAdmin`, preserving the pallet's rule that bucket admins
+cannot appoint admins. `Bucket.namespaceId` and `Bucket.namespace` are therefore nullable in the
+schema.
+
 **Errors** carry a stable SCREAMING_SNAKE identifier in `errors[].extensions.code` — branch on
 that rather than on message text. Domain codes port the pallet's `Error` enum
 (`UNKNOWN_NAMESPACE`, `BUCKET_IS_LOCKED`, `NOT_CONTRIBUTOR`, `LAST_MANAGER_REMOVAL`, …), plus

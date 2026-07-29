@@ -15,13 +15,15 @@ public class BucketService(
     TimeProvider clock)
 {
     /// <summary>
-    /// Creates a bucket in a namespace. The caller must be a manager of the namespace, not a bucket
-    /// admin. The new bucket is locked, because the pallet's <c>Status::default()</c> is
-    /// <c>Locked</c> — it accepts no messages until <see cref="ResumeWritingAsync"/> supplies a key.
+    /// Creates a bucket. With a namespace, the caller must be a manager of that namespace, not a
+    /// bucket admin. Without one, any signed caller may create a standalone bucket and becomes the
+    /// creator who stands in for the namespace manager. Either way the new bucket is locked,
+    /// because the pallet's <c>Status::default()</c> is <c>Locked</c> — it accepts no messages
+    /// until <see cref="ResumeWritingAsync"/> supplies a key.
     /// </summary>
     public async Task<Bucket> CreateAsync(
         string caller,
-        long namespaceId,
+        long? namespaceId,
         string name,
         string category,
         IEnumerable<KeyValuePair<string, string>>? properties,
@@ -31,8 +33,11 @@ public class BucketService(
         validator.Required(category, validator.Options.MaxCategoryLen, "category");
         var propertiesJson = validator.PropertiesJson(properties);
 
-        await auth.EnsureNamespaceExistsAsync(namespaceId, ct);
-        await auth.EnsureIsManagerAsync(namespaceId, caller, ct);
+        if (namespaceId is long ownerNamespaceId)
+        {
+            await auth.EnsureNamespaceExistsAsync(ownerNamespaceId, ct);
+            await auth.EnsureIsManagerAsync(ownerNamespaceId, caller, ct);
+        }
 
         var now = clock.GetUtcNow().UtcDateTime;
 
@@ -59,7 +64,7 @@ public class BucketService(
     /// <summary>Locks a bucket for writing. Ports <c>pause_writing</c>.</summary>
     public async Task<Bucket> PauseWritingAsync(
         string caller,
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         CancellationToken ct)
     {
@@ -80,7 +85,7 @@ public class BucketService(
     /// </summary>
     public Task<Bucket> ResumeWritingAsync(
         string caller,
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string newEncryptionKey,
         CancellationToken ct) =>
@@ -93,7 +98,7 @@ public class BucketService(
     /// </summary>
     public Task<Bucket> RotateKeyAsync(
         string caller,
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string newEncryptionKey,
         CancellationToken ct) =>
@@ -101,7 +106,7 @@ public class BucketService(
 
     private async Task<Bucket> SetKeyAsync(
         string caller,
-        long namespaceId,
+        long? namespaceId,
         long bucketId,
         string newEncryptionKey,
         bool allowLocked,
@@ -129,7 +134,7 @@ public class BucketService(
     /// Deletes a bucket. Ports <c>do_delete_bucket</c>, which refuses while any child rows remain,
     /// in this order: messages, admins, contributors, viewers, tags.
     /// </summary>
-    public async Task ForceRemoveAsync(long namespaceId, long bucketId, CancellationToken ct)
+    public async Task ForceRemoveAsync(long? namespaceId, long bucketId, CancellationToken ct)
     {
         if (await db.Messages.AnyAsync(m => m.BucketId == bucketId, ct))
         {

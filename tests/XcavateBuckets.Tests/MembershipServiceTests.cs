@@ -54,6 +54,41 @@ public class MembershipServiceTests
     }
 
     [Test]
+    public async Task AddAdminAsync_on_a_namespaceless_bucket_is_performed_by_its_creator()
+    {
+        var bucket = await _fixture.SeedBucketAsync(null, creator: TestDb.Carol);
+
+        await _fixture.Memberships.AddAdminAsync(
+            TestDb.Carol, null, bucket.BucketId, TestDb.Dave, Ct);
+
+        Assert.That(await _fixture.Auth.IsAdminAsync(bucket.BucketId, TestDb.Dave, Ct), Is.True);
+    }
+
+    [Test]
+    public async Task AddAdminAsync_on_a_namespaceless_bucket_rejects_a_non_creator()
+    {
+        var bucket = await _fixture.SeedBucketAsync(null, creator: TestDb.Carol);
+
+        var ex = Assert.ThrowsAsync<BucketException>(() => _fixture.Memberships.AddAdminAsync(
+            TestDb.Dave, null, bucket.BucketId, TestDb.Dave, Ct))!;
+
+        Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.NotManager),
+            "with no namespace to manage, only the bucket's creator may appoint admins");
+    }
+
+    [Test]
+    public async Task RemoveAdminAsync_on_a_namespaceless_bucket_is_performed_by_its_creator()
+    {
+        var bucket = await _fixture.SeedBucketAsync(
+            null, creator: TestDb.Carol, admins: [TestDb.Dave]);
+
+        await _fixture.Memberships.RemoveAdminAsync(
+            TestDb.Carol, null, bucket.BucketId, TestDb.Dave, Ct);
+
+        Assert.That(await _fixture.Auth.IsAdminAsync(bucket.BucketId, TestDb.Dave, Ct), Is.False);
+    }
+
+    [Test]
     public async Task AddContributorAsync_is_performed_by_a_bucket_admin()
     {
         await _fixture.Memberships.AddContributorAsync(

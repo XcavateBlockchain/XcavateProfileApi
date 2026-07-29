@@ -193,54 +193,54 @@ type Query {
 type Mutation {
   createNamespace(metadata: NamespaceMetadataInput!): Namespace!
     @cost(weight: "10")
-  addContributor(namespaceId: BigInt!, bucketId: BigInt!, contributor: String!): BucketContributor!
+  addContributor(namespaceId: BigInt, bucketId: BigInt!, contributor: String!): BucketContributor!
     @cost(weight: "10")
   removeContributor(
-    namespaceId: BigInt!
+    namespaceId: BigInt
     bucketId: BigInt!
     contributor: String!
   ): Boolean! @cost(weight: "10")
-  addAdmin(namespaceId: BigInt!, bucketId: BigInt!, admin: String!): BucketAdmin!
+  addAdmin(namespaceId: BigInt, bucketId: BigInt!, admin: String!): BucketAdmin!
     @cost(weight: "10")
-  removeAdmin(namespaceId: BigInt!, bucketId: BigInt!, admin: String!): Boolean!
+  removeAdmin(namespaceId: BigInt, bucketId: BigInt!, admin: String!): Boolean!
     @cost(weight: "10")
   addManager(namespaceId: BigInt!, newManager: String!): NamespaceManager!
     @cost(weight: "10")
   removeManager(namespaceId: BigInt!, oldManager: String!): Boolean!
     @cost(weight: "10")
-  createBucket(namespaceId: BigInt!, metadata: BucketMetadataInput!): Bucket!
+  createBucket(namespaceId: BigInt, metadata: BucketMetadataInput!): Bucket!
     @cost(weight: "10")
-  pauseWriting(namespaceId: BigInt!, bucketId: BigInt!): Bucket!
+  pauseWriting(namespaceId: BigInt, bucketId: BigInt!): Bucket!
     @cost(weight: "10")
   resumeWriting(
-    namespaceId: BigInt!
+    namespaceId: BigInt
     bucketId: BigInt!
     newEncryptionKey: String!
   ): Bucket! @cost(weight: "10")
   createTag(bucketId: BigInt!, newTag: String!): Tag! @cost(weight: "10")
-  rotateKey(namespaceId: BigInt!, bucketId: BigInt!, newEncryptionKey: String!): Bucket!
+  rotateKey(namespaceId: BigInt, bucketId: BigInt!, newEncryptionKey: String!): Bucket!
     @cost(weight: "10")
-  write(namespaceId: BigInt!, bucketId: BigInt!, message: MessageInput!): Message!
+  write(namespaceId: BigInt, bucketId: BigInt!, message: MessageInput!): Message!
     @cost(weight: "10")
   forceRemoveNamespace(namespaceId: BigInt!): Boolean! @cost(weight: "10")
-  forceRemoveBucket(namespaceId: BigInt!, bucketId: BigInt!): Boolean!
+  forceRemoveBucket(namespaceId: BigInt, bucketId: BigInt!): Boolean!
     @cost(weight: "10")
   forceRemoveTag(bucketId: BigInt!, tag: String!): Boolean! @cost(weight: "10")
   forceRemoveMessage(bucketId: BigInt!, messageId: BigInt!): Boolean!
     @cost(weight: "10")
   forceAddManager(namespaceId: BigInt!, manager: String!): NamespaceManager!
     @cost(weight: "10")
-  addViewer(namespaceId: BigInt!, bucketId: BigInt!, viewer: String!): BucketViewer!
+  addViewer(namespaceId: BigInt, bucketId: BigInt!, viewer: String!): BucketViewer!
     @cost(weight: "10")
-  removeViewer(namespaceId: BigInt!, bucketId: BigInt!, viewer: String!): Boolean!
+  removeViewer(namespaceId: BigInt, bucketId: BigInt!, viewer: String!): Boolean!
     @cost(weight: "10")
 }
 
 type Bucket {
   id: ID! @cost(weight: "10")
   bucketId: BigInt!
-  namespaceId: BigInt!
-  namespace: Namespace! @cost(weight: "10")
+  namespaceId: BigInt
+  namespace: Namespace @cost(weight: "10")
   admins: [BucketAdmin!]! @cost(weight: "10")
   contributors: [BucketContributor!]! @cost(weight: "10")
   viewers: [BucketViewer!]! @cost(weight: "10")

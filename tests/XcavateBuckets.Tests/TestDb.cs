@@ -96,14 +96,16 @@ public sealed class TestDb : IDisposable
 
     /// <summary>Inserts a bucket directly, bypassing the service layer.</summary>
     public async Task<Bucket> SeedBucketAsync(
-        long namespaceId,
+        long? namespaceId,
         bool isWritable = false,
         string[]? admins = null,
-        string[]? contributors = null)
+        string[]? contributors = null,
+        string? creator = null)
     {
         var bucket = new Bucket
         {
             NamespaceId = namespaceId,
+            Creator = creator,
             Name = "seeded",
             Category = "test",
             IsWritable = isWritable,

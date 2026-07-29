@@ -139,10 +139,52 @@ public class GeneratedClientTests
         Assert.Multiple(() =>
         {
             Assert.That(readBucket.EncryptionKey, Is.EqualTo(TestDb.Key32));
-            Assert.That(readBucket.Namespace.Name, Is.EqualTo("deeds"));
+            Assert.That(readBucket.Namespace, Is.Not.Null);
+            Assert.That(readBucket.Namespace!.Name, Is.EqualTo("deeds"));
             Assert.That(readBucket.Messages, Has.Count.EqualTo(1));
             Assert.That(readBucket.Messages[0].IpfsContent, Is.EqualTo("the deed text"));
             Assert.That(readBucket.Messages[0].Tag, Is.EqualTo("deed-scan"));
+        });
+    }
+
+    [Test]
+    public async Task Generated_client_runs_the_lifecycle_of_a_bucket_without_a_namespace()
+    {
+        var alice = NewAccount(0x31);
+        await using var host = await GraphQLHost.StartAsync();
+        var (client, provider) = CreateClient(host, alice);
+        await using var _ = provider;
+
+        var bucket = await client.CreateBucket.ExecuteAsync(
+            null, new BucketMetadataInput { Name = "standalone", Category = "personal" });
+        bucket.EnsureNoErrors();
+        var bucketId = bucket.Data!.CreateBucket.BucketId;
+
+        // With no namespace, the creator stands in for the manager and appoints herself admin.
+        (await client.AddAdmin.ExecuteAsync(null, bucketId, alice.Value)).EnsureNoErrors();
+        (await client.AddContributor.ExecuteAsync(null, bucketId, alice.Value)).EnsureNoErrors();
+        (await client.ResumeWriting.ExecuteAsync(null, bucketId, TestDb.Key32)).EnsureNoErrors();
+
+        var written = await client.WriteMessage.ExecuteAsync(null, bucketId, new MessageInput
+        {
+            Reference = "bafybeigdyrzt5example",
+            Metadata = new MessageMetadataInput
+            {
+                ContentType = "text/plain",
+                ContentHash = TestDb.Hash32
+            }
+        });
+        written.EnsureNoErrors();
+
+        var read = await client.GetBucketById.ExecuteAsync(bucketId.ToString());
+        read.EnsureNoErrors();
+
+        var readBucket = read.Data!.Bucket!;
+        Assert.Multiple(() =>
+        {
+            Assert.That(readBucket.NamespaceId, Is.Null);
+            Assert.That(readBucket.Namespace, Is.Null);
+            Assert.That(readBucket.Messages, Has.Count.EqualTo(1));
         });
     }
 

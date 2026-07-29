@@ -52,6 +52,18 @@ public class MessageServiceTests
     }
 
     [Test]
+    public async Task WriteAsync_accepts_a_namespaceless_bucket()
+    {
+        var bucket = await _fixture.SeedBucketAsync(
+            null, isWritable: true, contributors: [TestDb.Carol]);
+
+        var message = await _fixture.Messages.WriteAsync(
+            TestDb.Carol, null, bucket.BucketId, Request(), Ct);
+
+        Assert.That(message.MessageId, Is.Zero);
+    }
+
+    [Test]
     public async Task WriteAsync_assigns_sequential_ids_within_a_bucket()
     {
         await _fixture.Messages.WriteAsync(

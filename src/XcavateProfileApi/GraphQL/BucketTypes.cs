@@ -101,15 +101,17 @@ public sealed class BucketType : ObjectType<Bucket>
         descriptor.Field("id").Type<NonNullType<IdType>>()
             .Resolve(ctx => EntityId.For(ctx.Parent<Bucket>()));
         descriptor.Field(f => f.BucketId).Type<NonNullType<BigIntType>>();
-        descriptor.Field(f => f.NamespaceId).Type<NonNullType<BigIntType>>();
+        descriptor.Field(f => f.NamespaceId).Type<BigIntType>();
         descriptor.Field(f => f.NextMessageId).Ignore();
 
         // The relation the indexer's schema declared via @derivedFrom but never actually had:
-        // Bucket carried only a scalar namespaceId.
-        descriptor.Field(f => f.Namespace).Type<NonNullType<NamespaceType>>()
-            .Resolve(ctx => ctx.Service<BucketDbContext>().Namespaces
-                .FirstOrDefaultAsync(n => n.NamespaceId == ctx.Parent<Bucket>().NamespaceId,
-                    ctx.RequestAborted));
+        // Bucket carried only a scalar namespaceId. Nullable, because a standalone bucket has no
+        // namespace at all.
+        descriptor.Field(f => f.Namespace).Type<NamespaceType>()
+            .Resolve(ctx => ctx.Parent<Bucket>().NamespaceId is long namespaceId
+                ? ctx.Service<BucketDbContext>().Namespaces
+                    .FirstOrDefaultAsync(n => n.NamespaceId == namespaceId, ctx.RequestAborted)
+                : Task.FromResult<Namespace?>(null));
 
         descriptor.Field(f => f.Admins).Type<NonNullType<ListType<NonNullType<BucketAdminType>>>>()
             .Resolve(ctx => Load(ctx, db => db.BucketAdmins

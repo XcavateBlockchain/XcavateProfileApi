@@ -57,6 +57,59 @@ public class BucketServiceTests
     }
 
     [Test]
+    public async Task CreateAsync_without_a_namespace_allows_any_signed_caller()
+    {
+        var bucket = await _fixture.Buckets.CreateAsync(
+            TestDb.Bob, null, "deeds", "legal", null, Ct);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(bucket.NamespaceId, Is.Null);
+            Assert.That(bucket.Creator, Is.EqualTo(TestDb.Bob));
+            Assert.That(bucket.IsWritable, Is.False, "Status::default() is Locked");
+            Assert.That(bucket.EncryptionKey, Is.Null);
+        });
+    }
+
+    [Test]
+    public async Task Namespaceless_bucket_is_addressed_with_a_null_namespace_id()
+    {
+        var bucket = await _fixture.SeedBucketAsync(
+            null, isWritable: true, admins: [TestDb.Bob]);
+
+        var paused = await _fixture.Buckets.PauseWritingAsync(
+            TestDb.Bob, null, bucket.BucketId, Ct);
+
+        Assert.That(paused.IsWritable, Is.False);
+    }
+
+    [Test]
+    public async Task Namespaceless_bucket_reads_as_unknown_under_a_namespace_id()
+    {
+        var ns = await _fixture.SeedNamespaceAsync(TestDb.Alice);
+        var bucket = await _fixture.SeedBucketAsync(
+            null, isWritable: true, admins: [TestDb.Bob]);
+
+        var ex = Assert.ThrowsAsync<BucketException>(() => _fixture.Buckets.PauseWritingAsync(
+            TestDb.Bob, ns.NamespaceId, bucket.BucketId, Ct))!;
+
+        Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.UnknownBucket));
+    }
+
+    [Test]
+    public async Task Namespaced_bucket_reads_as_unknown_under_a_null_namespace_id()
+    {
+        var ns = await _fixture.SeedNamespaceAsync(TestDb.Alice);
+        var bucket = await _fixture.SeedBucketAsync(
+            ns.NamespaceId, isWritable: true, admins: [TestDb.Bob]);
+
+        var ex = Assert.ThrowsAsync<BucketException>(() => _fixture.Buckets.PauseWritingAsync(
+            TestDb.Bob, null, bucket.BucketId, Ct))!;
+
+        Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.UnknownBucket));
+    }
+
+    [Test]
     public async Task PauseWritingAsync_locks_a_writable_bucket()
     {
         var ns = await _fixture.SeedNamespaceAsync(TestDb.Alice);

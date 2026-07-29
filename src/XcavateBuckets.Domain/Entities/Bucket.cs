@@ -12,9 +12,14 @@ public class Bucket
     /// </summary>
     public long BucketId { get; set; }
 
-    public long NamespaceId { get; set; }
+    /// <summary>
+    /// Null for a standalone bucket created without a namespace — an off-chain extension the
+    /// pallet's double map cannot represent. Such a bucket is addressed with a null namespace id
+    /// and its <see cref="Creator"/> stands in for the namespace manager.
+    /// </summary>
+    public long? NamespaceId { get; set; }
 
-    public Namespace Namespace { get; set; } = null!;
+    public Namespace? Namespace { get; set; }
 
     /// <summary>SS58 address of the creator.</summary>
     public string? Creator { get; set; }

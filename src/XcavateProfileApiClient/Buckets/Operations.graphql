@@ -130,7 +130,7 @@ mutation CreateNamespace($metadata: NamespaceMetadataInput!) {
   }
 }
 
-mutation CreateBucket($namespaceId: BigInt!, $metadata: BucketMetadataInput!) {
+mutation CreateBucket($namespaceId: BigInt, $metadata: BucketMetadataInput!) {
   createBucket(namespaceId: $namespaceId, metadata: $metadata) {
     id
     bucketId
@@ -147,21 +147,21 @@ mutation AddManager($namespaceId: BigInt!, $newManager: String!) {
   }
 }
 
-mutation AddAdmin($namespaceId: BigInt!, $bucketId: BigInt!, $admin: String!) {
+mutation AddAdmin($namespaceId: BigInt, $bucketId: BigInt!, $admin: String!) {
   addAdmin(namespaceId: $namespaceId, bucketId: $bucketId, admin: $admin) {
     id
     subjectId
   }
 }
 
-mutation AddContributor($namespaceId: BigInt!, $bucketId: BigInt!, $contributor: String!) {
+mutation AddContributor($namespaceId: BigInt, $bucketId: BigInt!, $contributor: String!) {
   addContributor(namespaceId: $namespaceId, bucketId: $bucketId, contributor: $contributor) {
     id
     subjectId
   }
 }
 
-mutation AddViewer($namespaceId: BigInt!, $bucketId: BigInt!, $viewer: String!) {
+mutation AddViewer($namespaceId: BigInt, $bucketId: BigInt!, $viewer: String!) {
   addViewer(namespaceId: $namespaceId, bucketId: $bucketId, viewer: $viewer) {
     id
     viewerId
@@ -176,7 +176,7 @@ mutation CreateTag($bucketId: BigInt!, $newTag: String!) {
   }
 }
 
-mutation ResumeWriting($namespaceId: BigInt!, $bucketId: BigInt!, $newEncryptionKey: String!) {
+mutation ResumeWriting($namespaceId: BigInt, $bucketId: BigInt!, $newEncryptionKey: String!) {
   resumeWriting(
     namespaceId: $namespaceId
     bucketId: $bucketId
@@ -188,14 +188,14 @@ mutation ResumeWriting($namespaceId: BigInt!, $bucketId: BigInt!, $newEncryption
   }
 }
 
-mutation PauseWriting($namespaceId: BigInt!, $bucketId: BigInt!) {
+mutation PauseWriting($namespaceId: BigInt, $bucketId: BigInt!) {
   pauseWriting(namespaceId: $namespaceId, bucketId: $bucketId) {
     id
     isWritable
   }
 }
 
-mutation RotateKey($namespaceId: BigInt!, $bucketId: BigInt!, $newEncryptionKey: String!) {
+mutation RotateKey($namespaceId: BigInt, $bucketId: BigInt!, $newEncryptionKey: String!) {
   rotateKey(namespaceId: $namespaceId, bucketId: $bucketId, newEncryptionKey: $newEncryptionKey) {
     id
     isWritable
@@ -203,7 +203,7 @@ mutation RotateKey($namespaceId: BigInt!, $bucketId: BigInt!, $newEncryptionKey:
   }
 }
 
-mutation WriteMessage($namespaceId: BigInt!, $bucketId: BigInt!, $message: MessageInput!) {
+mutation WriteMessage($namespaceId: BigInt, $bucketId: BigInt!, $message: MessageInput!) {
   write(namespaceId: $namespaceId, bucketId: $bucketId, message: $message) {
     id
     messageId
@@ -213,15 +213,15 @@ mutation WriteMessage($namespaceId: BigInt!, $bucketId: BigInt!, $message: Messa
   }
 }
 
-mutation RemoveContributor($namespaceId: BigInt!, $bucketId: BigInt!, $contributor: String!) {
+mutation RemoveContributor($namespaceId: BigInt, $bucketId: BigInt!, $contributor: String!) {
   removeContributor(namespaceId: $namespaceId, bucketId: $bucketId, contributor: $contributor)
 }
 
-mutation RemoveAdmin($namespaceId: BigInt!, $bucketId: BigInt!, $admin: String!) {
+mutation RemoveAdmin($namespaceId: BigInt, $bucketId: BigInt!, $admin: String!) {
   removeAdmin(namespaceId: $namespaceId, bucketId: $bucketId, admin: $admin)
 }
 
-mutation RemoveViewer($namespaceId: BigInt!, $bucketId: BigInt!, $viewer: String!) {
+mutation RemoveViewer($namespaceId: BigInt, $bucketId: BigInt!, $viewer: String!) {
   removeViewer(namespaceId: $namespaceId, bucketId: $bucketId, viewer: $viewer)
 }
 
@@ -237,7 +237,7 @@ mutation ForceRemoveTag($bucketId: BigInt!, $tag: String!) {
   forceRemoveTag(bucketId: $bucketId, tag: $tag)
 }
 
-mutation ForceRemoveBucket($namespaceId: BigInt!, $bucketId: BigInt!) {
+mutation ForceRemoveBucket($namespaceId: BigInt, $bucketId: BigInt!) {
   forceRemoveBucket(namespaceId: $namespaceId, bucketId: $bucketId)
 }
 
