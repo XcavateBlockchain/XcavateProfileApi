@@ -25,7 +25,8 @@ public class MessageService(
     BucketDbContext db,
     AuthorizationService auth,
     InputValidator validator,
-    TimeProvider clock)
+    TimeProvider clock,
+    IBucketNotifier notifier)
 {
     /// <summary>
     /// Writes a message into a bucket. The pallet's check order matters and is reproduced exactly:
@@ -118,6 +119,8 @@ public class MessageService(
         bucket.UpdatedAt = now;
 
         await db.SaveChangesAsync(ct);
+
+        await notifier.MessageWrittenAsync(bucket, message, ct);
 
         return message;
     }

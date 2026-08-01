@@ -9,6 +9,7 @@ using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Services;
+using XcavateProfileApi.Services.Notifications;
 using XcavateProfileApi.Swagger;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -51,6 +52,29 @@ builder.Services.AddDbContext<ProfileDbContext>(options =>
 builder.Services.AddDbContext<BucketDbContext>(options =>
     options.UseNpgsql(connectionString, npgsql =>
         npgsql.MigrationsHistoryTable(BucketDbContext.MigrationsHistoryTable)));
+
+// Bucket push notifications, delivered through the realXmarketNotificationsApi
+// (https://notifications-api.xcavate.io). Without an API key the feature is off and
+// AddBucketDomain's NullBucketNotifier stays in place, so local and CI runs need no
+// notifications backend.
+var notificationsApiKey = builder.Configuration["NOTIFICATIONS_API_KEY"];
+if (!string.IsNullOrWhiteSpace(notificationsApiKey))
+{
+    var notificationsApiUrl = builder.Configuration["NOTIFICATIONS_API_URL"];
+    builder.Services.AddSingleton(new NotificationsOptions
+    {
+        BaseUrl = string.IsNullOrWhiteSpace(notificationsApiUrl)
+            ? NotificationsOptions.DefaultBaseUrl
+            : notificationsApiUrl,
+        ApiKey = notificationsApiKey
+    });
+    builder.Services.AddHttpClient(NotificationsApiClient.HttpClientName,
+        http => http.Timeout = TimeSpan.FromSeconds(15));
+    builder.Services.AddSingleton<NotificationsApiClient>();
+    builder.Services.AddSingleton<NotificationQueue>();
+    builder.Services.AddHostedService<NotificationDispatcher>();
+    builder.Services.AddScoped<IBucketNotifier, PushBucketNotifier>();
+}
 
 builder.Services.AddBucketDomain();
 builder.Services.AddBucketGraphQL();
