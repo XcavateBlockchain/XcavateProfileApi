@@ -48,6 +48,20 @@ public partial class XcavateProfileClient
     }
 
     /// <summary>
+    /// Register a Polkadot → Solana wallet migration, authenticated with the account's sr25519
+    /// signature. The account must be the Polkadot wallet being migrated — the server rejects a
+    /// registration signed by anyone else.
+    /// </summary>
+    public Task<WalletMigration> RegisterWalletMigrationAsync(
+        WalletMigration migration, Account account, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+
+        return RegisterWalletMigrationAsync(
+            migration, new SubstrateRequestSigner(account), cancellationToken);
+    }
+
+    /// <summary>
     /// Upload a profile image, authenticated with the account's sr25519 signature
     /// </summary>
     public Task<string> UploadImageAsync(

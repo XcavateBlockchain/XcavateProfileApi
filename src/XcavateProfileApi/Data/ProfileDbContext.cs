@@ -13,6 +13,8 @@ public class ProfileDbContext : DbContext
 
     public DbSet<Profile> Profiles { get; set; } = default!;
 
+    public DbSet<WalletMigration> WalletMigrations { get; set; } = default!;
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // Configure Profile entity
@@ -27,6 +29,16 @@ public class ProfileDbContext : DbContext
             entity.Property(p => p.Bio).IsRequired(false);
             entity.Property(p => p.ProfilePicture).IsRequired(false);
             entity.Property(p => p.X25519Key).IsRequired(false);
+        });
+
+        // Configure WalletMigration entity. The SS58 address is the key: a Polkadot account
+        // migrates to exactly one Solana wallet, while one Solana wallet may be the target of
+        // several migrations (a user consolidating accounts), so SolanaAddress is not unique.
+        modelBuilder.Entity<WalletMigration>(entity =>
+        {
+            entity.HasKey(m => m.Ss58Address);
+            entity.Property(m => m.Ss58Address).IsRequired();
+            entity.Property(m => m.SolanaAddress).IsRequired();
         });
     }
 }

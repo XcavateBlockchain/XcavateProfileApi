@@ -76,17 +76,17 @@ public partial class XcavateProfileClient : IDisposable
     /// </summary>
     public Task<Profile?> GetProfileAsync(
         string address, CancellationToken cancellationToken = default) =>
-        GetProfileOrNullAsync(ApiPath.Of("api", "profiles", address), cancellationToken);
+        GetOrNullAsync<Profile>(ApiPath.Of("api", "profiles", address), cancellationToken);
 
     /// <summary>
     /// Get a profile by nickname. Null when there is none.
     /// </summary>
     public Task<Profile?> GetProfileByNicknameAsync(
         string nickname, CancellationToken cancellationToken = default) =>
-        GetProfileOrNullAsync(ApiPath.Of("api", "profiles", "nickname", nickname), cancellationToken);
+        GetOrNullAsync<Profile>(ApiPath.Of("api", "profiles", "nickname", nickname), cancellationToken);
 
-    private async Task<Profile?> GetProfileOrNullAsync(
-        ApiPath path, CancellationToken cancellationToken)
+    private async Task<T?> GetOrNullAsync<T>(ApiPath path, CancellationToken cancellationToken)
+        where T : class
     {
         using var response = await _httpClient.GetAsync(Resolve(path), cancellationToken);
 
@@ -97,7 +97,7 @@ public partial class XcavateProfileClient : IDisposable
 
         await EnsureSuccessAsync(response, cancellationToken);
 
-        return await response.Content.ReadFromJsonAsync<Profile>(
+        return await response.Content.ReadFromJsonAsync<T>(
             JsonDefaults.Options, cancellationToken);
     }
 
@@ -120,7 +120,7 @@ public partial class XcavateProfileClient : IDisposable
             signer,
             cancellationToken);
 
-        return await ReadProfileAsync(response, cancellationToken);
+        return await ReadRequiredAsync<Profile>(response, cancellationToken);
     }
 
     /// <summary>
@@ -145,7 +145,7 @@ public partial class XcavateProfileClient : IDisposable
             signer,
             cancellationToken);
 
-        return await ReadProfileAsync(response, cancellationToken);
+        return await ReadRequiredAsync<Profile>(response, cancellationToken);
     }
 
     /// <summary>
@@ -206,6 +206,53 @@ public partial class XcavateProfileClient : IDisposable
     }
 
     /// <summary>
+    /// Get all registered Polkadot → Solana wallet migration pairs
+    /// </summary>
+    public async Task<List<WalletMigration>> GetWalletMigrationsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await _httpClient.GetAsync(
+            Resolve(ApiPath.Of("api", "migrations")), cancellationToken);
+
+        await EnsureSuccessAsync(response, cancellationToken);
+
+        return await response.Content.ReadFromJsonAsync<List<WalletMigration>>(
+            JsonDefaults.Options, cancellationToken) ?? [];
+    }
+
+    /// <summary>
+    /// Get the wallet migration registered for an SS58 address. Null when there is none.
+    /// </summary>
+    public Task<WalletMigration?> GetWalletMigrationAsync(
+        string ss58Address, CancellationToken cancellationToken = default) =>
+        GetOrNullAsync<WalletMigration>(
+            ApiPath.Of("api", "migrations", ss58Address), cancellationToken);
+
+    /// <summary>
+    /// Register a Polkadot → Solana wallet migration. The server only accepts an sr25519
+    /// signature from the SS58 address being migrated, so the signer must be that Polkadot
+    /// wallet — a Solana signer is rejected with 400/401.
+    /// </summary>
+    public async Task<WalletMigration> RegisterWalletMigrationAsync(
+        WalletMigration migration, IRequestSigner signer, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(migration);
+        ArgumentNullException.ThrowIfNull(signer);
+
+        // Not disposed here: SendSignedAsync attaches it to the request, which owns it.
+        var content = JsonBody(migration);
+        using var response = await SendSignedAsync(
+            HttpMethod.Post,
+            ApiPath.Of("api", "migrations"),
+            content,
+            migration,
+            signer,
+            cancellationToken);
+
+        return await ReadRequiredAsync<WalletMigration>(response, cancellationToken);
+    }
+
+    /// <summary>
     /// Signs the request and sends it. The signature covers the path as the server binds it — the
     /// decoded form — while the URI carries the percent-encoded one.
     /// </summary>
@@ -228,20 +275,21 @@ public partial class XcavateProfileClient : IDisposable
     private Uri Resolve(ApiPath path) => new(_baseAddress, path.Relative);
 
     /// <summary>
-    /// Serializes through the same options <see cref="Profile.Hash"/> uses, so the bytes sent are
-    /// the bytes that were hashed into the signature.
+    /// Serializes through the same options the body's <see cref="IPayloadBody.Hash"/> uses, so the
+    /// bytes sent are the bytes that were hashed into the signature.
     /// </summary>
-    private static StringContent JsonBody(Profile profile) =>
-        new(JsonSerializer.Serialize(profile, JsonDefaults.Options), Encoding.UTF8, "application/json");
+    private static StringContent JsonBody<T>(T body) where T : IPayloadBody =>
+        new(JsonSerializer.Serialize(body, JsonDefaults.Options), Encoding.UTF8, "application/json");
 
-    private static async Task<Profile> ReadProfileAsync(
+    private static async Task<T> ReadRequiredAsync<T>(
         HttpResponseMessage response, CancellationToken cancellationToken)
+        where T : class
     {
         await EnsureSuccessAsync(response, cancellationToken);
 
-        return await response.Content.ReadFromJsonAsync<Profile>(JsonDefaults.Options, cancellationToken)
+        return await response.Content.ReadFromJsonAsync<T>(JsonDefaults.Options, cancellationToken)
             ?? throw new InvalidOperationException(
-                "The server reported success but returned no profile for "
+                $"The server reported success but returned no {typeof(T).Name} for "
                     + $"{response.RequestMessage?.RequestUri}.");
     }
 

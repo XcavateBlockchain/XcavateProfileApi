@@ -74,6 +74,7 @@ public class PackageContentsTests
         {
             Assert.That(typeof(XcavateProfileClient), Is.Not.Null);
             Assert.That(typeof(Profile), Is.Not.Null);
+            Assert.That(typeof(WalletMigration), Is.Not.Null);
             Assert.That(typeof(SolanaRequestSigner), Is.Not.Null);
             Assert.That(typeof(SolanaSignatureScheme), Is.Not.Null);
             Assert.That(typeof(SignatureEncoding), Is.Not.Null);
@@ -119,7 +120,8 @@ public class PackageContentsTests
                 nameof(XcavateProfileClient.CreateProfileAsync),
                 nameof(XcavateProfileClient.UpdateProfileAsync),
                 nameof(XcavateProfileClient.DeleteProfileAsync),
-                nameof(XcavateProfileClient.UploadImageAsync)
+                nameof(XcavateProfileClient.UploadImageAsync),
+                nameof(XcavateProfileClient.RegisterWalletMigrationAsync)
             }));
     }
 }

@@ -36,6 +36,7 @@ Both APIs authenticate state-changing requests with wallet signatures — **Subs
 ┌──────────────────────────────────────────────────────────────────────┐
 │                          XcavateProfileApi                           │
 │  REST      /api/profiles/*   → ProfilesController                    │
+│            /api/migrations/* → MigrationsController (sr25519 only)   │
 │            └─ ISignatureValidator (per-action, explicit)             │
 │  GraphQL   /graphql          → Query / Mutation (Hot Chocolate)       │
 │            └─ GraphQLSignatureMiddleware → ICallerContext             │
@@ -48,7 +49,7 @@ Both APIs authenticate state-changing requests with wallet signatures — **Subs
              ▼                                        ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        PostgreSQL (one database)                     │
-│  profiles                     │  namespaces, buckets, messages,      │
+│  profiles, wallet migrations  │  namespaces, buckets, messages,      │
 │  __EFMigrationsHistory        │  tags, memberships, tag counts       │
 │                               │  __EFMigrationsHistory_Buckets       │
 └──────────────────────────────────────────────────────────────────────┘
@@ -91,6 +92,25 @@ overhead). The content type is derived from the file extension against an allow-
 `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp` — and never from the client, because the bucket
 serves objects publicly. **SVG is deliberately rejected**: it can embed scripts. Uploading a file
 whose name matches an existing object overwrites it.
+
+## REST API — wallet migrations
+
+Lets a user migrate a Polkadot account to Solana by registering the pair on the API. A
+registration binds an SS58 address to the Solana address it migrates to.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/api/migrations` | — | List all registered migration pairs |
+| GET | `/api/migrations/{ss58address}` | — | Get the migration for one SS58 address |
+| POST | `/api/migrations` | sr25519 signature | Register an SS58 → Solana pair |
+
+Unlike the profile endpoints, registration accepts **only an sr25519 signature from the SS58
+address being migrated** — the body's `ss58address` must be a checksummed SS58 address and must
+equal the authenticated `X-SS58-Address`, so a Solana-signed request can never register a pair.
+Each stored pair is therefore proof of intent by the Polkadot wallet's owner. The `solanaAddress`
+is validated as a base58 32-byte key but does not co-sign; it is a declared destination. One
+Polkadot account registers at most one migration (repeat registrations are rejected), while
+several accounts may migrate to the same Solana wallet.
 
 ## GraphQL API — buckets
 
@@ -429,6 +449,18 @@ using (var image = File.OpenRead("profile.jpg"))
 await client.DeleteProfileAsync(account.Value, account);
 ```
 
+Wallet migrations follow the same shape — public reads, signed registration. The signer must be
+the Polkadot account being migrated (the server refuses anything else):
+
+```csharp
+var pairs = await client.GetWalletMigrationsAsync();
+var mine = await client.GetWalletMigrationAsync(account.Value);   // null when absent
+
+await client.RegisterWalletMigrationAsync(
+    new WalletMigration { Ss58Address = account.Value, SolanaAddress = solanaAddress },
+    account);
+```
+
 Every write also has an `IRequestSigner` overload, which is how a non-Substrate scheme is
 selected. `SubstrateRequestSigner` signs sr25519 and emits hex; `SolanaRequestSigner` signs
 ed25519 and emits base58:
@@ -513,6 +545,13 @@ is looked up correctly without changing what was signed.
 | `bio` | string? | |
 | `profilePicture` | string? | URL, set by the image upload endpoint |
 | `x25519Key` | string | Required |
+
+### WalletMigration
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `ss58address` | string (PK) | The Polkadot account being migrated; must sign the registration |
+| `solanaAddress` | string | The Solana destination wallet; validated, not unique |
 
 ### Buckets
 
