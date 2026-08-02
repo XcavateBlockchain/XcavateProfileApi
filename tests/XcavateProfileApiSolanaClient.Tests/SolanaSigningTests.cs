@@ -148,6 +148,93 @@ public class SolanaSigningTests
         });
     }
 
+    /// <summary>
+    /// The migration body goes through the same seam as the profile: <c>WalletMigration.Hash()</c>
+    /// hashes the JSON string it serializes, and those have to be the bytes on the wire. The server
+    /// never sees the client's hash — it re-serializes the model it bound — so a body whose hash did
+    /// not match its own serialization would come back 401 and nothing here would say why.
+    /// </summary>
+    [Test]
+    public async Task Register_migration_signs_the_body_and_the_posted_bytes_match()
+    {
+        var signer = new SolanaRequestSigner(TestAccount);
+        var migration = new WalletMigration
+        {
+            Ss58Address = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+            SolanaAddress = signer.Address
+        };
+
+        var (client, handler) = NewClient(new StubHandler(request =>
+            new HttpResponseMessage(HttpStatusCode.Created)
+            {
+                Content = JsonContent.Create(
+                    new { ss58address = migration.Ss58Address, solanaAddress = migration.SolanaAddress }),
+                RequestMessage = request
+            }));
+        using var _ = client;
+
+        var created = await client.RegisterWalletMigrationAsync(migration, signer);
+
+        var request = handler.Requests.Single();
+        var sentJson = handler.Bodies[request];
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(created.SolanaAddress, Is.EqualTo(migration.SolanaAddress));
+            Assert.That(request.RequestUri!.AbsoluteUri, Is.EqualTo($"{ApiUrl}/api/migrations"));
+            Assert.That(SignatureVerifies(request, "/api/migrations", migration), Is.True);
+            Assert.That(
+                CryptoHelper.HashHex(sentJson), Is.EqualTo(migration.Hash()),
+                "the bytes POSTed must be the bytes that were hashed");
+            Assert.That(
+                sentJson,
+                Is.EqualTo(
+                    $"{{\"ss58address\":\"{migration.Ss58Address}\","
+                        + $"\"solanaAddress\":\"{migration.SolanaAddress}\"}}"),
+                "the wire shape is fixed by the JsonPropertyName attributes and declaration order");
+        });
+    }
+
+    /// <summary>The reads are public — no signer, no headers.</summary>
+    [Test]
+    public async Task Migration_reads_are_unsigned()
+    {
+        var (client, handler) = NewClient(new StubHandler(request =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = JsonContent.Create(Array.Empty<WalletMigration>()),
+                RequestMessage = request
+            }));
+        using var _ = client;
+
+        await client.GetWalletMigrationsAsync();
+
+        Assert.That(
+            handler.Requests.Single().Headers.Contains(SignedRequestHeaders.Address), Is.False);
+    }
+
+    [Test]
+    public void Register_migration_refuses_null_arguments()
+    {
+        var (client, _) = NewClient();
+        using var __ = client;
+
+        var migration = new WalletMigration
+        {
+            Ss58Address = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+            SolanaAddress = TestAccount.PublicKey.Key
+        };
+
+        Assert.Multiple(() =>
+        {
+            Assert.ThrowsAsync<ArgumentNullException>(
+                () => client.RegisterWalletMigrationAsync(
+                    null!, new SolanaRequestSigner(TestAccount)));
+            Assert.ThrowsAsync<ArgumentNullException>(
+                () => client.RegisterWalletMigrationAsync(migration, null!));
+        });
+    }
+
     [Test]
     public async Task Delete_signs_an_empty_body_over_the_address_path()
     {
