@@ -22,7 +22,11 @@ addresses with that service; this API only *sends*.
 - `POST {base}/api/fcm/send-notification/` (trailing slash required)
 - Header: `Authorization: Api-Key <key>`
 - Body: `{ "chain": "polkadot" | "solana", "address": "<wallet address>",
-  "title": "<= 150 chars", "body": "<= 500 chars" }`
+  "title": "<= 150 chars", "body": "<= 500 chars",
+  "data": { "type": "bucket_message" | "member_added", "bucketId": "<id>" } }`
+- `data` is the FCM data payload (string values only, per FCM): the mobile app reads
+  it from the tapped notification's intent extras and deep-links to the bucket.
+  Servers that predate the field ignore it, so it is always sent.
 - The service resolves the address to the user's registered devices. Addresses with
   no linked device fail on their side; sends are best-effort.
 

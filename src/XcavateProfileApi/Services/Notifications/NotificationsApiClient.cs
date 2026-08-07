@@ -40,7 +40,8 @@ public class NotificationsApiClient(
                 chain = notification.Chain,
                 address = notification.Address,
                 title = notification.Title,
-                body = notification.Body
+                body = notification.Body,
+                data = new { type = notification.Type, bucketId = notification.BucketId }
             });
 
             var http = httpFactory.CreateClient(HttpClientName);

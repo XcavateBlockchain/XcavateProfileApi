@@ -53,7 +53,7 @@ public class PushBucketNotifier(
 
             foreach (var recipient in recipients)
             {
-                EnqueueTo(recipient, title, body);
+                EnqueueTo(recipient, title, body, PushNotification.MessageType, bucket.BucketId);
             }
         }
         catch (Exception ex)
@@ -71,7 +71,8 @@ public class PushBucketNotifier(
             var body = role == BucketMemberRole.Admin
                 ? "You are now an admin of this bucket."
                 : "You are now a contributor of this bucket.";
-            EnqueueTo(subjectId, Truncate(BucketLabel(bucket), MaxTitleLength), body);
+            EnqueueTo(subjectId, Truncate(BucketLabel(bucket), MaxTitleLength), body,
+                PushNotification.MemberAddedType, bucket.BucketId);
         }
         catch (Exception ex)
         {
@@ -83,7 +84,7 @@ public class PushBucketNotifier(
         return Task.CompletedTask;
     }
 
-    private void EnqueueTo(string address, string title, string body)
+    private void EnqueueTo(string address, string title, string body, string type, long bucketId)
     {
         var chain = DetectChain(address);
         if (chain is null)
@@ -91,7 +92,8 @@ public class PushBucketNotifier(
             return;
         }
 
-        queue.Enqueue(new PushNotification(chain, address, title, body));
+        queue.Enqueue(new PushNotification(
+            chain, address, title, body, type, bucketId.ToString()));
     }
 
     private static string? DetectChain(string address) =>

@@ -79,6 +79,9 @@ public class PushNotificationTests
             }));
             Assert.That(pushes.Select(p => p.Title), Is.All.EqualTo("seeded"));
             Assert.That(pushes.Select(p => p.Body), Is.All.EqualTo("New message from 5FHneW…94ty"));
+            // The deep-link payload the mobile app navigates on.
+            Assert.That(pushes.Select(p => (p.Type, p.BucketId)),
+                Is.All.EqualTo((PushNotification.MessageType, bucket.BucketId.ToString())));
         });
     }
 
@@ -114,10 +117,12 @@ public class PushNotificationTests
         {
             new PushNotification(
                 PushNotification.PolkadotChain, TestDb.Carol, "seeded",
-                "You are now an admin of this bucket."),
+                "You are now an admin of this bucket.",
+                PushNotification.MemberAddedType, bucket.BucketId.ToString()),
             new PushNotification(
                 PushNotification.PolkadotChain, TestDb.Dave, "seeded",
-                "You are now a contributor of this bucket.")
+                "You are now a contributor of this bucket.",
+                PushNotification.MemberAddedType, bucket.BucketId.ToString())
         }));
     }
 
@@ -141,7 +146,8 @@ public class PushNotificationTests
         var client = NewClient(handler, apiKey: "secret-key");
 
         await client.SendAsync(
-            new PushNotification("solana", SolanaAddress, "My bucket", "Hello"), Ct);
+            new PushNotification("solana", SolanaAddress, "My bucket", "Hello",
+                PushNotification.MessageType, "42"), Ct);
 
         var (request, body) = handler.Requests.Single();
         using var json = JsonDocument.Parse(body!);
@@ -156,6 +162,10 @@ public class PushNotificationTests
                 Is.EqualTo(SolanaAddress));
             Assert.That(json.RootElement.GetProperty("title").GetString(), Is.EqualTo("My bucket"));
             Assert.That(json.RootElement.GetProperty("body").GetString(), Is.EqualTo("Hello"));
+            // FCM requires data values to be strings; the app reads these as intent extras.
+            var data = json.RootElement.GetProperty("data");
+            Assert.That(data.GetProperty("type").GetString(), Is.EqualTo("bucket_message"));
+            Assert.That(data.GetProperty("bucketId").GetString(), Is.EqualTo("42"));
         });
     }
 
@@ -165,7 +175,8 @@ public class PushNotificationTests
         var failing = NewClient(new StubHandler(_ => throw new HttpRequestException("down")));
         var notFound = NewClient(
             new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)));
-        var push = new PushNotification("polkadot", TestDb.Alice, "t", "b");
+        var push = new PushNotification("polkadot", TestDb.Alice, "t", "b",
+            PushNotification.MessageType, "1");
 
         Assert.Multiple(() =>
         {
@@ -193,8 +204,10 @@ public class PushNotificationTests
         await dispatcher.StartAsync(Ct);
         try
         {
-            _queue.Enqueue(new PushNotification("polkadot", TestDb.Alice, "t", "one"));
-            _queue.Enqueue(new PushNotification("solana", SolanaAddress, "t", "two"));
+            _queue.Enqueue(new PushNotification("polkadot", TestDb.Alice, "t", "one",
+                PushNotification.MessageType, "1"));
+            _queue.Enqueue(new PushNotification("solana", SolanaAddress, "t", "two",
+                PushNotification.MessageType, "1"));
             await delivered.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
         }
         finally
