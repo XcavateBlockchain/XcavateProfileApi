@@ -30,6 +30,7 @@ public class GraphQLSchemaTests
         services.AddScoped<MembershipService>();
         services.AddScoped<TagService>();
         services.AddScoped<MessageService>();
+        services.AddScoped<IBucketNotifier, NullBucketNotifier>();
         services.AddScoped<CallerContext>();
         services.AddScoped<ICallerContext>(sp => sp.GetRequiredService<CallerContext>());
 

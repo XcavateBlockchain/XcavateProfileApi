@@ -40,11 +40,12 @@ public sealed class TestDb : IDisposable
         Options = new BucketOptions();
         Validator = new InputValidator(Options);
         Auth = new AuthorizationService(Db);
+        Notifier = new RecordingNotifier();
         Namespaces = new NamespaceService(Db, Auth, Validator, Clock);
         Buckets = new BucketService(Db, Auth, Validator, Clock);
-        Memberships = new MembershipService(Db, Auth, Validator, Clock);
+        Memberships = new MembershipService(Db, Auth, Validator, Clock, Notifier);
         Tags = new TagService(Db, Auth, Validator, Clock);
-        Messages = new MessageService(Db, Auth, Validator, Clock);
+        Messages = new MessageService(Db, Auth, Validator, Clock, Notifier);
     }
 
     public BucketDbContext Db { get; }
@@ -56,6 +57,8 @@ public sealed class TestDb : IDisposable
     public InputValidator Validator { get; }
 
     public AuthorizationService Auth { get; }
+
+    public RecordingNotifier Notifier { get; }
 
     public NamespaceService Namespaces { get; }
 
@@ -156,4 +159,29 @@ public sealed class FakeTimeProvider(DateTime utcNow) : TimeProvider
     public override DateTimeOffset GetUtcNow() => _now;
 
     public void Advance(TimeSpan by) => _now = _now.Add(by);
+}
+
+/// <summary>Records notifier calls so tests can assert which events the services raised.</summary>
+public sealed class RecordingNotifier : IBucketNotifier
+{
+    public sealed record MessageEvent(long BucketId, long MessageId, string? Contributor);
+
+    public sealed record MemberEvent(long BucketId, string SubjectId, BucketMemberRole Role);
+
+    public List<MessageEvent> Messages { get; } = [];
+
+    public List<MemberEvent> Members { get; } = [];
+
+    public Task MessageWrittenAsync(Bucket bucket, Message message, CancellationToken ct)
+    {
+        Messages.Add(new MessageEvent(bucket.BucketId, message.MessageId, message.Contributor));
+        return Task.CompletedTask;
+    }
+
+    public Task MemberAddedAsync(
+        Bucket bucket, string subjectId, BucketMemberRole role, CancellationToken ct)
+    {
+        Members.Add(new MemberEvent(bucket.BucketId, subjectId, role));
+        return Task.CompletedTask;
+    }
 }

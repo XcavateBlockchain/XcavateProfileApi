@@ -30,6 +30,12 @@ public static partial class CryptoHelper
     /// implementing <see cref="IPayloadBody"/> — hand-rolling the encoding is how a body hash ends
     /// up subtly different from the server's.
     /// </summary>
+    /// <remarks>
+    /// <c>Hex</c> names the encoding of the <em>result</em>, not a requirement on
+    /// <paramref name="input"/>. The input is arbitrary text — a serialized JSON body, a GraphQL
+    /// document — hashed as its UTF-8 bytes, never hex-decoded first. Making it decode hex would
+    /// invalidate every signature the deployed server has accepted.
+    /// </remarks>
     public static string HashHex(string input) => Hex.ToPrefixedString(Hash(input));
 
     /// <summary>

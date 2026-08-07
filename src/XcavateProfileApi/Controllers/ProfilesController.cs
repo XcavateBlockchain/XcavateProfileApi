@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Substrate.NetApi;
 using XcavateProfile.Client;
 using XcavateProfileApi.Data;
 using XcavateProfileApi.Middleware;
@@ -275,11 +274,10 @@ public class ProfilesController : ControllerBase
             return Unauthorized("Missing authentication headers");
         }
 
-        // Compute body hash using Blake2 (for multipart/form-data, same as client - empty body)
-        // The client computes hash from empty string for multipart uploads
-        var bodyJson = string.Empty;
-        var bodyHashHex = ComputeBodyHash(bodyJson);
-
+        // The signed body for a multipart upload is EmptyPayloadBody, whose hash is the empty
+        // string rather than the hash of one — the client signs the same, and the file bytes are
+        // deliberately outside the signature.
+        //
         // Validate signature
         var result = await _signatureValidator.ValidateAsync(
             address,
@@ -349,10 +347,4 @@ public class ProfilesController : ControllerBase
         [".webp"] = "image/webp",
         [".bmp"] = "image/bmp",
     };
-
-    private static string ComputeBodyHash(string body)
-    {
-        var hash = CryptoHelper.Hash(body);
-        return Utils.Bytes2HexString(hash);
-    }
 }

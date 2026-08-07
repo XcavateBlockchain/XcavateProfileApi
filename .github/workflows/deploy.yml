@@ -89,6 +89,8 @@ jobs:
             S3_ACCESS_KEY=${{ secrets.HETZNER_S3_ACCESS_KEY }}
             S3_SECRET_KEY=${{ secrets.HETZNER_S3_SECRET_KEY }}
             ADMIN_ADDRESSES=${{ secrets.HETZNER_ADMIN_ADDRESSES }}
+            NOTIFICATIONS_API_URL=${{ secrets.HETZNER_NOTIFICATIONS_API_URL }}
+            NOTIFICATIONS_API_KEY=${{ secrets.HETZNER_NOTIFICATIONS_API_KEY }}
             EOF
             
             docker compose down

@@ -1,4 +1,5 @@
 using HotChocolate.Execution.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Services;
 using XcavateProfileApi.GraphQL.Auth;
@@ -30,6 +31,10 @@ public static class BucketRegistration
 
         services.AddScoped<CallerContext>();
         services.AddScoped<ICallerContext>(sp => sp.GetRequiredService<CallerContext>());
+
+        // The host may already have registered a push-notification notifier; default to none so
+        // tests and unconfigured environments need no notifications backend.
+        services.TryAddScoped<IBucketNotifier, NullBucketNotifier>();
 
         return services;
     }

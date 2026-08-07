@@ -19,7 +19,8 @@ public class MembershipService(
     BucketDbContext db,
     AuthorizationService auth,
     InputValidator validator,
-    TimeProvider clock)
+    TimeProvider clock,
+    IBucketNotifier notifier)
 {
     public async Task<BucketAdmin> AddAdminAsync(
         string caller, long? namespaceId, long bucketId, string admin, CancellationToken ct)
@@ -43,6 +44,8 @@ public class MembershipService(
         };
         db.BucketAdmins.Add(entity);
         await db.SaveChangesAsync(ct);
+
+        await notifier.MemberAddedAsync(bucket, admin, BucketMemberRole.Admin, ct);
 
         return entity;
     }
@@ -68,7 +71,7 @@ public class MembershipService(
         string caller, long? namespaceId, long bucketId, string contributor, CancellationToken ct)
     {
         validator.Required(contributor, validator.Options.MaxNameLen, "contributor");
-        await auth.GetBucketAsync(namespaceId, bucketId, ct);
+        var bucket = await auth.GetBucketAsync(namespaceId, bucketId, ct);
         await auth.EnsureIsAdminAsync(bucketId, caller, ct);
 
         var existing = await db.BucketContributors
@@ -86,6 +89,8 @@ public class MembershipService(
         };
         db.BucketContributors.Add(entity);
         await db.SaveChangesAsync(ct);
+
+        await notifier.MemberAddedAsync(bucket, contributor, BucketMemberRole.Contributor, ct);
 
         return entity;
     }
