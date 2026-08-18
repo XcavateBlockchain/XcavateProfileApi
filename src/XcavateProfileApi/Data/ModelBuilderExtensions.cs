@@ -3,6 +3,11 @@ using XcavateProfile.Client;
 
 namespace XcavateProfileApi.Data;
 
+/// <remarks>
+/// Not wired up: <see cref="ProfileDbContext.OnModelCreating"/> holds the mapping the migrations and
+/// the running API are built from, including the company and the user attributes this method knows
+/// nothing about. Kept only because it pins the intended PostgreSQL column types.
+/// </remarks>
 public static class ModelBuilderExtensions
 {
     public static void ConfigureProfile(this ModelBuilder modelBuilder)

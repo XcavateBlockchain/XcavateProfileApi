@@ -89,4 +89,19 @@ public static class TestMnemonics
     /// Valid image5 mnemonic
     /// </summary>
     public static readonly string Image5Mnemonic = FromEntropy(0x0E);
+
+    /// <summary>
+    /// Owns the companies in <see cref="CompanyApiTests"/>
+    /// </summary>
+    public static readonly string CompanyOwnerMnemonic = FromEntropy(0x10);
+
+    /// <summary>
+    /// A second account for <see cref="CompanyApiTests"/>, used as the wallet that owns nothing
+    /// </summary>
+    public static readonly string CompanyStrangerMnemonic = FromEntropy(0x11);
+
+    /// <summary>
+    /// Owns the profile in <see cref="ProfileAttributeApiTests"/>
+    /// </summary>
+    public static readonly string ProfileAttributesMnemonic = FromEntropy(0x12);
 }

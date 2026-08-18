@@ -8,8 +8,9 @@ For usage instructions see [README.md](README.md); for the authentication mechan
 
 One ASP.NET Core host serving two independent APIs over one PostgreSQL database:
 
-1. **Profiles**, a REST API — Substrate/Polkadot profile registration, with pictures on
-   S3-compatible object storage. The original purpose of the project.
+1. **Profiles and companies**, a REST API — wallet-keyed user profiles and the companies those
+   users register, with pictures and logos on S3-compatible object storage. Profiles were the
+   original purpose of the project.
 2. **Buckets**, a GraphQL API — a C# reimplementation of the Substrate `pallet-bucket`. It owns
    its data and ports the pallet's rules into domain services. There is no chain and no extrinsic
    submission. Read operations expose the same entity types and field names the
@@ -25,8 +26,13 @@ one shared validator. Reads are public on both.
 XcavateProfile/
 ├── src/
 │   ├── XcavateProfileApi/              # ASP.NET Core host (net10.0)
-│   │   ├── Controllers/ProfilesController.cs
-│   │   ├── Data/                       # ProfileDbContext, ModelBuilderExtensions
+│   │   ├── Controllers/
+│   │   │   ├── ProfilesController.cs
+│   │   │   ├── CompaniesController.cs
+│   │   │   ├── MigrationsController.cs
+│   │   │   ├── FieldValidation.cs      # wallet/email/length checks both controllers share
+│   │   │   └── ImageUploads.cs         # the extension allow-list both upload endpoints share
+│   │   ├── Data/                       # ProfileDbContext, ModelBuilderExtensions, JsonColumn
 │   │   ├── GraphQL/
 │   │   │   ├── BucketQueries.cs        # [GraphQLName("Query")]
 │   │   │   ├── BucketMutations.cs      # [GraphQLName("Mutation")], one per extrinsic
@@ -37,7 +43,7 @@ XcavateProfile/
 │   │   │   └── Auth/                   # GraphQLSignatureMiddleware, CallerContext,
 │   │   │                               # RequireSignature / RequireAdmin attributes
 │   │   ├── Middleware/                 # ISignatureValidator, SignatureValidator, options
-│   │   ├── Services/S3Service.cs
+│   │   ├── Services/                   # S3Service, IdGenerator, Timestamps
 │   │   ├── Migrations/                 # ProfileDbContext migrations
 │   │   └── Program.cs
 │   │
@@ -53,7 +59,9 @@ XcavateProfile/
 │   ├── XcavateProfileApiClient/        # Client SDK, published to NuGet
 │   │   ├── XcavateProfileClient.cs     # REST client
 │   │   ├── XcavateProfileClientOptions.cs
-│   │   ├── Profile.cs                  # the REST model; also an IPayloadBody
+│   │   ├── Profile.cs                  # the REST models; each also an IPayloadBody
+│   │   ├── Company.cs
+│   │   ├── UserRole.cs, Permissions.cs # the role set and the clearance maps
 │   │   ├── CryptoHelper.cs             # Blake2b-128 hashing, payload construction
 │   │   ├── Hex.cs, JsonDefaults.cs     # the wire encodings, in one place each
 │   │   ├── IPayloadBody.cs, EmptyPayloadBody.cs
@@ -76,8 +84,8 @@ XcavateProfile/
 │       └── (project file + .graphqlrc.json only — no sources of its own)
 │
 ├── tests/
-│   ├── XcavateBuckets.Tests/           # 192 tests, in-memory SQLite, no server needed
-│   ├── XcavateProfileApiSolanaClient.Tests/  # 23 tests over the Solana package alone
+│   ├── XcavateBuckets.Tests/           # 288 tests, in-memory SQLite, no server needed
+│   ├── XcavateProfileApiSolanaClient.Tests/  # 26 tests over the Solana package alone
 │   └── XcavateProfile.ApiTests/        # E2E REST tests against a running API
 │
 ├── docs/
@@ -110,12 +118,40 @@ XcavateProfile/
 
 ## Component notes
 
-### Profiles (REST)
+### Profiles and companies (REST)
 
-`ProfilesController` calls `ISignatureValidator` explicitly per action rather than through a
-filter, because each action authorizes differently: create checks that the signer matches the
-body, update and delete check ownership or admin status, and image upload additionally requires
-the profile to exist. Endpoints are listed in [README.md](README.md#rest-api--profiles).
+`ProfilesController` and `CompaniesController` call `ISignatureValidator` explicitly per action
+rather than through a filter, because each action authorizes differently: create checks that the
+signer matches the body, update and delete check ownership or admin status, and the upload endpoints
+additionally require the record to exist. Endpoints are listed in
+[README.md](README.md#rest-api--profiles).
+
+Three groups of fields are server-owned on both entities: the ids (`userId` mirrors the wallet
+address, `companyId` is generated), the timestamps, and `permission`. `permission` is admin-only
+because a wallet signature proves who is calling and nothing about their compliance — a caller that
+could set its own clearance would make the field meaningless. All of them are *ignored* rather than
+refused when a caller sends them, so reading a record, editing one field and PUTting it back works
+for any caller; the single exception is a `userId` that contradicts its wallet address, which is a
+400 rather than a silent correction.
+
+A company separates its two wallet addresses on purpose: `userId` is the current owner and may be
+reassigned to transfer the company, while `companyWalletAddress` is fixed and still identifies the
+creator afterwards.
+
+`roles` and `permission` are stored as JSON text columns through `Data/JsonColumn.cs` rather than as
+`jsonb` or EF owned entities, because the same model is created on PostgreSQL in production and on
+SQLite in the test suite, and text is the one mapping both providers spell identically. Nothing
+queries inside those values.
+
+Every attribute added to `Profile` after the original five is omitted from the JSON when null. That
+is a compatibility guarantee, not a style choice: the server re-serializes the body it bound and
+hashes that, so a field emitted only on the server side would change the hash and 401 every write
+from an already-published SDK build. `ProfileAttributeEndpointTests` pins it with a body from an
+older client.
+
+Timestamps come from `Services/Timestamps.cs`, which truncates to microseconds — PostgreSQL's
+`timestamptz` resolution. Storing the full 100-nanosecond tick would mean a create response carrying
+three digits the next read cannot return.
 
 The image endpoint derives the stored content type from an extension allow-list, never from the
 client, because the bucket serves objects publicly — a client-supplied `text/html` would be a

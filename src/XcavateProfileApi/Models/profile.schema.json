@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "Profile",
   "type": "object",
-  "description": "Polkadot/Substrate profile entity",
+  "description": "A user profile, keyed by the wallet address that owns it. Every property besides ss58address and x25519Key is optional; the ones marked server-assigned are set by the API and ignored when a caller sends them.",
   "properties": {
     "ss58address": {
       "type": "string",
-      "description": "The SS58 address of the profile (primary key)",
-      "pattern": "^5[A-HJ-NP-Z1-9]{32,34}$"
+      "description": "The wallet address of the profile (primary key). An SS58 address, or a base58 Solana public key.",
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,48}$"
     },
     "nickname": {
       "type": "string",
@@ -23,13 +23,84 @@
     "profilePicture": {
       "type": "string",
       "format": "uri",
-      "description": "URL to the profile picture"
+      "description": "URL to the profile picture. Set by the image endpoint."
     },
     "x25519Key": {
       "type": "string",
       "description": "Optional x25519 public key (hex-encoded)",
       "pattern": "^(0x)?[0-9a-fA-F]{64}$"
+    },
+    "userId": {
+      "type": "string",
+      "description": "The user's id, always equal to ss58address. Server-assigned; a value that contradicts the wallet address is refused rather than corrected."
+    },
+    "name": {
+      "type": "string",
+      "description": "The user's full name",
+      "maxLength": 128
+    },
+    "email": {
+      "type": "string",
+      "format": "email",
+      "description": "Contact email. Checked for shape, never verified by a round-trip.",
+      "maxLength": 256
+    },
+    "phone": {
+      "type": "string",
+      "maxLength": 32
+    },
+    "address": {
+      "type": "string",
+      "description": "Postal address, as one free-text block",
+      "maxLength": 512
+    },
+    "title": {
+      "type": "string",
+      "description": "Job title",
+      "maxLength": 128
+    },
+    "background": {
+      "type": "string",
+      "description": "Professional background — the longer form of title",
+      "maxLength": 2000
+    },
+    "roles": {
+      "type": "array",
+      "description": "The roles the user declares. Self-assigned and freely editable by the owner; duplicates are collapsed on save.",
+      "items": {
+        "type": "string",
+        "enum": ["investor", "developer", "lawyer", "agent", "spv", "regionalOperator"]
+      }
+    },
+    "permission": {
+      "type": "object",
+      "description": "Per-role clearance. Admin-only to write: a non-admin write leaves the stored map untouched. An absent role has never been assessed, which is not the same as revoked.",
+      "properties": {
+        "regionalOperator": { "$ref": "#/definitions/permission" },
+        "investor": { "$ref": "#/definitions/permission" },
+        "developer": { "$ref": "#/definitions/permission" },
+        "lawyer": { "$ref": "#/definitions/permission" },
+        "agent": { "$ref": "#/definitions/permission" },
+        "spv": { "$ref": "#/definitions/permission" }
+      },
+      "additionalProperties": false
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the profile was first stored. Server-assigned; null for rows written before this field existed."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the profile last changed. Server-assigned."
     }
   },
-  "required": ["ss58address"]
+  "required": ["ss58address"],
+  "definitions": {
+    "permission": {
+      "type": "string",
+      "enum": ["compliant", "revoked"]
+    }
+  }
 }

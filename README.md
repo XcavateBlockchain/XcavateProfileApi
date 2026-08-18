@@ -2,8 +2,9 @@
 
 An ASP.NET Core service exposing two APIs over one PostgreSQL database:
 
-- **Profiles (REST)** — Substrate/Polkadot profile registration and management, with profile
-  pictures on S3-compatible object storage.
+- **Profiles and companies (REST)** — wallet-keyed user profiles (identity, contact, declared
+  roles, per-role clearance) and the companies those users register, with pictures and logos on
+  S3-compatible object storage.
 - **Buckets (GraphQL)** — a C# port of the Substrate `pallet-bucket`, serving the same entity
   types and field names the SubQuery indexer used to serve, so existing selection sets keep
   working. There is no chain: the pallet's rules are reimplemented as domain services.
@@ -16,7 +17,7 @@ Both APIs authenticate state-changing requests with wallet signatures — **Subs
 - **Client SDK**: `XcavateProfileApiClient` and `XcavateProfileApiSolanaClient` (both published to
   NuGet) — REST client, a StrawberryShake-generated GraphQL client, and the signing primitives
   both use
-- **Storage**: Hetzner Object Storage (S3-compatible) for profile pictures
+- **Storage**: Hetzner Object Storage (S3-compatible) for profile pictures and company logos
 - **CI/CD**: Docker image to ghcr.io + deploy to Hetzner; NuGet package publishing
 
 ## Architecture
@@ -27,7 +28,7 @@ Both APIs authenticate state-changing requests with wallet signatures — **Subs
 │   (one source tree, two packages — see "Client SDK packages")        │
 │  IRequestSigner: SubstrateRequestSigner (sr25519, hex)   [Polkadot]  │
 │                  SolanaRequestSigner    (ed25519, base58)            │
-│  XcavateProfileClient ......... REST profile client                  │
+│  XcavateProfileClient ......... REST profile + company client        │
 │  XcavateBucketsClient ........ StrawberryShake GraphQL client        │
 │  SigningHttpMessageHandler ... signs outgoing /graphql requests      │
 └──────────────────────────────────────────────────────────────────────┘
@@ -36,22 +37,23 @@ Both APIs authenticate state-changing requests with wallet signatures — **Subs
 ┌──────────────────────────────────────────────────────────────────────┐
 │                          XcavateProfileApi                           │
 │  REST      /api/profiles/*   → ProfilesController                    │
+│            /api/companies/*  → CompaniesController                   │
 │            /api/migrations/* → MigrationsController (sr25519 only)   │
 │            └─ ISignatureValidator (per-action, explicit)             │
 │  GraphQL   /graphql          → Query / Mutation (Hot Chocolate)       │
 │            └─ GraphQLSignatureMiddleware → ICallerContext             │
 │               [RequireSignature] (15)  [RequireAdmin] (5)            │
 │  SignatureValidator → Sr25519SignatureScheme | SolanaSignatureScheme │
-│  S3Service → profile pictures                                        │
+│  S3Service → profile pictures, company logos                         │
 └──────────────────────────────────────────────────────────────────────┘
              │                                        │
              │ ProfileDbContext                       │ BucketDbContext
              ▼                                        ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        PostgreSQL (one database)                     │
-│  profiles, wallet migrations  │  namespaces, buckets, messages,      │
-│  __EFMigrationsHistory        │  tags, memberships, tag counts       │
-│                               │  __EFMigrationsHistory_Buckets       │
+│  profiles, companies,         │  namespaces, buckets, messages,      │
+│  wallet migrations            │  tags, memberships, tag counts       │
+│  __EFMigrationsHistory        │  __EFMigrationsHistory_Buckets       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,8 +69,8 @@ keypair.
 | `src/XcavateBuckets.Domain` | Bucket entities, `BucketDbContext`, migrations, domain services |
 | `src/XcavateProfileApiClient` | Client SDK (NuGet): REST client, generated GraphQL client, signing |
 | `src/XcavateProfileApiSolanaClient` | The same SDK packaged without Substrate — no sources of its own |
-| `tests/XcavateBuckets.Tests` | 192 domain, schema, GraphQL, signature and hash-compatibility tests (in-memory SQLite) |
-| `tests/XcavateProfileApiSolanaClient.Tests` | 23 tests over the Solana package: signing, request shape, absent Substrate |
+| `tests/XcavateBuckets.Tests` | 288 domain, schema, REST, GraphQL, signature and hash-compatibility tests (in-memory SQLite) |
+| `tests/XcavateProfileApiSolanaClient.Tests` | 26 tests over the Solana package: signing, request shape, absent Substrate |
 | `tests/XcavateProfile.ApiTests` | End-to-end REST tests against a running API |
 
 ## REST API — profiles
@@ -87,11 +89,65 @@ keypair.
 
 Callers may only modify their own profile unless their address is in `ADMIN_ADDRESSES`.
 
+**Fields**: alongside the original `nickname` / `bio` / `profilePicture` / `x25519Key`, a profile
+carries `userId`, `name`, `email`, `phone`, `address`, `title`, `background`, `roles`, `permission`,
+`createdAt` and `updatedAt` — see [Data model](#profile). Three groups of them are not the caller's
+to set:
+
+| Field | Who writes it |
+|-------|---------------|
+| `userId` | The server, always equal to the profile's wallet address. A body that contradicts it is refused with 400; matching or absent is fine. |
+| `createdAt`, `updatedAt` | The server. Values in the body are ignored. |
+| `permission` | Admins only. A non-admin write leaves the stored map untouched rather than failing, so reading a profile and PUTting it back always works. |
+
+`roles` is the user's own: any of `investor`, `developer`, `lawyer`, `agent`, `spv`,
+`regionalOperator`, in any combination, and duplicates are collapsed on save. Declaring a role is
+not the same as being cleared for it — that is what `permission` records, hence the admin gate.
+
+Every one of these fields is omitted from the JSON when null, which is what keeps the signed body
+hash identical for callers on an older SDK build: the bytes they send are the bytes the server
+re-serializes and hashes. Adding a field without that condition would break every deployed
+consumer's writes with a 401.
+
 **Image upload**: 25 MB of image, 26 MB request limit (the extra megabyte covers multipart
 overhead). The content type is derived from the file extension against an allow-list —
 `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, `.bmp` — and never from the client, because the bucket
 serves objects publicly. **SVG is deliberately rejected**: it can embed scripts. Uploading a file
 whose name matches an existing object overwrites it.
+
+## REST API — companies
+
+A company is registered by a user and owned by a wallet. One wallet may own any number of them.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/api/companies` | — | List all companies |
+| GET | `/api/companies/{companyId}` | — | Get company by id |
+| GET | `/api/companies/user/{userId}` | — | List every company one wallet owns (empty, not 404) |
+| POST | `/api/companies` | signature | Register a company |
+| PUT | `/api/companies/{companyId}` | signature | Update a company |
+| DELETE | `/api/companies/{companyId}` | signature | Delete a company |
+| POST | `/api/companies/{companyId}/logo` | signature | Upload the logo (multipart) |
+
+`userId` and `companyWalletAddress` are both wallet addresses and equal at creation, but they answer
+different questions afterwards:
+
+- **`userId`** is the current owner — the only address besides an admin that may change or delete the
+  company. Reassigning it transfers ownership, and the previous owner immediately loses access.
+- **`companyWalletAddress`** is the wallet that created the record. Immutable: a request that changes
+  it is refused with 400, so the creator is still identifiable after any number of transfers.
+
+On create, the signer must own both addresses — an ordinary caller cannot register a company for
+someone else's wallet (401). An admin may, on either wallet's behalf. `companyId` is generated by the
+server (`company_` plus 22 url-safe characters); a value in the create body is ignored, so nobody can
+claim an id. `createdAt` / `updatedAt` are the server's, and `permission` is admin-only for the same
+reason it is on a profile: a signature proves who is calling, never that they are compliant.
+
+`PUT` is not an upsert, unlike the profile endpoint — ids are server-generated, so a caller cannot
+hold one that does not exist yet, and an unknown id is a 404.
+
+**Logo upload**: the same limits and the same extension allow-list as the profile picture, sharing
+one implementation, so SVG is rejected here too. Stored under `companies/{companyId}/{filename}`.
 
 ## REST API — wallet migrations
 
@@ -349,7 +405,7 @@ dotnet ef migrations add <Name> --project src/XcavateBuckets.Domain \
 ## Testing
 
 ```bash
-# Domain, schema, GraphQL, signature and hash-compatibility tests
+# Domain, schema, REST endpoint, GraphQL, signature and hash-compatibility tests
 # — no database or server needed (in-memory SQLite)
 dotnet test tests/XcavateBuckets.Tests
 
@@ -362,7 +418,9 @@ dotnet test tests/XcavateProfileApiSolanaClient.Tests
 ```
 
 The E2E suite signs real requests, so `ADMIN_ADDRESSES` in `.env` must contain the address
-derived from `TestMnemonics.AdminMnemonic`, or the admin authorization tests fail with 403.
+derived from `TestMnemonics.AdminMnemonic` (`5EFFpddToZ2yxhy91UJdRrPXtsCFyUCXnv1uidZQsxuaMCxF`) and
+its Solana counterpart (`DQJZmAVJZmN919gkbxREzb5iqoLZWLYx65Ts5JDnSb1b`), or the admin authorization
+tests fail with 403.
 `SolanaAccounts` derives a second, Solana address for each of the same personas, so both signing
 schemes are exercised end to end.
 
@@ -410,7 +468,7 @@ dotnet add package XcavateProfileApiClient
 dotnet add package XcavateProfileApiSolanaClient
 ```
 
-### Profiles (REST)
+### Profiles and companies (REST)
 
 ```csharp
 using Substrate.NetApi.Model.Types;
@@ -447,6 +505,35 @@ using (var image = File.OpenRead("profile.jpg"))
 }
 
 await client.DeleteProfileAsync(account.Value, account);
+```
+
+Companies follow the same shape. The server assigns the id, so read it off the returned instance:
+
+```csharp
+var company = await client.CreateCompanyAsync(
+    new Company
+    {
+        UserId = account.Value,               // the owner
+        CompanyWalletAddress = account.Value, // the creator, immutable
+        Name = "Xcavate Developments",
+        Email = "hello@xcavate.io",
+        Website = "https://xcavate.io"
+    },
+    account);
+
+var mine = await client.GetCompaniesByUserAsync(account.Value);   // empty when none
+var one = await client.GetCompanyAsync(company.CompanyId!);       // null when absent
+
+company.Summary = "Builds things";
+await client.UpdateCompanyAsync(company.CompanyId!, company, account);
+
+using (var logo = File.OpenRead("logo.png"))
+{
+    var logoUrl = await client.UploadCompanyLogoAsync(
+        company.CompanyId!, logo, "logo.png", account);
+}
+
+await client.DeleteCompanyAsync(company.CompanyId!, account);
 ```
 
 Wallet migrations follow the same shape — public reads, signed registration. The signer must be
@@ -540,11 +627,46 @@ is looked up correctly without changing what was signed.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `ss58address` | string (PK) | Required |
+| `ss58address` | string (PK) | Required. The wallet address: SS58 or Solana base58 |
 | `nickname` | string? | Unique when set |
 | `bio` | string? | |
 | `profilePicture` | string? | URL, set by the image upload endpoint |
 | `x25519Key` | string | Required |
+| `userId` | string? | Server-assigned, always equal to `ss58address` |
+| `name` | string? | ≤ 128 |
+| `email` | string? | ≤ 256, shape-checked |
+| `phone` | string? | ≤ 32 |
+| `address` | string? | ≤ 512 |
+| `title` | string? | ≤ 128 |
+| `background` | string? | ≤ 2000 |
+| `roles` | set? | JSON column; `investor`, `developer`, `lawyer`, `agent`, `spv`, `regionalOperator` |
+| `permission` | map? | JSON column; per role → `compliant` \| `revoked`. Admin-only to write |
+| `createdAt` | timestamp? | Server-assigned; null for rows predating the column |
+| `updatedAt` | timestamp? | Server-assigned |
+
+An absent entry in `permission` means the role was never assessed, which is deliberately distinct
+from `revoked`.
+
+### Company
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `companyId` | string (PK) | Server-assigned, `company_` + 22 url-safe characters |
+| `userId` | string | Required. The owning wallet; indexed. Reassigning it transfers ownership |
+| `companyWalletAddress` | string | Required. The creating wallet; indexed, immutable |
+| `name` | string | Required, ≤ 128 |
+| `email` | string | Required, ≤ 256, shape-checked |
+| `logo` | string? | URL, set by the logo upload endpoint |
+| `website` | string? | ≤ 512 |
+| `summary` | string? | ≤ 2000 |
+| `address` | string? | ≤ 512 |
+| `permission` | map? | JSON column; `regionalOperator`, `developer`, `lawyer`, `agent` → `compliant` \| `revoked`. Admin-only to write |
+| `createdAt` | timestamp? | Server-assigned |
+| `updatedAt` | timestamp? | Server-assigned |
+
+`userId` carries no foreign key to `Profile`: a wallet may register a company before filling in a
+profile, and the two records are independent. There is no `investor` or `spv` clearance for a company
+— those belong to a natural person.
 
 ### WalletMigration
 

@@ -62,6 +62,59 @@ public partial class XcavateProfileClient
     }
 
     /// <summary>
+    /// Register a company, authenticated with the account's sr25519 signature
+    /// </summary>
+    public Task<Company> CreateCompanyAsync(
+        Company company, Account account, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+
+        return CreateCompanyAsync(company, new SubstrateRequestSigner(account), cancellationToken);
+    }
+
+    /// <summary>
+    /// Update a company, authenticated with the account's sr25519 signature
+    /// </summary>
+    public Task<Company> UpdateCompanyAsync(
+        string companyId,
+        Company company,
+        Account account,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+
+        return UpdateCompanyAsync(
+            companyId, company, new SubstrateRequestSigner(account), cancellationToken);
+    }
+
+    /// <summary>
+    /// Delete a company, authenticated with the account's sr25519 signature
+    /// </summary>
+    public Task DeleteCompanyAsync(
+        string companyId, Account account, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+
+        return DeleteCompanyAsync(companyId, new SubstrateRequestSigner(account), cancellationToken);
+    }
+
+    /// <summary>
+    /// Upload a company logo, authenticated with the account's sr25519 signature
+    /// </summary>
+    public Task<string> UploadCompanyLogoAsync(
+        string companyId,
+        Stream imageStream,
+        string filename,
+        Account account,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+
+        return UploadCompanyLogoAsync(
+            companyId, imageStream, filename, new SubstrateRequestSigner(account), cancellationToken);
+    }
+
+    /// <summary>
     /// Upload a profile image, authenticated with the account's sr25519 signature
     /// </summary>
     public Task<string> UploadImageAsync(

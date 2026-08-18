@@ -8,10 +8,27 @@ using XcavateProfileApiClient;
 
 namespace XcavateProfileApi.Controllers;
 
+/// <summary>
+/// User profiles, keyed by the wallet address that owns them.
+/// </summary>
+/// <remarks>
+/// <c>userId</c>, <c>createdAt</c> and <c>updatedAt</c> are assigned by the server, and
+/// <c>permission</c> is admin-only — a signature proves who the caller is, never that they are
+/// compliant, so a profile cannot record its own clearance. The three server-owned fields are
+/// overwritten rather than refused when a caller sends them, so reading a profile, editing one field
+/// and PUTting it back is safe for any caller; <c>permission</c> is likewise left as it was stored.
+/// The one exception is <c>userId</c>, which is refused when it contradicts the address it belongs to
+/// rather than being silently corrected.
+/// </remarks>
 [ApiController]
 [Route("api/[controller]")]
 public class ProfilesController : ControllerBase
 {
+    private const string BasePath = "/api/profiles";
+
+    /// <summary>The bucket profile pictures are stored in.</summary>
+    private const string ImageBucket = "xcavate-profile";
+
     private readonly ProfileDbContext _context;
     private readonly ISignatureValidator _signatureValidator;
     private readonly IS3Service _s3Service;
@@ -86,12 +103,17 @@ public class ProfilesController : ControllerBase
             signature,
             timestamp,
             "POST",
-            "/api/profiles",
+            BasePath,
             profile);
 
         if (!result.IsValid)
         {
             return Unauthorized(result.Error);
+        }
+
+        if (Invalid(profile, profile.Ss58Address) is { } error)
+        {
+            return BadRequest(error);
         }
 
         // Check if the user is trying to create a profile for someone else
@@ -112,6 +134,15 @@ public class ProfilesController : ControllerBase
         {
             return BadRequest("Nickname already exists");
         }
+
+        var createdAt = Timestamps.UtcNow();
+
+        // Server-owned fields, overwritten whatever the body said.
+        profile.UserId = profile.Ss58Address;
+        profile.Roles = AsSet(profile.Roles);
+        profile.Permission = _signatureValidator.IsAdmin(address) ? profile.Permission : null;
+        profile.CreatedAt = createdAt;
+        profile.UpdatedAt = createdAt;
 
         _context.Profiles.Add(profile);
         await _context.SaveChangesAsync();
@@ -145,7 +176,7 @@ public class ProfilesController : ControllerBase
             signature,
             timestamp,
             "PUT",
-            $"/api/profiles/{ss58address}",
+            $"{BasePath}/{ss58address}",
             profile);
 
         if (!result.IsValid)
@@ -153,10 +184,17 @@ public class ProfilesController : ControllerBase
             return Unauthorized(result.Error);
         }
 
+        var isAdmin = _signatureValidator.IsAdmin(address);
+
         // Check authorization: can only update own profile or is admin
-        if (address != ss58address && !_signatureValidator.IsAdmin(address))
+        if (address != ss58address && !isAdmin)
         {
             return StatusCode(StatusCodes.Status403Forbidden, "You can only update your own profile");
+        }
+
+        if (Invalid(profile, ss58address) is { } error)
+        {
+            return BadRequest(error);
         }
 
         var existingProfile = await _context.Profiles.FindAsync(ss58address);
@@ -170,6 +208,8 @@ public class ProfilesController : ControllerBase
             }
         }
 
+        var now = Timestamps.UtcNow();
+
         // Create the profile when it does not exist yet (upsert)
         if (existingProfile == null)
         {
@@ -180,7 +220,18 @@ public class ProfilesController : ControllerBase
                 Nickname = profile.Nickname,
                 Bio = profile.Bio,
                 ProfilePicture = profile.ProfilePicture,
-                X25519Key = profile.X25519Key
+                X25519Key = profile.X25519Key,
+                UserId = ss58address,
+                Name = profile.Name,
+                Email = profile.Email,
+                Phone = profile.Phone,
+                Address = profile.Address,
+                Title = profile.Title,
+                Background = profile.Background,
+                Roles = AsSet(profile.Roles),
+                Permission = isAdmin ? profile.Permission : null,
+                CreatedAt = now,
+                UpdatedAt = now
             };
 
             _context.Profiles.Add(newProfile);
@@ -194,6 +245,25 @@ public class ProfilesController : ControllerBase
         existingProfile.Bio = profile.Bio;
         existingProfile.ProfilePicture = profile.ProfilePicture;
         existingProfile.X25519Key = profile.X25519Key;
+        existingProfile.UserId = ss58address;
+        existingProfile.Name = profile.Name;
+        existingProfile.Email = profile.Email;
+        existingProfile.Phone = profile.Phone;
+        existingProfile.Address = profile.Address;
+        existingProfile.Title = profile.Title;
+        existingProfile.Background = profile.Background;
+        existingProfile.Roles = AsSet(profile.Roles);
+
+        // Clearance is the admin's record about this user, so a non-admin update carries the stored
+        // map through untouched instead of the (ignored) one in the body.
+        if (isAdmin)
+        {
+            existingProfile.Permission = profile.Permission;
+        }
+
+        // Backfills rows written before the column existed; otherwise createdAt never moves.
+        existingProfile.CreatedAt ??= now;
+        existingProfile.UpdatedAt = now;
 
         await _context.SaveChangesAsync();
         return Ok(existingProfile);
@@ -222,7 +292,7 @@ public class ProfilesController : ControllerBase
             signature,
             timestamp,
             "DELETE",
-            $"/api/profiles/{ss58address}",
+            $"{BasePath}/{ss58address}",
             new EmptyPayloadBody());
 
         if (!result.IsValid)
@@ -254,8 +324,8 @@ public class ProfilesController : ControllerBase
     // must allow at least the same request size, or uploads fail with 413 before
     // ever reaching this endpoint.
     [HttpPost("{ss58address}/image")]
-    [RequestSizeLimit(26 * 1024 * 1024)]
-    [RequestFormLimits(MultipartBodyLengthLimit = 26 * 1024 * 1024)]
+    [RequestSizeLimit(ImageUploads.RequestSizeLimit)]
+    [RequestFormLimits(MultipartBodyLengthLimit = ImageUploads.RequestSizeLimit)]
     [Consumes("multipart/form-data")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -284,7 +354,7 @@ public class ProfilesController : ControllerBase
             signature,
             timestamp,
             "POST",
-            $"/api/profiles/{ss58address}/image",
+            $"{BasePath}/{ss58address}/image",
             new EmptyPayloadBody());
 
         if (!result.IsValid)
@@ -308,14 +378,10 @@ public class ProfilesController : ControllerBase
         // Upload to S3
         if (image.Length > 0)
         {
-            // The bucket serves objects publicly, so the Content-Type must never come
-            // from the client (an attacker could store text/html for XSS/phishing).
-            // Derive it from the extension via an image-only allowlist instead.
             var fileName = Path.GetFileName(image.FileName);
-            var extension = Path.GetExtension(fileName);
-            if (!AllowedImageTypes.TryGetValue(extension, out var contentType))
+            if (!ImageUploads.TryGetContentType(Path.GetExtension(fileName), out var contentType))
             {
-                return BadRequest("Unsupported image type. Allowed: " + string.Join(", ", AllowedImageTypes.Keys));
+                return BadRequest(ImageUploads.UnsupportedTypeMessage);
             }
 
             using (var stream = image.OpenReadStream())
@@ -323,10 +389,11 @@ public class ProfilesController : ControllerBase
                 // Key is derived from the filename only, so uploading a file with the
                 // same name rewrites the existing object instead of creating a new one
                 var key = $"profiles/{ss58address}/{fileName}";
-                var url = await _s3Service.UploadImageAsync("xcavate-profile", key, stream, contentType);
+                var url = await _s3Service.UploadImageAsync(ImageBucket, key, stream, contentType);
 
                 // Update profile picture URL
                 profile.ProfilePicture = url;
+                profile.UpdatedAt = Timestamps.UtcNow();
                 await _context.SaveChangesAsync();
 
                 return Ok(url);
@@ -336,15 +403,31 @@ public class ProfilesController : ControllerBase
         return BadRequest("No image file provided");
     }
 
-    // SVG is deliberately excluded: it can embed scripts and the bucket serves
-    // objects publicly.
-    private static readonly Dictionary<string, string> AllowedImageTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        [".jpg"] = "image/jpeg",
-        [".jpeg"] = "image/jpeg",
-        [".png"] = "image/png",
-        [".gif"] = "image/gif",
-        [".webp"] = "image/webp",
-        [".bmp"] = "image/bmp",
-    };
+    /// <summary>
+    /// The refusal message for a body that cannot be stored, or null when it is fine. Runs after the
+    /// signature check, so the caller is known by the time anything is reported back.
+    /// </summary>
+    /// <param name="userId">
+    /// The address the profile belongs to — the body's own for a create, the route's for an update.
+    /// </param>
+    private static string? Invalid(Profile profile, string userId) =>
+        FieldValidation.FirstFailure(
+            profile.UserId is not null && profile.UserId != userId
+                ? "userId must equal the profile's wallet address"
+                : null,
+            FieldValidation.TooLong("name", profile.Name, 128),
+            FieldValidation.TooLong("email", profile.Email, 256),
+            !string.IsNullOrWhiteSpace(profile.Email) && !FieldValidation.IsEmail(profile.Email)
+                ? "email must be a valid email address"
+                : null,
+            FieldValidation.TooLong("phone", profile.Phone, 32),
+            FieldValidation.TooLong("address", profile.Address, 512),
+            FieldValidation.TooLong("title", profile.Title, 128),
+            FieldValidation.TooLong("background", profile.Background, 2000));
+
+    /// <summary>
+    /// Roles are a set in the schema this ports, and JSON has no set type. Collapsing duplicates on
+    /// the way in keeps <c>["investor","investor"]</c> from being stored and read back as two roles.
+    /// </summary>
+    private static List<UserRole>? AsSet(List<UserRole>? roles) => roles?.Distinct().ToList();
 }

@@ -253,6 +253,152 @@ public partial class XcavateProfileClient : IDisposable
     }
 
     /// <summary>
+    /// Get all companies
+    /// </summary>
+    public async Task<List<Company>> GetCompaniesAsync(CancellationToken cancellationToken = default)
+    {
+        using var response = await _httpClient.GetAsync(
+            Resolve(ApiPath.Of("api", "companies")), cancellationToken);
+
+        await EnsureSuccessAsync(response, cancellationToken);
+
+        return await response.Content.ReadFromJsonAsync<List<Company>>(
+            JsonDefaults.Options, cancellationToken) ?? [];
+    }
+
+    /// <summary>
+    /// Get a company by its id. Null when there is none.
+    /// </summary>
+    public Task<Company?> GetCompanyAsync(
+        string companyId, CancellationToken cancellationToken = default) =>
+        GetOrNullAsync<Company>(ApiPath.Of("api", "companies", companyId), cancellationToken);
+
+    /// <summary>
+    /// Get every company owned by one user. Empty when the user owns none — a user without
+    /// companies is not an error, so unlike <see cref="GetCompanyAsync"/> this never returns null.
+    /// </summary>
+    public async Task<List<Company>> GetCompaniesByUserAsync(
+        string userId, CancellationToken cancellationToken = default)
+    {
+        using var response = await _httpClient.GetAsync(
+            Resolve(ApiPath.Of("api", "companies", "user", userId)), cancellationToken);
+
+        await EnsureSuccessAsync(response, cancellationToken);
+
+        return await response.Content.ReadFromJsonAsync<List<Company>>(
+            JsonDefaults.Options, cancellationToken) ?? [];
+    }
+
+    /// <summary>
+    /// Register a company. The server assigns the id, so read it off the returned instance rather
+    /// than the one passed in. Unless the signer is an admin, both <see cref="Company.UserId"/> and
+    /// <see cref="Company.CompanyWalletAddress"/> must be the signer's own address.
+    /// </summary>
+    public async Task<Company> CreateCompanyAsync(
+        Company company, IRequestSigner signer, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(company);
+        ArgumentNullException.ThrowIfNull(signer);
+
+        // Not disposed here: SendSignedAsync attaches it to the request, which owns it.
+        var content = JsonBody(company);
+        using var response = await SendSignedAsync(
+            HttpMethod.Post,
+            ApiPath.Of("api", "companies"),
+            content,
+            company,
+            signer,
+            cancellationToken);
+
+        return await ReadRequiredAsync<Company>(response, cancellationToken);
+    }
+
+    /// <summary>
+    /// Update a company. Only its owner or an admin may; <see cref="Company.CompanyWalletAddress"/>
+    /// cannot be changed, and setting <see cref="Company.UserId"/> to another address transfers
+    /// ownership away from the caller.
+    /// </summary>
+    public async Task<Company> UpdateCompanyAsync(
+        string companyId,
+        Company company,
+        IRequestSigner signer,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(company);
+        ArgumentNullException.ThrowIfNull(signer);
+
+        // Not disposed here: SendSignedAsync attaches it to the request, which owns it.
+        var content = JsonBody(company);
+        using var response = await SendSignedAsync(
+            HttpMethod.Put,
+            ApiPath.Of("api", "companies", companyId),
+            content,
+            company,
+            signer,
+            cancellationToken);
+
+        return await ReadRequiredAsync<Company>(response, cancellationToken);
+    }
+
+    /// <summary>
+    /// Delete a company. Only its owner or an admin may.
+    /// </summary>
+    public async Task DeleteCompanyAsync(
+        string companyId, IRequestSigner signer, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(signer);
+
+        using var response = await SendSignedAsync(
+            HttpMethod.Delete,
+            ApiPath.Of("api", "companies", companyId),
+            content: null,
+            EmptyPayloadBody.Instance,
+            signer,
+            cancellationToken);
+
+        await EnsureSuccessAsync(response, cancellationToken);
+    }
+
+    /// <summary>
+    /// Upload a company logo. Returns the stored image's URL, which the server also writes to
+    /// <see cref="Company.Logo"/>.
+    /// </summary>
+    public async Task<string> UploadCompanyLogoAsync(
+        string companyId,
+        Stream imageStream,
+        string filename,
+        IRequestSigner signer,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(imageStream);
+        ArgumentNullException.ThrowIfNull(signer);
+
+        var imageContent = new StreamContent(imageStream);
+        imageContent.Headers.ContentType = new MediaTypeHeaderValue(GetImageContentType(filename));
+
+        var content = new MultipartFormDataContent { { imageContent, "image", filename } };
+
+        // The server hashes an empty body for multipart uploads, so the client must too.
+        using var response = await SendSignedAsync(
+            HttpMethod.Post,
+            ApiPath.Of("api", "companies", companyId, "logo"),
+            content,
+            EmptyPayloadBody.Instance,
+            signer,
+            cancellationToken);
+
+        await EnsureSuccessAsync(response, cancellationToken);
+
+        var responseContent = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        // ASP.NET Core serves bare strings as text/plain; only parse JSON when the
+        // server actually sent JSON
+        return response.Content.Headers.ContentType?.MediaType == "application/json"
+            ? JsonSerializer.Deserialize<string>(responseContent, JsonDefaults.Options) ?? ""
+            : responseContent;
+    }
+
+    /// <summary>
     /// Signs the request and sends it. The signature covers the path as the server binds it — the
     /// decoded form — while the URI carries the percent-encoded one.
     /// </summary>

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Company",
+  "type": "object",
+  "description": "A company registered by a user. userId is the current owner and may be reassigned; companyWalletAddress is fixed and always names the wallet that created the record.",
+  "properties": {
+    "companyId": {
+      "type": "string",
+      "description": "The company's id, of the form company_<22 url-safe characters> (primary key). Server-assigned on create; a value in a create body is ignored.",
+      "pattern": "^company_[A-Za-z0-9_-]{22}$"
+    },
+    "userId": {
+      "type": "string",
+      "description": "The wallet address of the user who owns the company. Reassigning it transfers ownership.",
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,48}$"
+    },
+    "companyWalletAddress": {
+      "type": "string",
+      "description": "The wallet address that created the company. Immutable — a request that changes it is refused.",
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,48}$"
+    },
+    "name": {
+      "type": "string",
+      "description": "The registered company name",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "email": {
+      "type": "string",
+      "format": "email",
+      "description": "Contact email. Checked for shape, never verified by a round-trip.",
+      "maxLength": 256
+    },
+    "logo": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL to the company logo. Set by the logo endpoint."
+    },
+    "website": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "summary": {
+      "type": "string",
+      "description": "What the company does, as one free-text block",
+      "maxLength": 2000
+    },
+    "address": {
+      "type": "string",
+      "description": "Registered address, as one free-text block",
+      "maxLength": 512
+    },
+    "permission": {
+      "type": "object",
+      "description": "Per-role clearance for the company. Admin-only to write. No investor or spv role: those belong to a natural person.",
+      "properties": {
+        "regionalOperator": { "$ref": "#/definitions/permission" },
+        "developer": { "$ref": "#/definitions/permission" },
+        "lawyer": { "$ref": "#/definitions/permission" },
+        "agent": { "$ref": "#/definitions/permission" }
+      },
+      "additionalProperties": false
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the company was first stored. Server-assigned."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the company last changed. Server-assigned."
+    }
+  },
+  "required": ["userId", "companyWalletAddress", "name", "email"],
+  "definitions": {
+    "permission": {
+      "type": "string",
+      "enum": ["compliant", "revoked"]
+    }
+  }
+}
