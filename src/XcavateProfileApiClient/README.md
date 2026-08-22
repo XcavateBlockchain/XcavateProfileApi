@@ -31,7 +31,7 @@ using var client = new XcavateProfileClient(new XcavateProfileClientOptions
 // Reads need no signer.
 var all    = await client.GetProfilesAsync();
 var one    = await client.GetProfileAsync(address);        // null when absent
-var byNick = await client.GetProfileByNicknameAsync("myprofile");
+var byNick = await client.GetProfileByNicknameAsync("MyProfile");  // nicknames match in any case
 
 // Writes take the signing account. Ss58Address and X25519Key are required.
 var profile = new Profile

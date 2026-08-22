@@ -100,6 +100,19 @@ public sealed class RestHost : IAsyncDisposable
         return await context.Companies.FindAsync(companyId);
     }
 
+    /// <summary>
+    /// Writes a profile straight into the database, bypassing the API — the only way to ask what the
+    /// schema itself refuses, rather than what the controller refuses on its behalf.
+    /// </summary>
+    public async Task SeedProfileAsync(Profile profile)
+    {
+        using var scope = _host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ProfileDbContext>();
+
+        context.Profiles.Add(profile);
+        await context.SaveChangesAsync();
+    }
+
     /// <summary>Reads a profile straight out of the database, bypassing the API.</summary>
     public async Task<Profile?> StoredProfileAsync(string address)
     {

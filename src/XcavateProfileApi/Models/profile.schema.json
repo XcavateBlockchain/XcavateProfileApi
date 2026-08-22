@@ -11,7 +11,7 @@
     },
     "nickname": {
       "type": "string",
-      "description": "Optional unique nickname for the profile",
+      "description": "Optional nickname for the profile. Unique without regard to case: once \"tester\" is registered, \"Tester\" is taken. Stored as written and looked up in any case.",
       "minLength": 1,
       "maxLength": 64
     },

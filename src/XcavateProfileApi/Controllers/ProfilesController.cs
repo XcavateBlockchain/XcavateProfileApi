@@ -67,12 +67,14 @@ public class ProfilesController : ControllerBase
     }
 
     // GET: api/profiles/nickname/xena
+    // The lookup ignores case: /nickname/xena and /nickname/Xena are the same request, because
+    // nicknames are unique that way — see Nicknames.
     [HttpGet("nickname/{nickname}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<Profile>> GetProfileByNicknameAsync(string nickname)
     {
-        var profile = await _context.Profiles.FirstOrDefaultAsync(p => p.Nickname == nickname);
+        var profile = await _context.Profiles.WithNickname(nickname).FirstOrDefaultAsync();
         if (profile == null)
         {
             return NotFound();
@@ -128,9 +130,8 @@ public class ProfilesController : ControllerBase
             return BadRequest("Profile already exists");
         }
 
-        // Check nickname uniqueness
-        if (!string.IsNullOrEmpty(profile.Nickname) &&
-            await _context.Profiles.AnyAsync(p => p.Nickname == profile.Nickname))
+        // Check nickname uniqueness, ignoring case: "Tester" is taken once "tester" is
+        if (await _context.Profiles.WithNickname(profile.Nickname).AnyAsync())
         {
             return BadRequest("Nickname already exists");
         }
@@ -199,10 +200,13 @@ public class ProfilesController : ControllerBase
 
         var existingProfile = await _context.Profiles.FindAsync(ss58address);
 
-        // Check nickname uniqueness if nickname is being set or changed
-        if (!string.IsNullOrEmpty(profile.Nickname) && profile.Nickname != existingProfile?.Nickname)
+        // Check nickname uniqueness if the nickname is being set or changed. Case alone is not a
+        // change worth checking — an owner recasing "tester" to "Tester" keeps the name they hold.
+        if (!Nicknames.AreSame(profile.Nickname, existingProfile?.Nickname))
         {
-            if (await _context.Profiles.AnyAsync(p => p.Nickname == profile.Nickname && p.Ss58Address != ss58address, CancellationToken.None))
+            if (await _context.Profiles
+                    .WithNickname(profile.Nickname)
+                    .AnyAsync(p => p.Ss58Address != ss58address, CancellationToken.None))
             {
                 return BadRequest("Nickname already exists");
             }

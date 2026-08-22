@@ -480,6 +480,62 @@ public class ProfileApiTests
         Assert.That(ex?.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.BadRequest));
     }
 
+    /// <summary>
+    /// Nicknames are one name in whatever case they are written: the second user cannot register the
+    /// first user's nickname by recasing it, and either spelling looks the profile up. This is the
+    /// suite that runs it against PostgreSQL, where the unique index on the folded nickname lives.
+    /// </summary>
+    [Test]
+    public async Task Nickname_Uniqueness_Ignores_CaseAsync()
+    {
+        // Arrange
+        var ownerAccount = MnemonicsModel.GetAccountFromMnemonics(TestMnemonics.NickMnemonic);
+        var owner = new XcavateProfileClient(new XcavateProfileClientOptions
+        {
+            ApiUrl = TestApiUrl
+        });
+        await EnsureNoProfileAsync(owner, ownerAccount);
+
+        var strangerAccount = MnemonicsModel.GetAccountFromMnemonics(TestMnemonics.Nick3Mnemonic);
+        var stranger = new XcavateProfileClient(new XcavateProfileClientOptions
+        {
+            ApiUrl = TestApiUrl
+        });
+        await EnsureNoProfileAsync(stranger, strangerAccount);
+
+        var owned = new Profile
+        {
+            Ss58Address = ownerAccount.Value,
+            Nickname = "CaseNick",
+            X25519Key = x25519Key
+        };
+        await owner.CreateProfileAsync(owned, ownerAccount);
+
+        // Act
+        var foundByOtherCase = await owner.GetProfileByNicknameAsync("casenick");
+
+        var claimed = new Profile
+        {
+            Ss58Address = strangerAccount.Value,
+            Nickname = "casenick",
+            X25519Key = x25519Key
+        };
+        var ex = Assert.ThrowsAsync<HttpRequestException>(
+            () => stranger.CreateProfileAsync(claimed, strangerAccount));
+
+        // Assert
+        Assert.Multiple(() =>
+        {
+            Assert.That(foundByOtherCase, Is.Not.Null, "the lookup ignores case");
+            Assert.That(
+                foundByOtherCase!.Ss58Address, Is.EqualTo(ownerAccount.Value));
+            Assert.That(
+                foundByOtherCase.Nickname, Is.EqualTo("CaseNick"),
+                "the stored nickname keeps the case it was written in");
+            Assert.That(ex?.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.BadRequest));
+        });
+    }
+
     #endregion
 
     #region Image Upload Test

@@ -37,7 +37,7 @@ using var client = new XcavateProfileClient(new XcavateProfileClientOptions
 // Reads need no signer.
 var all    = await client.GetProfilesAsync();
 var one    = await client.GetProfileAsync(signer.Address);   // null when absent
-var byNick = await client.GetProfileByNicknameAsync("myprofile");
+var byNick = await client.GetProfileByNicknameAsync("MyProfile");  // nicknames match in any case
 
 // Ss58Address holds the Solana base58 address; the field keeps its name across both chains.
 var profile = new Profile

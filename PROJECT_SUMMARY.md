@@ -231,7 +231,7 @@ have to reproduce `System.Text.Json`'s exact output — see
 | Suite | What it covers | Needs |
 |---|---|---|
 | `tests/XcavateBuckets.Tests` (176) | Domain rules per service, EF schema/keys, GraphQL schema drift, GraphQL integration through a real Hot Chocolate host, the generated StrawberryShake client end to end, signature validation and encoding for both schemes | Nothing — in-memory SQLite |
-| `tests/XcavateProfile.ApiTests` (25) | 19 sr25519 tests: REST CRUD, auth rejection (bad signature, stale timestamp), cross-profile authorization, admin override, nickname uniqueness, image upload. Plus 6 Solana tests covering create, update, delete, image upload, admin override and non-admin rejection | PostgreSQL + a running API, via `run_e2e_tests.sh` |
+| `tests/XcavateProfile.ApiTests` (25) | 19 sr25519 tests: REST CRUD, auth rejection (bad signature, stale timestamp), cross-profile authorization, admin override, nickname uniqueness (including the case-insensitive kind, against PostgreSQL's index), image upload. Plus 6 Solana tests covering create, update, delete, image upload, admin override and non-admin rejection | PostgreSQL + a running API, via `run_e2e_tests.sh` |
 
 The E2E suite signs real requests, so the address derived from `TestMnemonics.AdminMnemonic` must
 appear in `ADMIN_ADDRESSES`, or admin tests fail with 403. `TestMnemonics` derives personas from

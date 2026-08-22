@@ -17,6 +17,19 @@ public class ProfileDbContext : DbContext
 
     public DbSet<WalletMigration> WalletMigrations { get; set; } = default!;
 
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        SyncNicknameKeys();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        SyncNicknameKeys();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // Configure Profile entity
@@ -26,7 +39,13 @@ public class ProfileDbContext : DbContext
             entity.Property(p => p.Ss58Address).IsRequired();
 
             entity.Property(p => p.Nickname).IsRequired(false);
-            entity.HasIndex(p => p.Nickname).IsUnique();
+
+            // Uniqueness is on the case-folded copy, not on the nickname itself: "tester" and
+            // "Tester" are the same name, so only one of them can be registered. The stored
+            // nickname keeps the case the user typed; SyncNicknameKeys below keeps the copy in
+            // step. Nulls stay out of a unique index, so profiles without a nickname do not clash.
+            entity.Property<string>(Nicknames.NormalizedProperty).IsRequired(false);
+            entity.HasIndex(Nicknames.NormalizedProperty).IsUnique();
 
             entity.Property(p => p.Bio).IsRequired(false);
             entity.Property(p => p.ProfilePicture).IsRequired(false);
@@ -98,5 +117,26 @@ public class ProfileDbContext : DbContext
             entity.Property(m => m.Ss58Address).IsRequired();
             entity.Property(m => m.SolanaAddress).IsRequired();
         });
+    }
+
+    /// <summary>
+    /// Writes the case-folded nickname of every profile being saved into its shadow column, so that
+    /// the unique index and every lookup see the same key.
+    /// </summary>
+    /// <remarks>
+    /// It lives here rather than in the controller on purpose: whatever changes a nickname — an
+    /// endpoint, a seed, a future background job — goes through a save, and none of them can forget
+    /// to keep the key in step.
+    /// </remarks>
+    private void SyncNicknameKeys()
+    {
+        foreach (var entry in ChangeTracker.Entries<Profile>())
+        {
+            if (entry.State is EntityState.Added or EntityState.Modified)
+            {
+                entry.Property<string?>(Nicknames.NormalizedProperty).CurrentValue =
+                    Nicknames.Normalize(entry.Entity.Nickname);
+            }
+        }
     }
 }

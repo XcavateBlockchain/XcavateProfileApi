@@ -104,4 +104,10 @@ public static class TestMnemonics
     /// Owns the profile in <see cref="ProfileAttributeApiTests"/>
     /// </summary>
     public static readonly string ProfileAttributesMnemonic = FromEntropy(0x12);
+
+    /// <summary>
+    /// The second account in the case-insensitive nickname test, which needs a wallet of its own so
+    /// it never races the nickname-uniqueness test above it for a profile
+    /// </summary>
+    public static readonly string Nick3Mnemonic = FromEntropy(0x13);
 }

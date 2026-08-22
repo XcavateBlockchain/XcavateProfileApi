@@ -79,7 +79,7 @@ keypair.
 |--------|----------|------|-------------|
 | GET | `/api/profiles` | — | List all profiles |
 | GET | `/api/profiles/{address}` | — | Get profile by address |
-| GET | `/api/profiles/nickname/{nickname}` | — | Get profile by nickname |
+| GET | `/api/profiles/nickname/{nickname}` | — | Get profile by nickname (case-insensitive) |
 | POST | `/api/profiles` | signature | Create profile |
 | PUT | `/api/profiles/{address}` | signature | Update, or create if absent |
 | DELETE | `/api/profiles/{address}` | signature | Delete profile |
@@ -103,6 +103,12 @@ to set:
 `roles` is the user's own: any of `investor`, `developer`, `lawyer`, `agent`, `spv`,
 `regionalOperator`, in any combination, and duplicates are collapsed on save. Declaring a role is
 not the same as being cleared for it — that is what `permission` records, hence the admin gate.
+
+`nickname` is unique without regard to case: once someone holds `tester`, a create or update
+claiming `Tester` is refused with `400 Nickname already exists`, and
+`/api/profiles/nickname/{nickname}` finds the profile whichever case the lookup is written in. The
+case the user typed is what is stored and returned, and its owner is free to recase their own
+nickname — that is a spelling change, not a new claim.
 
 Every one of these fields is omitted from the JSON when null, which is what keeps the signed body
 hash identical for callers on an older SDK build: the bytes they send are the bytes the server
@@ -483,7 +489,7 @@ using var client = new XcavateProfileClient(new XcavateProfileClientOptions
 // Reads need no signer.
 var all = await client.GetProfilesAsync();
 var one = await client.GetProfileAsync(address);      // null when absent
-var byNick = await client.GetProfileByNicknameAsync("myprofile");
+var byNick = await client.GetProfileByNicknameAsync("MyProfile");  // nicknames match in any case
 
 // Writes take the signing account. Ss58Address and X25519Key are required.
 var profile = new Profile
@@ -628,7 +634,7 @@ is looked up correctly without changing what was signed.
 | Field | Type | Notes |
 |-------|------|-------|
 | `ss58address` | string (PK) | Required. The wallet address: SS58 or Solana base58 |
-| `nickname` | string? | Unique when set |
+| `nickname` | string? | Unique when set, ignoring case: `tester` and `Tester` are one name. Stored and returned in the case it was written in, and looked up in any case |
 | `bio` | string? | |
 | `profilePicture` | string? | URL, set by the image upload endpoint |
 | `x25519Key` | string | Required |

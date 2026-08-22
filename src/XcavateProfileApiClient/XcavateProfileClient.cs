@@ -79,7 +79,8 @@ public partial class XcavateProfileClient : IDisposable
         GetOrNullAsync<Profile>(ApiPath.Of("api", "profiles", address), cancellationToken);
 
     /// <summary>
-    /// Get a profile by nickname. Null when there is none.
+    /// Get a profile by nickname, in any case it is written — nicknames are unique that way, so
+    /// "tester" and "Tester" find the same profile. Null when there is none.
     /// </summary>
     public Task<Profile?> GetProfileByNicknameAsync(
         string nickname, CancellationToken cancellationToken = default) =>
