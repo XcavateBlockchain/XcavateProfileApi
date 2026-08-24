@@ -11,10 +11,12 @@ using Microsoft.Extensions.Hosting;
 using Substrate.NetApi;
 using Substrate.NetApi.Model.Types;
 using XcavateBuckets.Domain.Data;
+using XcavateBuckets.Domain.Services;
 using XcavateProfile.Client;
 using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
+using XcavateProfileApi.SocketIo;
 using XcavateProfileApiClient;
 using XcavateProfileApiClient.Signing;
 
@@ -60,7 +62,16 @@ public sealed class GraphQLHost : IAsyncDisposable
     public HttpMessageHandler CreateTestMessageHandler() =>
         _host.GetTestServer().CreateHandler();
 
-    public static async Task<GraphQLHost> StartAsync(params string[] adminAddresses)
+    /// <summary>A websocket client onto the test server, for the Socket.IO endpoint.</summary>
+    public WebSocketClient CreateWebSocketClient() =>
+        _host.GetTestServer().CreateWebSocketClient();
+
+    public static Task<GraphQLHost> StartAsync(params string[] adminAddresses) =>
+        StartAsync(socketIoOptions: null, adminAddresses);
+
+    /// <summary>The same, with Socket.IO tunables — tests of the heartbeat shorten them.</summary>
+    public static async Task<GraphQLHost> StartAsync(
+        SocketIoOptions? socketIoOptions, params string[] adminAddresses)
     {
         var connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
@@ -79,12 +90,24 @@ public sealed class GraphQLHost : IAsyncDisposable
                 services.AddScoped(_ => new SignatureValidationOptions());
                 services.AddScoped<ISignatureValidator, SignatureValidator>();
 
+                // The realtime endpoint, wired the way Program.cs wires it: the socket notifier
+                // takes the IBucketNotifier slot before AddBucketDomain's TryAddScoped default.
+                if (socketIoOptions is not null)
+                {
+                    services.AddSingleton(socketIoOptions);
+                }
+                services.AddBucketSocketIo();
+                services.AddScoped<IBucketNotifier>(
+                    sp => sp.GetRequiredService<SocketIoBucketNotifier>());
+
                 services.AddBucketDomain();
                 services.AddBucketGraphQL();
             });
             web.Configure(app =>
             {
                 app.UseMiddleware<GraphQLSignatureMiddleware>();
+                app.UseWebSockets();
+                app.UseBucketSocketIo();
                 app.UseRouting();
                 app.UseEndpoints(e => e.MapGraphQL());
             });

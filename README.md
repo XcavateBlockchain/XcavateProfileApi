@@ -230,6 +230,93 @@ that rather than on message text. Domain codes port the pallet's `Error` enum
 `INVALID_INPUT` for a bound or format check. Auth failures use `UNAUTHORIZED`,
 `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE` and `FORBIDDEN`.
 
+## Realtime API — bucket messages (Socket.IO)
+
+Endpoint: `/socket.io/` (the socket.io default path), speaking the standard **Socket.IO v4
+protocol** (Engine.IO v4), so any stock socket.io client library connects — JS
+`socket.io-client` v3/v4, Dart `socket_io_client`, `python-socketio`, and so on. The surface is
+deliberately minimal: it delivers **new messages in subscribed buckets**, nothing else. Design
+rationale:
+[`docs/superpowers/specs/2026-08-24-socketio-bucket-messages-design.md`](docs/superpowers/specs/2026-08-24-socketio-bucket-messages-design.md).
+
+**Websocket transport only.** The server does not implement HTTP long-polling, and socket.io
+clients try polling first by default — so pass `transports: ["websocket"]` (a standard client
+option) or the connection fails with a 400 explaining exactly that.
+
+```js
+import { io } from "socket.io-client";
+
+const socket = io("http://localhost:5000", { transports: ["websocket"] });
+
+// Subscriptions are per-connection state, so subscribe inside the connect
+// handler — the client auto-reconnects, and this re-subscribes each time.
+socket.on("connect", () => {
+  socket.emit("subscribe", "5", (ack) => {
+    if (!ack.ok) console.error(ack.error.code, ack.error.message);
+  });
+});
+
+socket.on("message", (message) => {
+  console.log(`bucket ${message.bucketId}: message ${message.id}`, message);
+});
+```
+
+**Client → server events** (both accept the bucket id as a string, a number, or an object
+`{"bucketId": ...}`, and both support the socket.io ack callback):
+
+| Event | Effect |
+|---|---|
+| `subscribe` | Start receiving the bucket's new messages. |
+| `unsubscribe` | Stop. Idempotent — unsubscribing when not subscribed succeeds. |
+
+The ack payload is `{ok: true, bucketId: "5"}` on success and
+`{ok: false, bucketId, error: {code, message}}` on failure, with the same stable-code
+convention as GraphQL: `UNKNOWN_BUCKET` (the bucket does not exist), `INVALID_INPUT` (the
+argument does not parse), `UNKNOWN_EVENT` (anything other than the two events above). When no
+ack callback was passed, failures arrive as a `subscriptionError` event
+(`{action, bucketId, error}`) instead.
+
+**Server → client events:**
+
+| Event | Payload |
+|---|---|
+| `message` | A message newly written to a subscribed bucket. |
+| `subscriptionError` | A failed `subscribe`/`unsubscribe` that requested no ack. |
+
+The `message` payload is camelCase and matches the GraphQL `Message` type field for field — ids
+are strings (like the `BigInt` scalar on the wire), `id` is the composite
+`"{bucketId}-{messageId}"`, `createdAt` is ISO-8601 UTC, optional fields are present as `null` —
+plus an explicit `bucketId` so one connection can demux several bucket subscriptions:
+
+```json
+{
+  "id": "5-0",
+  "bucketId": "5",
+  "messageId": "0",
+  "messageIdNumber": "0",
+  "contributor": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+  "reference": "bafybeigdyrzt5example",
+  "tag": "deed-scan",
+  "description": "a deed",
+  "contentType": "text/plain",
+  "contentHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "properties": null,
+  "ipfsContent": "the deed text",
+  "createdAt": "2026-08-24T10:30:00.0000000Z"
+}
+```
+
+**No authentication**, matching the GraphQL queries: everything the socket delivers is already
+publicly readable through the `messages` query, and message content is end-to-end encrypted by
+design. The socket.io `auth` payload is accepted and ignored. Only the default namespace (`/`)
+exists; connecting to any other yields `connect_error` with `Invalid namespace`.
+
+**Delivery is best-effort and at-most-once, with no replay.** A subscription only ever sees
+messages written while the connection is up; fetch history (or anything missed across a
+reconnect) through GraphQL, e.g. `{ bucket(id: "5") { messages { id ipfsContent createdAt } } }`.
+Heartbeats are the socket.io defaults (server pings every 25 s, 20 s timeout) and client
+libraries answer them automatically.
+
 ## Authentication
 
 All state-changing requests — REST and GraphQL alike — require a signature, either Sr25519
@@ -724,6 +811,20 @@ reaching the API. For nginx, whose default is 1 MB:
 ```nginx
 # in the server/location block proxying to the API
 client_max_body_size 26m;
+```
+
+The realtime endpoint needs the proxy to pass websocket upgrades through, and to leave the
+connection open longer than nginx's 60-second default read timeout (the server pings every 25
+seconds, so 90 seconds is plenty):
+
+```nginx
+location /socket.io/ {
+    proxy_pass http://127.0.0.1:5000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 90s;
+}
 ```
 
 Then reload: `nginx -t && systemctl reload nginx`. This configuration lives on the server only,

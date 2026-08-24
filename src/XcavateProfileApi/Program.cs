@@ -10,6 +10,7 @@ using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Services;
 using XcavateProfileApi.Services.Notifications;
+using XcavateProfileApi.SocketIo;
 using XcavateProfileApi.Swagger;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -73,8 +74,24 @@ if (!string.IsNullOrWhiteSpace(notificationsApiKey))
     builder.Services.AddSingleton<NotificationsApiClient>();
     builder.Services.AddSingleton<NotificationQueue>();
     builder.Services.AddHostedService<NotificationDispatcher>();
-    builder.Services.AddScoped<IBucketNotifier, PushBucketNotifier>();
+    builder.Services.AddScoped<PushBucketNotifier>();
 }
+
+// Realtime bucket messages: a Socket.IO-compatible websocket endpoint at /socket.io/. Always on —
+// it needs no external backend. See docs/superpowers/specs/2026-08-24-socketio-bucket-messages-design.md.
+builder.Services.AddBucketSocketIo();
+
+// The domain raises one notifier event per write; fan it out to every backend in play. Registered
+// before AddBucketDomain so its TryAddScoped NullBucketNotifier default stays out of the way.
+builder.Services.AddScoped<IBucketNotifier>(sp =>
+{
+    var notifiers = new List<IBucketNotifier> { sp.GetRequiredService<SocketIoBucketNotifier>() };
+    if (sp.GetService<PushBucketNotifier>() is { } push)
+    {
+        notifiers.Add(push);
+    }
+    return new CompositeBucketNotifier(notifiers);
+});
 
 builder.Services.AddBucketDomain();
 builder.Services.AddBucketGraphQL();
@@ -132,6 +149,10 @@ app.UseAuthorization();
 
 // Must run before MapGraphQL so the caller is resolved by the time resolvers execute.
 app.UseMiddleware<GraphQLSignatureMiddleware>();
+
+// Realtime bucket messages over Socket.IO (websocket transport only).
+app.UseWebSockets();
+app.UseBucketSocketIo();
 
 // Apply migrations on startup with retry
 using (var scope = app.Services.CreateScope())

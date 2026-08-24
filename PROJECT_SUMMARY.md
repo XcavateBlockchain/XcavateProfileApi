@@ -15,7 +15,8 @@ One ASP.NET Core host serving two independent APIs over one PostgreSQL database:
    its data and ports the pallet's rules into domain services. There is no chain and no extrinsic
    submission. Read operations expose the same entity types and field names the
    [SubQuery indexer](https://github.com/XcavateBlockchain/xcavate-indexer) served, so existing
-   consumers keep their selection sets.
+   consumers keep their selection sets. New bucket messages also stream in real time over a
+   Socket.IO-compatible websocket endpoint at `/socket.io/`.
 
 Both authenticate writes with wallet signatures — Substrate sr25519 or Solana ed25519 — through
 one shared validator. Reads are public on both.
@@ -43,7 +44,10 @@ XcavateProfile/
 │   │   │   └── Auth/                   # GraphQLSignatureMiddleware, CallerContext,
 │   │   │                               # RequireSignature / RequireAdmin attributes
 │   │   ├── Middleware/                 # ISignatureValidator, SignatureValidator, options
+│   │   ├── SocketIo/                   # realtime bucket messages: Socket.IO v4 protocol,
+│   │   │                               # connection state machine, registry, broadcast queue
 │   │   ├── Services/                   # S3Service, IdGenerator, Timestamps
+│   │   │   └── Notifications/          # push pipeline + CompositeBucketNotifier
 │   │   ├── Migrations/                 # ProfileDbContext migrations
 │   │   └── Program.cs
 │   │
@@ -84,7 +88,7 @@ XcavateProfile/
 │       └── (project file + .graphqlrc.json only — no sources of its own)
 │
 ├── tests/
-│   ├── XcavateBuckets.Tests/           # 288 tests, in-memory SQLite, no server needed
+│   ├── XcavateBuckets.Tests/           # 336 tests, in-memory SQLite, no server needed
 │   ├── XcavateProfileApiSolanaClient.Tests/  # 26 tests over the Solana package alone
 │   └── XcavateProfile.ApiTests/        # E2E REST tests against a running API
 │
@@ -113,6 +117,7 @@ XcavateProfile/
 | ed25519 / Solana base58 | Solnet.Wallet 6.1 |
 | Object storage | AWSSDK.S3 against Hetzner Object Storage |
 | REST docs | Swashbuckle / Swagger |
+| Realtime | Socket.IO v4 wire protocol, hand-rolled over ASP.NET Core websockets |
 | Testing | NUnit 4 |
 | CI/CD | GitHub Actions, Docker Compose |
 
@@ -178,6 +183,19 @@ Deliberate carry-overs from the pallet — global bucket ids, per-bucket message
 starting locked — are documented in [README.md](README.md#graphql-api--buckets) and in the entity
 XML docs. Fees are not ported, since there is no currency off-chain.
 
+### Realtime bucket messages (Socket.IO)
+
+`/socket.io/` speaks the standard Socket.IO v4 wire protocol (Engine.IO v4, websocket transport
+only), implemented by hand in `SocketIo/` because .NET has no maintained Socket.IO server —
+`SocketIoProtocol` is the codec, `SocketIoConnection` the per-session state machine. A client
+subscribes to buckets by id and receives each new message as a `message` event shaped like the
+GraphQL `Message` type; nothing else is exposed. The hook is the same `IBucketNotifier` seam the
+push notifications use, fanned out by `CompositeBucketNotifier`, with the same
+queue-then-background-dispatch pattern and the same best-effort delivery contract.
+Unauthenticated on purpose: bucket reads are public in GraphQL too. Details in
+[README.md](README.md#realtime-api--bucket-messages-socketio) and
+[the design spec](docs/superpowers/specs/2026-08-24-socketio-bucket-messages-design.md).
+
 ### Client SDK
 
 Published as `XcavateProfileApiClient`. Two type families matter:
@@ -230,7 +248,7 @@ have to reproduce `System.Text.Json`'s exact output — see
 
 | Suite | What it covers | Needs |
 |---|---|---|
-| `tests/XcavateBuckets.Tests` (176) | Domain rules per service, EF schema/keys, GraphQL schema drift, GraphQL integration through a real Hot Chocolate host, the generated StrawberryShake client end to end, signature validation and encoding for both schemes | Nothing — in-memory SQLite |
+| `tests/XcavateBuckets.Tests` (336) | Domain rules per service, EF schema/keys, GraphQL schema drift, GraphQL integration through a real Hot Chocolate host, the generated StrawberryShake client end to end, signature validation and encoding for both schemes, the Socket.IO protocol and realtime delivery over a test-server websocket | Nothing — in-memory SQLite |
 | `tests/XcavateProfile.ApiTests` (25) | 19 sr25519 tests: REST CRUD, auth rejection (bad signature, stale timestamp), cross-profile authorization, admin override, nickname uniqueness (including the case-insensitive kind, against PostgreSQL's index), image upload. Plus 6 Solana tests covering create, update, delete, image upload, admin override and non-admin rejection | PostgreSQL + a running API, via `run_e2e_tests.sh` |
 
 The E2E suite signs real requests, so the address derived from `TestMnemonics.AdminMnemonic` must
@@ -270,5 +288,4 @@ each of the same phrases.
 - Rate limiting in front of the signature validator
 - Caching for profile lookups
 - Cover the uploaded file in the image upload signature
-- Subscriptions for bucket message writes
 - Consolidate the SDK's two namespaces at the next major package version
