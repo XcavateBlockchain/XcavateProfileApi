@@ -6,6 +6,16 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+
+    <!--
+      SwaggerDocumentationTests boot the real Swagger pipeline, which does
+      IncludeXmlComments on the web and client doc files. MSBuild only copies a referenced
+      project's doc file into the consumer's output when the consumer generates one too, so
+      this flag is what lands XcavateProfileApi.xml / XcavateProfileApiClient.xml in the test
+      bin. CS1591 is suppressed the same way the web project does it.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

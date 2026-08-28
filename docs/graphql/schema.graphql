@@ -3,6 +3,10 @@ schema {
   mutation: Mutation
 }
 
+"""
+Read side of the bucket API. Field names and the connection shape match what the SubQuery
+indexer served, so existing selection sets keep working. Reads need no signature.
+"""
 type Query {
   namespaces(
     "Returns the first _n_ elements from the list."
@@ -190,6 +194,12 @@ type Query {
     @cost(weight: "10")
 }
 
+"""
+Write side of the bucket API: one mutation per pallet extrinsic, in call-index order. Each is a
+thin wrapper that resolves the signed caller, runs the domain service inside a transaction, and
+returns the result. The 15 role-based mutations require a signature; the 5 force*
+mutations require an admin address, standing in for the pallet's ForceOrigin.
+"""
 type Mutation {
   createNamespace(metadata: NamespaceMetadataInput!): Namespace!
     @cost(weight: "10")
@@ -806,6 +816,7 @@ input NamespaceSortInput {
   updatedAt: SortEnumType @cost(weight: "10")
 }
 
+"One entry of a properties map. Mirrors the pallet's BoundedBTreeMap entries."
 input PropertyInput {
   key: String!
   value: String!

@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using XcavateProfile.Client;
 using XcavateProfileApi.Data;
 using XcavateProfileApi.Middleware;
+using XcavateProfileApi.Swagger;
 using XcavateProfileApiClient.Signing;
 
 namespace XcavateProfileApi.Controllers;
@@ -37,6 +38,7 @@ public class MigrationsController : ControllerBase
         _signatureValidator = signatureValidator;
     }
 
+    /// <summary>Lists every registered Polkadot → Solana wallet migration. Public read — no signature.</summary>
     // GET: api/migrations
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -46,6 +48,7 @@ public class MigrationsController : ControllerBase
         return Ok(migrations);
     }
 
+    /// <summary>Gets the migration registered for the given Polkadot (SS58) address. 404 when there is none.</summary>
     // GET: api/migrations/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W
     [HttpGet("{ss58address}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -60,6 +63,12 @@ public class MigrationsController : ControllerBase
         return Ok(migration);
     }
 
+    /// <summary>
+    /// Registers a Polkadot → Solana wallet migration. Requires an sr25519 signature from the
+    /// very SS58 address being registered — a Solana-signed request can never register a pair.
+    /// One registration per Polkadot account (400 on a duplicate).
+    /// </summary>
+    [SignedRequest]
     // POST: api/migrations
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status201Created)]

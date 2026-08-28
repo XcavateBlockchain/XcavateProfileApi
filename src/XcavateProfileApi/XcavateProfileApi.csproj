@@ -4,6 +4,13 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!--
+      Swagger pulls the controller and model summaries out of the XML doc file. CS1591
+      (missing XML comment) is suppressed rather than chasing documentation across the whole
+      surface — the undocumented members are internal plumbing, not the API contract.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

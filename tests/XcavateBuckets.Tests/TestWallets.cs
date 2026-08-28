@@ -5,7 +5,7 @@ using static Substrate.NetApi.Mnemonic;
 namespace XcavateBuckets.Tests;
 
 /// <summary>
-/// Deterministic sr25519 accounts for the REST fixtures: the same <paramref name="fill"/> byte
+/// Deterministic sr25519 accounts for the REST fixtures: the same fill byte
 /// always yields the same address, so a test that needs "some other wallet" can name one without
 /// hard-coding an address.
 /// </summary>

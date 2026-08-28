@@ -4,6 +4,7 @@ using XcavateProfile.Client;
 using XcavateProfileApi.Data;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Services;
+using XcavateProfileApi.Swagger;
 using XcavateProfileApiClient;
 
 namespace XcavateProfileApi.Controllers;
@@ -47,6 +48,7 @@ public class CompaniesController : ControllerBase
         _s3Service = s3Service;
     }
 
+    /// <summary>Lists every company. Public read — no signature.</summary>
     // GET: api/companies
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -56,6 +58,7 @@ public class CompaniesController : ControllerBase
         return Ok(companies);
     }
 
+    /// <summary>Gets a company by its server-generated id. 404 when it does not exist.</summary>
     // GET: api/companies/company_3kQ8ZrW7yVn1pLd2XmTgQa
     [HttpGet("{companyId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -70,8 +73,11 @@ public class CompaniesController : ControllerBase
         return Ok(company);
     }
 
+    /// <summary>
+    /// Every company one wallet owns. An owner with none is an empty list, not a 404. Public read
+    /// — no signature.
+    /// </summary>
     // GET: api/companies/user/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W
-    // Every company one wallet owns. An owner with none is an empty list, not a 404.
     [HttpGet("user/{userId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<ActionResult<List<Company>>> GetCompaniesByUserAsync(string userId)
@@ -83,6 +89,13 @@ public class CompaniesController : ControllerBase
         return Ok(companies);
     }
 
+    /// <summary>
+    /// Registers a company. Requires a signed request; the signer owns the new record, so
+    /// <c>userId</c> and <c>companyWalletAddress</c> must both be the authenticated address
+    /// (an admin may register on another wallet's behalf). The id is server-generated and
+    /// <c>permission</c> is admin-only.
+    /// </summary>
+    [SignedRequest]
     // POST: api/companies
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status201Created)]
@@ -145,9 +158,13 @@ public class CompaniesController : ControllerBase
             nameof(GetCompanyAsync), new { companyId = company.CompanyId }, company);
     }
 
+    /// <summary>
+    /// Updates a company. Requires a signed request from the owning wallet or an admin. Unlike
+    /// the profile endpoint this is not an upsert — 404 for an unknown id. <c>companyWalletAddress</c>
+    /// never changes; assigning <c>userId</c> to another wallet hands the company over.
+    /// </summary>
+    [SignedRequest]
     // PUT: api/companies/company_3kQ8ZrW7yVn1pLd2XmTgQa
-    // Not an upsert, unlike the profile endpoint: ids are server-generated, so a caller cannot hold
-    // one that does not exist yet.
     [HttpPut("{companyId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -229,6 +246,11 @@ public class CompaniesController : ControllerBase
         return Ok(existing);
     }
 
+    /// <summary>
+    /// Deletes a company. Requires a signed request from the owning wallet or an admin; the
+    /// request signs an empty payload, so the body hash segment is empty. 404 for an unknown id.
+    /// </summary>
+    [SignedRequest]
     // DELETE: api/companies/company_3kQ8ZrW7yVn1pLd2XmTgQa
     [HttpDelete("{companyId}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -279,11 +301,18 @@ public class CompaniesController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Uploads the company logo (multipart, same limits as the profile picture). Requires a signed
+    /// request from the owning wallet or an admin, and the company must exist. The signature
+    /// covers an empty payload — the file bytes are deliberately outside it.
+    /// </summary>
+    /// <remarks>
+    /// The content type comes from the file extension, never from the client — see ImageUploads.
+    /// NOTE: any reverse proxy in front of the API (e.g. nginx client_max_body_size) must allow at
+    /// least the same request size, or uploads fail with 413 before ever reaching this endpoint.
+    /// </remarks>
+    [SignedRequest]
     // POST: api/companies/company_3kQ8ZrW7yVn1pLd2XmTgQa/logo
-    // The company-logo counterpart of the profile-picture endpoint, with the same limits: see
-    // ImageUploads for why the content type comes from the extension and never from the client.
-    // NOTE: any reverse proxy in front of the API (e.g. nginx client_max_body_size) must allow at
-    // least the same request size, or uploads fail with 413 before ever reaching this endpoint.
     [HttpPost("{companyId}/logo")]
     [RequestSizeLimit(ImageUploads.RequestSizeLimit)]
     [RequestFormLimits(MultipartBodyLengthLimit = ImageUploads.RequestSizeLimit)]

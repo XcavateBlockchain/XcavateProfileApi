@@ -69,7 +69,7 @@ keypair.
 | `src/XcavateBuckets.Domain` | Bucket entities, `BucketDbContext`, migrations, domain services |
 | `src/XcavateProfileApiClient` | Client SDK (NuGet): REST client, generated GraphQL client, signing |
 | `src/XcavateProfileApiSolanaClient` | The same SDK packaged without Substrate — no sources of its own |
-| `tests/XcavateBuckets.Tests` | 288 domain, schema, REST, GraphQL, signature and hash-compatibility tests (in-memory SQLite) |
+| `tests/XcavateBuckets.Tests` | 341 domain, schema, REST, GraphQL, Swagger-documentation, signature and hash-compatibility tests (in-memory SQLite) |
 | `tests/XcavateProfileApiSolanaClient.Tests` | 26 tests over the Solana package: signing, request shape, absent Substrate |
 | `tests/XcavateProfile.ApiTests` | End-to-end REST tests against a running API |
 
@@ -493,7 +493,11 @@ dotnet ef migrations add <Name> --project src/XcavateBuckets.Domain \
 ```
 
 5. **Browse the APIs** — Swagger UI at `http://localhost:5000/swagger`, GraphQL (Nitro IDE) at
-   `http://localhost:5000/graphql`.
+   `http://localhost:5000/graphql`. The Swagger API description documents the wallet-signature
+   scheme end to end: the signed payload format, the `X-SS58-Address` / `X-Signature` /
+   `X-Timestamp` headers on each of the nine signed write operations, the verification steps the
+   server performs, and the bucket GraphQL surface at `POST/GET /graphql` with its schema at
+   `docs/graphql/schema.graphql`.
 
 ## Testing
 

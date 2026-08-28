@@ -40,8 +40,16 @@ builder.Services.AddSwaggerGen(c =>
         Description = "A Substrate/Polkadot profile registration and management API"
     });
 
+    // XML docs from this assembly (controller summaries) and the client SDK (request/response
+    // model properties), so the operations and the body models are documented without
+    // hand-written OpenAPI content.
+    c.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, "XcavateProfileApi.xml"));
+    c.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, "XcavateProfileApiClient.xml"), true);
+
     // Add Swagger filters
     c.OperationFilter<ExcludeSwaggerOperationFilter>();
+    c.OperationFilter<SignedRequestOperationFilter>();
+    c.DocumentFilter<ApiInfoDocumentFilter>();
 });
 
 // Configure PostgreSQL database

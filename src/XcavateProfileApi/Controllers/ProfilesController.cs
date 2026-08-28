@@ -4,6 +4,7 @@ using XcavateProfile.Client;
 using XcavateProfileApi.Data;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Services;
+using XcavateProfileApi.Swagger;
 using XcavateProfileApiClient;
 
 namespace XcavateProfileApi.Controllers;
@@ -43,6 +44,7 @@ public class ProfilesController : ControllerBase
         _s3Service = s3Service;
     }
 
+    /// <summary>Lists every profile. Public read — no signature.</summary>
     // GET: api/profiles
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -52,6 +54,7 @@ public class ProfilesController : ControllerBase
         return Ok(profiles);
     }
 
+    /// <summary>Gets the profile owned by the given wallet address. 404 when it does not exist.</summary>
     // GET: api/profiles/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W
     [HttpGet("{ss58address}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -66,9 +69,11 @@ public class ProfilesController : ControllerBase
         return Ok(profile);
     }
 
+    /// <summary>
+    /// Gets a profile by nickname. The lookup ignores case: /nickname/xena and /nickname/Xena are
+    /// the same request, because nicknames are unique that way — see Nicknames.
+    /// </summary>
     // GET: api/profiles/nickname/xena
-    // The lookup ignores case: /nickname/xena and /nickname/Xena are the same request, because
-    // nicknames are unique that way — see Nicknames.
     [HttpGet("nickname/{nickname}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -82,6 +87,12 @@ public class ProfilesController : ControllerBase
         return Ok(profile);
     }
 
+    /// <summary>
+    /// Creates a profile. Requires a signed request, and the signer must own the address in the
+    /// body. 401 for missing or invalid credentials, 400 when the profile or nickname already
+    /// exists or a field fails validation.
+    /// </summary>
+    [SignedRequest]
     // POST: api/profiles
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status201Created)]
@@ -151,8 +162,13 @@ public class ProfilesController : ControllerBase
         return CreatedAtAction(nameof(GetProfileAsync), new { ss58address = profile.Ss58Address }, profile);
     }
 
+    /// <summary>
+    /// Updates a profile, or creates it when it does not exist yet (upsert). Requires a signed
+    /// request from the profile's owner or an admin — the route address is authoritative, not the
+    /// body's. 403 for a signed caller without ownership.
+    /// </summary>
+    [SignedRequest]
     // PUT: api/profiles/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W
-    // Upsert: creates the profile when it does not exist yet
     [HttpPut("{ss58address}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status201Created)]
@@ -273,6 +289,11 @@ public class ProfilesController : ControllerBase
         return Ok(existingProfile);
     }
 
+    /// <summary>
+    /// Deletes a profile. Requires a signed request from the owner or an admin; the request signs
+    /// an empty payload, so the body hash segment is empty. 404 when the profile does not exist.
+    /// </summary>
+    [SignedRequest]
     // DELETE: api/profiles/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W
     [HttpDelete("{ss58address}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -322,11 +343,19 @@ public class ProfilesController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Uploads the profile picture (multipart, up to 25 MB). Requires a signed request from the
+    /// owner or an admin. The signature covers an empty payload — the file bytes are deliberately
+    /// outside it. 404 when the profile does not exist.
+    /// </summary>
+    /// <remarks>
+    /// NOTE: any reverse proxy in front of the API (e.g. nginx client_max_body_size) must allow
+    /// at least the same request size, or uploads fail with 413 before ever reaching this
+    /// endpoint.
+    /// </remarks>
+    [SignedRequest]
     // POST: api/profiles/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W/image
     // Images up to 25MB are supported; the extra 1MB covers multipart encoding overhead.
-    // NOTE: any reverse proxy in front of the API (e.g. nginx client_max_body_size)
-    // must allow at least the same request size, or uploads fail with 413 before
-    // ever reaching this endpoint.
     [HttpPost("{ss58address}/image")]
     [RequestSizeLimit(ImageUploads.RequestSizeLimit)]
     [RequestFormLimits(MultipartBodyLengthLimit = ImageUploads.RequestSizeLimit)]
@@ -411,6 +440,7 @@ public class ProfilesController : ControllerBase
     /// The refusal message for a body that cannot be stored, or null when it is fine. Runs after the
     /// signature check, so the caller is known by the time anything is reported back.
     /// </summary>
+    /// <param name="profile">The body that may be stored.</param>
     /// <param name="userId">
     /// The address the profile belongs to — the body's own for a create, the route's for an update.
     /// </param>
