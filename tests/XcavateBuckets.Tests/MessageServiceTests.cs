@@ -157,12 +157,23 @@ public class MessageServiceTests
     }
 
     [Test]
-    public void WriteAsync_rejects_an_unknown_tag()
+    public async Task WriteAsync_registers_a_tag_that_does_not_exist_yet()
     {
-        var ex = Assert.ThrowsAsync<BucketException>(() => _fixture.Messages.WriteAsync(
-            TestDb.Carol, _ns.NamespaceId, _bucket.BucketId, Request(tag: "nope"), Ct))!;
+        var message = await _fixture.Messages.WriteAsync(
+            TestDb.Carol, _ns.NamespaceId, _bucket.BucketId, Request(tag: "nope"), Ct);
 
-        Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.UnknownTag));
+        var tag = await _fixture.Db.Tags
+            .SingleAsync(t => t.BucketId == _bucket.BucketId && t.TagName == "nope", Ct);
+        var counter = await _fixture.Db.TagMessageCounts
+            .SingleAsync(c => c.BucketId == _bucket.BucketId && c.TagName == "nope", Ct);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(message.Tag, Is.EqualTo("nope"));
+            Assert.That(tag.Creator, Is.EqualTo(TestDb.Carol), "the writer registers the tag");
+            Assert.That(tag.CreatedAt, Is.EqualTo(_fixture.Clock.GetUtcNow().UtcDateTime));
+            Assert.That(counter.Count, Is.EqualTo(1));
+        });
     }
 
     [Test]

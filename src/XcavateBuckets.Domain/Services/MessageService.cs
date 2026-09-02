@@ -30,9 +30,11 @@ public class MessageService(
 {
     /// <summary>
     /// Writes a message into a bucket. The pallet's check order matters and is reproduced exactly:
-    /// bucket exists, bucket is writable, caller is a contributor, tag exists. A non-contributor
+    /// bucket exists, bucket is writable, caller is a contributor. A non-contributor
     /// writing to a locked bucket therefore sees <see cref="BucketErrorCode.BucketIsLocked"/>, not
-    /// <see cref="BucketErrorCode.NotContributor"/>.
+    /// <see cref="BucketErrorCode.NotContributor"/>. A tag that does not exist yet is registered
+    /// on the fly — any contributor may introduce any tag, and the writer is recorded as its
+    /// creator (the pallet requires bucket admins to create tags first).
     /// </summary>
     public async Task<Message> WriteAsync(
         string caller,
@@ -62,11 +64,21 @@ public class MessageService(
 
         if (request.Tag is not null)
         {
-            var tagExists = await db.Tags
-                .AnyAsync(t => t.BucketId == bucketId && t.TagName == request.Tag, ct);
-            if (!tagExists)
+            var tag = await db.Tags
+                .FirstOrDefaultAsync(t => t.BucketId == bucketId && t.TagName == request.Tag, ct);
+
+            if (tag is null)
             {
-                throw BucketException.UnknownTag();
+                // Tags are not pre-registered: the first tagged message creates the tag and
+                // records its writer as the creator.
+                tag = new Tag
+                {
+                    BucketId = bucketId,
+                    TagName = request.Tag,
+                    Creator = caller,
+                    CreatedAt = now
+                };
+                db.Tags.Add(tag);
             }
 
             var counter = await db.TagMessageCounts
