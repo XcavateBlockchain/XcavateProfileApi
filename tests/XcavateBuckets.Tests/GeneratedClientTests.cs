@@ -60,13 +60,25 @@ public class GeneratedClientTests
         await using var _ = provider;
 
         var created = await client.CreateNamespace.ExecuteAsync(
-            new NamespaceMetadataInput { Name = "generated" });
+            new NamespaceMetadataInput
+            {
+                Name = "generated",
+                Category = "generated",
+                Cluster = "mainnet",
+                Slot = "7"
+            });
 
         Assert.That(created.Errors, Is.Empty, string.Join("; ", created.Errors.Select(e => e.Message)));
         Assert.Multiple(() =>
         {
             Assert.That(created.Data!.CreateNamespace.Name, Is.EqualTo("generated"));
             Assert.That(created.Data.CreateNamespace.Creator, Is.EqualTo(alice.Value));
+            Assert.That(created.Data.CreateNamespace.Category, Is.EqualTo("generated"));
+            Assert.That(created.Data.CreateNamespace.Cluster, Is.EqualTo("mainnet"));
+            Assert.That(created.Data.CreateNamespace.Slot, Is.EqualTo("7"),
+                "BigInt is a string on the wire");
+            Assert.That(created.Data.CreateNamespace.PropertyId, Is.Null,
+                "a non-admin cannot set propertyId, so it stays null");
         });
 
         var listed = await client.GetNamespaces.ExecuteAsync(first: 10, after: null);
@@ -77,6 +89,7 @@ public class GeneratedClientTests
         {
             Assert.That(listed.Data!.Namespaces!.TotalCount, Is.EqualTo(1));
             Assert.That(listed.Data.Namespaces.Nodes![0]!.Name, Is.EqualTo("generated"));
+            Assert.That(listed.Data.Namespaces.Nodes[0]!.Cluster, Is.EqualTo("mainnet"));
             Assert.That(listed.Data.Namespaces.Nodes[0]!.Managers[0].Manager, Is.EqualTo(alice.Value));
         });
     }

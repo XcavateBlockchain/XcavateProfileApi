@@ -1,3 +1,4 @@
+using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateBuckets.Domain.Services;
@@ -24,10 +25,23 @@ public class BucketMutations
         ICallerContext caller,
         BucketDbContext db,
         NamespaceService namespaces,
-        CancellationToken ct) =>
-        InTransaction(db, ct, () => namespaces.CreateAsync(
-            caller.RequireAddress(), metadata.Name, metadata.SchemaUri,
-            metadata.Properties.ToPairs(), ct));
+        CancellationToken ct)
+    {
+        var address = caller.RequireAddress();
+
+        // propertyId and realXhubId are admin-only; refuse a non-admin attempting to set either.
+        if (!caller.IsAdmin && (metadata.PropertyId is not null || metadata.RealXhubId is not null))
+        {
+            throw new BucketApiException(
+                "FORBIDDEN", $"'{address}' is not authorized to set 'propertyId' or 'realXhubId'.");
+        }
+
+        return InTransaction(db, ct, () => namespaces.CreateAsync(
+            address, metadata.Name, metadata.SchemaUri, metadata.Properties.ToPairs(), ct,
+            new NamespaceAttributes(
+                metadata.Category, metadata.Cluster, metadata.PropertyId,
+                metadata.RealXhubId, metadata.Slot)));
+    }
 
     // call_index 1
     [RequireSignature]

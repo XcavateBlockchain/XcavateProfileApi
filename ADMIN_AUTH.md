@@ -221,7 +221,10 @@ Admins have elevated privileges:
 The same list also gates the bucket GraphQL API. The five `force*` mutations
 (`forceRemoveNamespace`, `forceRemoveBucket`, `forceRemoveTag`, `forceRemoveMessage`,
 `forceAddManager`) carry `[RequireAdmin]` and stand in for the pallet's `ForceOrigin`; a signed
-but non-admin caller gets a `FORBIDDEN` error. Every other bucket mutation authorizes on the
+but non-admin caller gets a `FORBIDDEN` error. `createNamespace` additionally admin-gates two of
+its optional fields: only an admin may set `propertyId` or `realXhubId` — a non-admin who supplies
+either gets `FORBIDDEN`, while the remaining optional fields (`category`, `cluster`, `slot`) stay
+open to any signed caller. Every other bucket mutation authorizes on the
 caller's role within the namespace or bucket — manager, admin, contributor or viewer — not on this
 list. See [README.md](README.md#graphql-api--buckets).
 

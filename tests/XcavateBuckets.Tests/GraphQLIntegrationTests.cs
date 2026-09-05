@@ -190,6 +190,71 @@ public class GraphQLIntegrationTests
     }
 
     [Test]
+    public async Task Non_admin_cannot_set_propertyId_or_realXhubId()
+    {
+        var alice = Alice();
+        await using var host = await GraphQLHost.StartAsync();
+
+        var result = await host.SignedAsync(
+            """mutation { createNamespace(metadata: { name: "deeds", propertyId: "123" }) { id } }""",
+            alice);
+
+        Assert.That(result.FirstErrorCode(), Is.EqualTo("FORBIDDEN"));
+    }
+
+    [Test]
+    public async Task Non_admin_can_set_category_cluster_and_slot()
+    {
+        var alice = Alice();
+        await using var host = await GraphQLHost.StartAsync();
+
+        var result = await host.SignedAsync(
+            """
+            mutation {
+              createNamespace(metadata: {
+                name: "deeds" category: "deeds" cluster: "mainnet" slot: "7"
+              }) { category cluster slot propertyId }
+            }
+            """, alice);
+
+        Assert.That(result.FirstErrorCode(), Is.Null, result.RootElement.ToString());
+        var ns = result.Data("createNamespace");
+        Assert.Multiple(() =>
+        {
+            Assert.That(ns.GetProperty("category").GetString(), Is.EqualTo("deeds"));
+            Assert.That(ns.GetProperty("cluster").GetString(), Is.EqualTo("mainnet"));
+            Assert.That(ns.GetProperty("slot").GetString(), Is.EqualTo("7"),
+                "BigInt is a string on the wire");
+            Assert.That(ns.GetProperty("propertyId").ValueKind, Is.EqualTo(JsonValueKind.Null),
+                "a non-admin cannot set propertyId, so it stays null");
+        });
+    }
+
+    [Test]
+    public async Task Admin_can_set_propertyId_and_realXhubId()
+    {
+        var alice = Alice();
+        await using var host = await GraphQLHost.StartAsync(alice.Value);
+
+        var result = await host.SignedAsync(
+            """
+            mutation {
+              createNamespace(metadata: {
+                name: "deeds" propertyId: "123" realXhubId: "456"
+              }) { propertyId realXhubId }
+            }
+            """, alice);
+
+        Assert.That(result.FirstErrorCode(), Is.Null, result.RootElement.ToString());
+        var ns = result.Data("createNamespace");
+        Assert.Multiple(() =>
+        {
+            Assert.That(ns.GetProperty("propertyId").GetString(), Is.EqualTo("123"));
+            Assert.That(ns.GetProperty("realXhubId").GetString(), Is.EqualTo("456"));
+        });
+    }
+
+    [Test]
     public async Task Non_manager_creating_a_bucket_is_reported_as_not_manager()
     {
         var alice = Alice();

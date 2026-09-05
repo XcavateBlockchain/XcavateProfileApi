@@ -6,7 +6,12 @@ public sealed record PropertyInput(string Key, string Value);
 public sealed record NamespaceMetadataInput(
     string Name,
     string? SchemaUri,
-    IReadOnlyList<PropertyInput>? Properties);
+    IReadOnlyList<PropertyInput>? Properties,
+    string? Category = null,
+    string? Cluster = null,
+    long? PropertyId = null,
+    long? RealXhubId = null,
+    long? Slot = null);
 
 public sealed record BucketMetadataInput(
     string Name,

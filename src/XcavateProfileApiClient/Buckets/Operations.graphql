@@ -14,6 +14,11 @@ query GetNamespaces($first: Int, $after: String) {
       name
       schemaUri
       properties
+      category
+      cluster
+      propertyId
+      realXhubId
+      slot
       creator
       createdAt
       managers {
@@ -32,6 +37,11 @@ query GetNamespaceById($id: ID!) {
     name
     schemaUri
     properties
+    category
+    cluster
+    propertyId
+    realXhubId
+    slot
     creator
     createdAt
     buckets {
@@ -126,6 +136,11 @@ mutation CreateNamespace($metadata: NamespaceMetadataInput!) {
     id
     namespaceId
     name
+    category
+    cluster
+    propertyId
+    realXhubId
+    slot
     creator
   }
 }

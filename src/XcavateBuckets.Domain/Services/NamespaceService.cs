@@ -23,10 +23,13 @@ public class NamespaceService(
         string name,
         string? schemaUri,
         IEnumerable<KeyValuePair<string, string>>? properties,
-        CancellationToken ct)
+        CancellationToken ct,
+        NamespaceAttributes? attributes = null)
     {
         validator.Required(name, validator.Options.MaxNameLen, "name");
         validator.Text(schemaUri, validator.Options.MaxUriLen, "schemaUri");
+        validator.Text(attributes?.Category, validator.Options.MaxCategoryLen, "category");
+        validator.Text(attributes?.Cluster, validator.Options.MaxClusterLen, "cluster");
         var propertiesJson = validator.PropertiesJson(properties);
 
         var now = clock.GetUtcNow().UtcDateTime;
@@ -36,6 +39,11 @@ public class NamespaceService(
             Name = name,
             SchemaUri = schemaUri,
             Properties = propertiesJson,
+            Category = attributes?.Category,
+            Cluster = attributes?.Cluster,
+            PropertyId = attributes?.PropertyId,
+            RealXhubId = attributes?.RealXhubId,
+            Slot = attributes?.Slot,
             Creator = caller,
             CreatedAt = now,
             UpdatedAt = now

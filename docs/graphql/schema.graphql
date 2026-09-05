@@ -414,6 +414,11 @@ type Namespace {
   name: String
   schemaUri: String
   properties: String
+  category: String
+  cluster: String
+  propertyId: BigInt
+  realXhubId: BigInt
+  slot: BigInt
   creator: String
   createdAt: DateTime!
   updatedAt: DateTime!
@@ -777,6 +782,11 @@ input NamespaceFilterInput {
   name: StringOperationFilterInput
   schemaUri: StringOperationFilterInput
   properties: StringOperationFilterInput
+  category: StringOperationFilterInput
+  cluster: StringOperationFilterInput
+  propertyId: LongOperationFilterInput
+  realXhubId: LongOperationFilterInput
+  slot: LongOperationFilterInput
   creator: StringOperationFilterInput
   createdAt: DateTimeOperationFilterInput
   updatedAt: DateTimeOperationFilterInput
@@ -804,6 +814,11 @@ input NamespaceMetadataInput {
   name: String!
   schemaUri: String
   properties: [PropertyInput!]
+  category: String
+  cluster: String
+  propertyId: BigInt
+  realXhubId: BigInt
+  slot: BigInt
 }
 
 input NamespaceSortInput {
@@ -811,6 +826,11 @@ input NamespaceSortInput {
   name: SortEnumType @cost(weight: "10")
   schemaUri: SortEnumType @cost(weight: "10")
   properties: SortEnumType @cost(weight: "10")
+  category: SortEnumType @cost(weight: "10")
+  cluster: SortEnumType @cost(weight: "10")
+  propertyId: SortEnumType @cost(weight: "10")
+  realXhubId: SortEnumType @cost(weight: "10")
+  slot: SortEnumType @cost(weight: "10")
   creator: SortEnumType @cost(weight: "10")
   createdAt: SortEnumType @cost(weight: "10")
   updatedAt: SortEnumType @cost(weight: "10")

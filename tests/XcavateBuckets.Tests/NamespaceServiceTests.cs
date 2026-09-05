@@ -36,6 +36,56 @@ public class NamespaceServiceTests
     }
 
     [Test]
+    public async Task CreateAsync_stores_the_optional_attributes()
+    {
+        var ns = await _fixture.Namespaces.CreateAsync(
+            TestDb.Alice, "deeds", null, null, Ct,
+            new NamespaceAttributes("deeds", "mainnet", 123, 456, 789));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ns.Category, Is.EqualTo("deeds"));
+            Assert.That(ns.Cluster, Is.EqualTo("mainnet"));
+            Assert.That(ns.PropertyId, Is.EqualTo(123));
+            Assert.That(ns.RealXhubId, Is.EqualTo(456));
+            Assert.That(ns.Slot, Is.EqualTo(789));
+        });
+    }
+
+    [Test]
+    public async Task CreateAsync_leaves_the_attributes_null_when_not_supplied()
+    {
+        var ns = await _fixture.Namespaces.CreateAsync(TestDb.Alice, "deeds", null, null, Ct);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ns.Category, Is.Null);
+            Assert.That(ns.Cluster, Is.Null);
+            Assert.That(ns.PropertyId, Is.Null);
+            Assert.That(ns.RealXhubId, Is.Null);
+            Assert.That(ns.Slot, Is.Null);
+        });
+    }
+
+    [Test]
+    public void CreateAsync_rejects_an_oversized_category_or_cluster()
+    {
+        var longLabel = new string('c', _fixture.Options.MaxCategoryLen + 1);
+        var exCategory = Assert.ThrowsAsync<BucketException>(() =>
+            _fixture.Namespaces.CreateAsync(TestDb.Alice, "deeds", null, null, Ct,
+                new NamespaceAttributes(Category: longLabel)))!;
+
+        Assert.That(exCategory.Code, Is.EqualTo(BucketErrorCode.InvalidInput));
+
+        var longCluster = new string('c', _fixture.Options.MaxClusterLen + 1);
+        var exCluster = Assert.ThrowsAsync<BucketException>(() =>
+            _fixture.Namespaces.CreateAsync(TestDb.Alice, "deeds", null, null, Ct,
+                new NamespaceAttributes(Cluster: longCluster)))!;
+
+        Assert.That(exCluster.Code, Is.EqualTo(BucketErrorCode.InvalidInput));
+    }
+
+    [Test]
     public async Task CreateAsync_makes_the_caller_the_first_manager()
     {
         var ns = await _fixture.Namespaces.CreateAsync(TestDb.Alice, "deeds", null, null, Ct);

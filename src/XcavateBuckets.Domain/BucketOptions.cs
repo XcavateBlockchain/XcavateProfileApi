@@ -16,6 +16,9 @@ public class BucketOptions
     /// <summary>Pallet <c>MaxCategoryLen</c>: bucket categories and message content types.</summary>
     public int MaxCategoryLen { get; set; } = 64;
 
+    /// <summary>Bounds a namespace cluster label. No pallet equivalent.</summary>
+    public int MaxClusterLen { get; set; } = 64;
+
     /// <summary>Pallet <c>MaxProperties</c>: entries in a properties map.</summary>
     public int MaxProperties { get; set; } = 32;
 
