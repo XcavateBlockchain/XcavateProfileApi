@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Solnet.Wallet;
 using Solnet.Wallet.Utilities;
 
@@ -181,7 +182,8 @@ public class MarketplaceRentCollectorSigningService
             return;
         }
 
-        // Accept hex (0x-prefixed or bare) or base58, 64 bytes (canonical solana-keygen layout).
+        // Accept hex (0x-prefixed or bare), base58, or the solana-keygen JSON byte array,
+        // each decoding to 64 bytes (canonical solana-keygen layout).
         byte[]? keypair = DecodeKeyPair(keyEnv);
         if (keypair == null || keypair.Length != 64)
         {
@@ -204,6 +206,12 @@ public class MarketplaceRentCollectorSigningService
     private static byte[]? DecodeKeyPair(string value)
     {
         string trimmed = value.Trim();
+        // solana-keygen JSON output: [109, 11, 135, ...]
+        if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+        {
+            byte[]? arrayBytes = DecodeJsonByteArray(trimmed);
+            return arrayBytes;
+        }
         if (trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
         {
             trimmed = trimmed[2..];
@@ -217,6 +225,26 @@ public class MarketplaceRentCollectorSigningService
             return Encoders.Base58.DecodeData(trimmed);
         }
         catch
+        {
+            return null;
+        }
+    }
+
+    private static byte[]? DecodeJsonByteArray(string value)
+    {
+        try
+        {
+            int[]? parts = JsonSerializer.Deserialize<int[]>(value);
+            if (parts is null) return null;
+            var bytes = new byte[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (parts[i] is < 0 or > 255) return null;
+                bytes[i] = (byte)parts[i];
+            }
+            return bytes;
+        }
+        catch (JsonException)
         {
             return null;
         }

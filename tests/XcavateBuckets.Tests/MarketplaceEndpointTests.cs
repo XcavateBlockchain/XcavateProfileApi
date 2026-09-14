@@ -98,6 +98,27 @@ public class MarketplaceEndpointTests
     }
 
     [Test]
+    public async Task Rent_key_configured_as_solana_keygen_json_array_is_accepted()
+    {
+        var rent = new Solnet.Wallet.Account();
+        await using var host = await MarketplaceHost.StartAsync(
+            rent.PrivateKey.KeyBytes, MarketplaceHost.RentKeyFormat.JsonArray);
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
+        var signer = new SolanaRequestSigner(investor);
+
+        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
     public async Task Claim_shares_message_is_signed()
     {
         await using var host = await MarketplaceHost.StartAsync();

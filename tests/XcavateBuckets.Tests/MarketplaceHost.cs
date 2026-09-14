@@ -41,18 +41,29 @@ public sealed class MarketplaceHost : IAsyncDisposable
     public static Task<MarketplaceHost> StartAsync() =>
         StartAsync(rentKeyPair: new Solnet.Wallet.Account().PrivateKey.KeyBytes);
 
+    /// <summary>How the RENT_COLLECTOR_PRIVATE_KEY config entry is encoded.</summary>
+    public enum RentKeyFormat { Base58, JsonArray }
+
     /// <summary>
     /// Starts the host. Pass <paramref name="rentKeyPair"/> (64-byte seed||pubkey) to configure
-    /// the rent collector, or null for the not-configured 503 case.
+    /// the rent collector, or null for the not-configured 503 case. <paramref name="format"/>
+    /// selects the encoding of the config value, mirroring what deployment .env accepts.
     /// </summary>
-    public static async Task<MarketplaceHost> StartAsync(byte[]? rentKeyPair)
+    public static async Task<MarketplaceHost> StartAsync(byte[]? rentKeyPair, RentKeyFormat format = RentKeyFormat.Base58)
     {
         var keypair = rentKeyPair ?? new Solnet.Wallet.Account().PrivateKey.KeyBytes;
         var rentPubkey = keypair.AsSpan(32, 32).ToArray();
 
+        string? rawKey = rentKeyPair == null
+            ? null
+            : format == RentKeyFormat.JsonArray
+                ? // solana-keygen key.json shape: [109, 11, 135, ...]
+                  "[" + string.Join(",", keypair) + "]"
+                : Solnet.Wallet.Utilities.Encoders.Base58.EncodeData(keypair);
+
         var configuration = new Dictionary<string, string?>
         {
-            ["RENT_COLLECTOR_PRIVATE_KEY"] = rentKeyPair == null ? null : Solnet.Wallet.Utilities.Encoders.Base58.EncodeData(keypair),
+            ["RENT_COLLECTOR_PRIVATE_KEY"] = rawKey,
             ["RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID"] = "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T"
         };
 
