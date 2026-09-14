@@ -119,6 +119,28 @@ public class MarketplaceEndpointTests
     }
 
     [Test]
+    public async Task Empty_program_id_env_falls_back_to_the_devnet_program()
+    {
+        // The deploy .env always contains the RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID line;
+        // when the secret is unset the value is empty and must behave like a missing key.
+        var rent = new Solnet.Wallet.Account();
+        await using var host = await MarketplaceHost.StartAsync(rent.PrivateKey.KeyBytes, rentProgramId: string.Empty);
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
+        var signer = new SolanaRequestSigner(investor);
+
+        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
     public async Task Claim_shares_message_is_signed()
     {
         await using var host = await MarketplaceHost.StartAsync();

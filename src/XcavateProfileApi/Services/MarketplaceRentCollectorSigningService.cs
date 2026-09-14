@@ -198,7 +198,11 @@ public class MarketplaceRentCollectorSigningService
         _rentPubkey = keypair.AsSpan(32, 32).ToArray();
 
         string? programIdEnv = config["RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID"];
-        string programIdStr = programIdEnv ?? "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T";
+        // Empty (e.g. the deployment .env line exists but the secret is unset) must behave
+        // like missing: fall back to the devnet marketplace program id.
+        string programIdStr = string.IsNullOrWhiteSpace(programIdEnv)
+            ? "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T"
+            : programIdEnv;
         _programId = Encoders.Base58.DecodeData(programIdStr);
         _allowedDiscriminators = [BuyDiscriminator, ClaimSharesDiscriminator, ClaimSpvCaseDiscriminator, BuyRelistedSharesDiscriminator];
     }

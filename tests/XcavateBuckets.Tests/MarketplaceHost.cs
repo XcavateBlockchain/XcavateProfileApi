@@ -49,7 +49,10 @@ public sealed class MarketplaceHost : IAsyncDisposable
     /// the rent collector, or null for the not-configured 503 case. <paramref name="format"/>
     /// selects the encoding of the config value, mirroring what deployment .env accepts.
     /// </summary>
-    public static async Task<MarketplaceHost> StartAsync(byte[]? rentKeyPair, RentKeyFormat format = RentKeyFormat.Base58)
+    public static async Task<MarketplaceHost> StartAsync(
+        byte[]? rentKeyPair = null,
+        RentKeyFormat format = RentKeyFormat.Base58,
+        string rentProgramId = "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T")
     {
         var keypair = rentKeyPair ?? new Solnet.Wallet.Account().PrivateKey.KeyBytes;
         var rentPubkey = keypair.AsSpan(32, 32).ToArray();
@@ -61,10 +64,12 @@ public sealed class MarketplaceHost : IAsyncDisposable
                   "[" + string.Join(",", keypair) + "]"
                 : Solnet.Wallet.Utilities.Encoders.Base58.EncodeData(keypair);
 
+        // rentProgramId mirrors what the deployment .env carries; pass string.Empty for the
+        // "secret exists but is unset" case (the .env line is present with an empty value).
         var configuration = new Dictionary<string, string?>
         {
             ["RENT_COLLECTOR_PRIVATE_KEY"] = rawKey,
-            ["RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID"] = "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T"
+            ["RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID"] = rentProgramId
         };
 
         var builder = Host.CreateDefaultBuilder();
