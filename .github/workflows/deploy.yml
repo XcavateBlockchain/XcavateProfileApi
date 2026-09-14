@@ -91,6 +91,8 @@ jobs:
             ADMIN_ADDRESSES=${{ secrets.HETZNER_ADMIN_ADDRESSES }}
             NOTIFICATIONS_API_URL=${{ secrets.HETZNER_NOTIFICATIONS_API_URL }}
             NOTIFICATIONS_API_KEY=${{ secrets.HETZNER_NOTIFICATIONS_API_KEY }}
+            RENT_COLLECTOR_PRIVATE_KEY=${{ secrets.RENT_COLLECTOR_PRIVATE_KEY }}
+            RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID=${{ secrets.RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID }}
             EOF
             
             docker compose down
