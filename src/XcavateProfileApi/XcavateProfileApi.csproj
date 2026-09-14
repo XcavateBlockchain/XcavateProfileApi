@@ -24,6 +24,7 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <PackageReference Include="Solana.Wallet" Version="8.7.0" />
     <PackageReference Include="AWSSDK.S3" Version="3.7.402.2" />
     <PackageReference Include="DotNetEnv" Version="3.1.0" />
   </ItemGroup>

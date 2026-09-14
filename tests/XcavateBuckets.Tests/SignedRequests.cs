@@ -19,7 +19,13 @@ internal static class SignedRequests
         PropertyNameCaseInsensitive = true
     };
 
-    public static string Json<T>(T body) => JsonSerializer.Serialize(body, WireOptions);
+    public static string Json<T>(T body) =>
+        // Already JSON: post it verbatim, so the bytes match what Hash() hashed.
+        body is RawJson raw
+            ? raw.Json
+            // Serialize the runtime type, not the static one: the static type may be the
+            // IPayloadBody interface, which serializes to "{}".
+            : JsonSerializer.Serialize(body, body?.GetType() ?? typeof(T), WireOptions);
 
     public static Task<HttpRequestMessage> PostAsync(
         string path,
