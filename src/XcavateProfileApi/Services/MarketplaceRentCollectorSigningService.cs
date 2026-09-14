@@ -15,11 +15,11 @@ public class MarketplaceRentCollectorSigningService
     private static readonly byte[] ClaimSharesDiscriminator = [130, 131, 29, 237, 134, 20, 110, 245];
     private static readonly byte[] ClaimSpvCaseDiscriminator = [175, 185, 102, 63, 166, 39, 168, 56];
     private static readonly byte[] BuyRelistedSharesDiscriminator = [205, 204, 84, 12, 55, 204, 167, 234];
+    private static readonly byte[] ReserveDiscriminator = [137, 47, 218, 50, 106, 149, 133, 110];
 
     private readonly byte[] _keypair;
     private readonly byte[] _rentPubkey;
     private readonly byte[] _programId;
-    private readonly byte[][] _allowedDiscriminators;
 
     /// <summary>Outcome: not configured (key missing), error (validation failed), or signed.</summary>
     public enum Outcome { NotConfigured, Error, Signed }
@@ -32,30 +32,58 @@ public class MarketplaceRentCollectorSigningService
             return (Outcome.NotConfigured, "Rent collector key not configured", null);
         }
 
-        // Parse the compiled message manually (wire format).
+        // Parse the compiled legacy (v0-header-less) message manually (wire format).
         // Layout:
+        //   1 byte:  0x80 marks a versioned transaction and is not supported
         //   3 bytes: header (numRequiredSignatures, numReadOnlySigned, numReadOnlyUnsigned)
-        //   1 byte:  accountCount
+        //   compact-u16: accountCount
         //   accountCount * 32 bytes: account keys (index 0 = fee payer)
         //   32 bytes: recent blockhash
+        //   compact-u16: instructionCount
         //   then per instruction:
         //     1 byte: programIdIndex
         //     1 byte: accountKeyCount
         //     accountKeyCount * 1 byte: account key indices
-        //     2 bytes (LE u16): dataLength
+        //     compact-u16: dataLength
         //     dataLength bytes: data
         try
         {
-            int offset = 0;
-            byte numRequiredSignatures = message[offset];
-            offset += 3; // skip header (3 bytes)
+            if (message.Length < 4)
+            {
+                return (Outcome.Error, "Malformed message: too short", null);
+            }
+            if (message[0] == 0x80)
+            {
+                return (Outcome.Error, "Versioned (v0) transactions are not supported", null);
+            }
 
-            byte accountCount = message[offset++];
+            byte numRequiredSignatures = message[0];
+            int offset = 3; // skip header (3 bytes)
+
+            int accountCount;
+            try
+            {
+                accountCount = ReadCompactU16(message, ref offset);
+            }
+            catch (Exception)
+            {
+                return (Outcome.Error, "Malformed message: truncated account keys", null);
+            }
+
             byte[][] accountKeys = new byte[accountCount][];
             for (int i = 0; i < accountCount; i++)
             {
+                if (offset + 32 > message.Length)
+                {
+                    return (Outcome.Error, "Malformed message: truncated account keys", null);
+                }
                 accountKeys[i] = message.AsSpan(offset, 32).ToArray();
                 offset += 32;
+            }
+
+            if (offset + 32 > message.Length)
+            {
+                return (Outcome.Error, "Malformed message: truncated blockhash", null);
             }
             offset += 32; // skip blockhash
 
@@ -103,9 +131,21 @@ public class MarketplaceRentCollectorSigningService
 
             // Validate every instruction: programIdIndex must resolve to the program id,
             // and data[0..8] must be an allowed discriminator.
-            int ixCount = 0;
-            while (offset < message.Length)
+            int ixCount;
+            try
             {
+                ixCount = ReadCompactU16(message, ref offset);
+            }
+            catch (Exception)
+            {
+                return (Outcome.Error, "Malformed message: truncated instruction count", null);
+            }
+            for (int ix = 0; ix < ixCount; ix++)
+            {
+                if (offset >= message.Length)
+                {
+                    return (Outcome.Error, "Malformed message: truncated instruction", null);
+                }
                 byte programIdIndex = message[offset++];
                 if (programIdIndex >= accountCount)
                 {
@@ -116,11 +156,30 @@ public class MarketplaceRentCollectorSigningService
                     return (Outcome.Error, "Instruction does not target the marketplace program", null);
                 }
 
+                if (offset >= message.Length)
+                {
+                    return (Outcome.Error, "Malformed message: truncated instruction", null);
+                }
                 byte keyCount = message[offset++];
+                if (offset + keyCount > message.Length)
+                {
+                    return (Outcome.Error, "Malformed message: truncated instruction", null);
+                }
                 offset += keyCount; // skip key indices
 
-                ushort dataLength = (ushort)(message[offset] | (message[offset + 1] << 8));
-                offset += 2;
+                int dataLength;
+                try
+                {
+                    dataLength = ReadCompactU16(message, ref offset);
+                }
+                catch (Exception)
+                {
+                    return (Outcome.Error, "Malformed message: truncated instruction", null);
+                }
+                if (offset + dataLength > message.Length)
+                {
+                    return (Outcome.Error, "Malformed message: truncated instruction", null);
+                }
 
                 if (dataLength < 8)
                 {
@@ -134,7 +193,6 @@ public class MarketplaceRentCollectorSigningService
                 }
 
                 offset += dataLength;
-                ixCount++;
             }
 
             if (ixCount == 0)
@@ -167,7 +225,23 @@ public class MarketplaceRentCollectorSigningService
         return data.AsSpan(0, 8).SequenceEqual(BuyDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ClaimSharesDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ClaimSpvCaseDiscriminator)
-            || data.AsSpan(0, 8).SequenceEqual(BuyRelistedSharesDiscriminator);
+            || data.AsSpan(0, 8).SequenceEqual(BuyRelistedSharesDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(ReserveDiscriminator);
+    }
+
+    /// <summary>Reads a Solana compact-u16 (variable-length LEB128-like) from <paramref name="data"/>.</summary>
+    private static int ReadCompactU16(byte[] data, ref int offset)
+    {
+        int value = 0, shift = 0;
+        while (true)
+        {
+            if (offset >= data.Length) throw new IndexOutOfRangeException();
+            byte b = data[offset++];
+            value |= (b & 0x7F) << shift;
+            if ((b & 0x80) == 0) return value;
+            shift += 7;
+            if (shift >= 14) throw new ArgumentOutOfRangeException();
+        }
     }
 
     public MarketplaceRentCollectorSigningService(IConfiguration config)
@@ -178,7 +252,6 @@ public class MarketplaceRentCollectorSigningService
             _keypair = [];
             _rentPubkey = [];
             _programId = [];
-            _allowedDiscriminators = [];
             return;
         }
 
@@ -190,7 +263,6 @@ public class MarketplaceRentCollectorSigningService
             _keypair = [];
             _rentPubkey = [];
             _programId = [];
-            _allowedDiscriminators = [];
             return;
         }
 
@@ -204,7 +276,6 @@ public class MarketplaceRentCollectorSigningService
             ? "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T"
             : programIdEnv;
         _programId = Encoders.Base58.DecodeData(programIdStr);
-        _allowedDiscriminators = [BuyDiscriminator, ClaimSharesDiscriminator, ClaimSpvCaseDiscriminator, BuyRelistedSharesDiscriminator];
     }
 
     private static byte[]? DecodeKeyPair(string value)

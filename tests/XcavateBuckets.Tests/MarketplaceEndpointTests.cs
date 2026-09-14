@@ -25,17 +25,26 @@ public class MarketplaceEndpointTests
     private static byte[] ProgramId => Encoders.Base58.DecodeData(ProgramIdBase58);
 
     /// <summary>
-    /// A minimal compiled Solana message: 3-byte header, account keys, blockhash, one
-    /// instruction. The shape matches the wire layout the server parser expects.
+    /// A minimal compiled Solana message: 3-byte header, account keys, blockhash,
+    /// one-instruction count, then the instruction. Matches the legacy wire layout
+    /// the server parser expects.
     /// </summary>
     private static byte[] BuildWire(
         int numRequiredSignatures,
         IReadOnlyList<byte[]> keys,
         int programIdIndex,
         IReadOnlyList<int> ixKeyIndices,
-        byte[] discriminator)
+        byte[] discriminator) =>
+        BuildRawWire(numRequiredSignatures, keys, programIdIndex, ixKeyIndices,
+            discriminator.Concat(Enumerable.Repeat((byte)0x42, 8)).ToArray());
+
+    private static byte[] BuildRawWire(
+        int numRequiredSignatures,
+        IReadOnlyList<byte[]> keys,
+        int programIdIndex,
+        IReadOnlyList<int> ixKeyIndices,
+        byte[] data)
     {
-        var data = discriminator.Concat(Enumerable.Repeat((byte)0x42, 8)).ToArray();
 
         using var ms = new MemoryStream();
         ms.WriteByte((byte)numRequiredSignatures);
@@ -51,16 +60,31 @@ public class MarketplaceEndpointTests
             ms.Write(keys[i], 0, 32);
         }
         ms.Write(new byte[32]); // recent blockhash
+        ms.WriteByte(1); // instruction count (compact-u16, single byte)
         ms.WriteByte((byte)programIdIndex);
         ms.WriteByte((byte)ixKeyIndices.Count);
         foreach (var index in ixKeyIndices)
         {
             ms.WriteByte((byte)index);
         }
-        ms.WriteByte((byte)(data.Length & 0xFF));
-        ms.WriteByte((byte)(data.Length >> 8));
+        WriteCompactU16(ms, data.Length);
         ms.Write(data, 0, data.Length);
         return ms.ToArray();
+    }
+
+    // Solana encodes instruction data length as compact-u16 (shortvec), not a fixed u16.
+    private static void WriteCompactU16(Stream s, int value)
+    {
+        while (true)
+        {
+            if (value < 0x80)
+            {
+                s.WriteByte((byte)value);
+                return;
+            }
+            s.WriteByte((byte)(0x80 | (value & 0x7F)));
+            value >>= 7;
+        }
     }
 
     private static RentCollectorSignatureRequest Body(byte[] wire) =>
@@ -195,18 +219,73 @@ public class MarketplaceEndpointTests
     }
 
     [Test]
-    public async Task Reserve_message_is_rejected()
+    public async Task Reserve_message_is_signed_and_the_signature_verifies()
     {
         await using var host = await MarketplaceHost.StartAsync();
         var investor = new Solnet.Wallet.Account();
         var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Reserve);
+        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), new SolanaRequestSigner(investor));
+        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        var verified = new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58));
+        Assert.That(verified, Is.True, "the returned signature must verify over the exact posted bytes");
+    }
+
+    [Test]
+    public async Task Real_13_key_reserve_layout_message_is_signed()
+    {
+        // The actual reserve_shares message shape: rent fee payer, investor, 9 PDA
+        // non-signers, system program, marketplace program last (index 12), with 24
+        // bytes of instruction data (discriminator + 16).
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var pdas = Enumerable.Range(0, 9).Select(_ => new Solnet.Wallet.Account().PublicKey.KeyBytes).ToList();
+        var systemProgram = Encoders.Base58.DecodeData("11111111111111111111111111111111");
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes };
+        keys.AddRange(pdas);
+        keys.Add(systemProgram);
+        keys.Add(ProgramId);
+
+        var data = Reserve.Concat(Enumerable.Repeat((byte)0x42, 16)).ToArray();
+        var wire = BuildRawWire(
+            2, keys, 12, [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], data);
+        var signer = new SolanaRequestSigner(investor);
+
+        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Versioned_v0_message_is_rejected()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
+        // Prepend the versioned-transaction marker.
+        var versioned = new byte[wire.Length + 1];
+        versioned[0] = 0x80;
+        Array.Copy(wire, 0, versioned, 1, wire.Length);
+
+        using var request = await SignedRequests.PostAsync(Endpoint, Body(versioned), new SolanaRequestSigner(investor));
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
         var json = await response.Content.ReadAsStringAsync();
-        Assert.That(json, Does.Contain("discriminator"));
+        Assert.That(json, Does.Contain("not supported"));
     }
 
     [Test]
