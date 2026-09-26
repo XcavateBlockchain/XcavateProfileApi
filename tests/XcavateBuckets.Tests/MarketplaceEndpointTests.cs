@@ -4,14 +4,15 @@ using System.Text.Json;
 using Solnet.Wallet;
 using Solnet.Wallet.Utilities;
 using XcavateProfile.Client;
-using XcavateProfileApiClient;
 using XcavateProfileApiClient.Signing;
 
 namespace XcavateBuckets.Tests;
 
 /// <summary>
-/// The rent collector signing endpoint: auth via the investor's signed-request headers, then
-/// wire-format validation of the compiled Solana message before the server signs it.
+/// The rent collector signing endpoint: no request authentication beyond the investor's
+/// address header - the protection is the wire-format validation of the compiled Solana
+/// message, which only ever signs a message that also requires the investor's own on-chain
+/// signature.
 /// </summary>
 public class MarketplaceEndpointTests
 {
@@ -90,6 +91,20 @@ public class MarketplaceEndpointTests
     private static RentCollectorSignatureRequest Body(byte[] wire) =>
         new() { Message = Convert.ToBase64String(wire) };
 
+    /// <summary>
+    /// An unsigned post carrying only the investor's address header - all the endpoint
+    /// asks for. No X-Signature, no X-Timestamp.
+    /// </summary>
+    private static HttpRequestMessage Post(RentCollectorSignatureRequest body, string investorAddress)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, Endpoint)
+        {
+            Content = new StringContent(SignedRequests.Json(body), Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add(SignedRequestHeaders.Address, investorAddress);
+        return request;
+    }
+
     private static async Task<(HttpStatusCode status, string body)> PostUnsignedAsync(
         HttpClient client, string json)
     {
@@ -107,9 +122,8 @@ public class MarketplaceEndpointTests
         await using var host = await MarketplaceHost.StartAsync();
         var investor = new Solnet.Wallet.Account();
         var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
-        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -129,9 +143,8 @@ public class MarketplaceEndpointTests
             rent.PrivateKey.KeyBytes, MarketplaceHost.RentKeyFormat.JsonArray);
         var investor = new Solnet.Wallet.Account();
         var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
-        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -151,9 +164,8 @@ public class MarketplaceEndpointTests
         await using var host = await MarketplaceHost.StartAsync(rent.PrivateKey.KeyBytes, rentProgramId: string.Empty);
         var investor = new Solnet.Wallet.Account();
         var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
-        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -170,9 +182,8 @@ public class MarketplaceEndpointTests
         await using var host = await MarketplaceHost.StartAsync();
         var investor = new Solnet.Wallet.Account();
         var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], ClaimShares);
-        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -191,9 +202,8 @@ public class MarketplaceEndpointTests
         var investor = new Solnet.Wallet.Account();
         // Investor at index 0: they, not the rent collector, would pay the fee.
         var wire = BuildWire(2, [investor.PublicKey.KeyBytes, host.RentPubkey, ProgramId], 2, [0, 1], Buy);
-        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
@@ -210,7 +220,7 @@ public class MarketplaceEndpointTests
         var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId, other };
         var wire = BuildWire(2, keys, 3, [0, 1], Buy);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), new SolanaRequestSigner(investor));
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
@@ -224,9 +234,8 @@ public class MarketplaceEndpointTests
         await using var host = await MarketplaceHost.StartAsync();
         var investor = new Solnet.Wallet.Account();
         var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Reserve);
-        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -256,9 +265,8 @@ public class MarketplaceEndpointTests
         var data = Reserve.Concat(Enumerable.Repeat((byte)0x42, 16)).ToArray();
         var wire = BuildRawWire(
             2, keys, 12, [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], data);
-        var signer = new SolanaRequestSigner(investor);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), signer);
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -280,7 +288,7 @@ public class MarketplaceEndpointTests
         versioned[0] = 0x80;
         Array.Copy(wire, 0, versioned, 1, wire.Length);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(versioned), new SolanaRequestSigner(investor));
+        using var request = Post(Body(versioned), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
@@ -297,7 +305,7 @@ public class MarketplaceEndpointTests
         // investor would be a read-only participant, not a message signer.
         var wire = BuildWire(2, [host.RentPubkey, ProgramId, investor.PublicKey.KeyBytes], 1, [0, 2], Buy);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), new SolanaRequestSigner(investor));
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
@@ -306,7 +314,7 @@ public class MarketplaceEndpointTests
     }
 
     [Test]
-    public async Task Post_without_authentication_headers_is_unauthorized()
+    public async Task Post_without_an_address_header_is_rejected()
     {
         await using var host = await MarketplaceHost.StartAsync();
         var investor = new Solnet.Wallet.Account();
@@ -314,35 +322,8 @@ public class MarketplaceEndpointTests
 
         var (status, body) = await PostUnsignedAsync(host.Client, SignedRequests.Json(Body(wire)));
 
-        Assert.That(status, Is.EqualTo(HttpStatusCode.Unauthorized));
-        Assert.That(body, Does.Contain("Missing authentication"));
-    }
-
-    [Test]
-    public async Task Signature_over_a_different_path_is_unauthorized()
-    {
-        await using var host = await MarketplaceHost.StartAsync();
-        var investor = new Solnet.Wallet.Account();
-        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
-        var body = Body(wire);
-        var signer = new SolanaRequestSigner(investor);
-        var utc = DateTime.UtcNow;
-
-        // Signed for the wrong path; everything else about the request is well formed.
-        var signature = await signer.SignAsync(
-            CryptoHelper.ConstructPayload("POST", "/api/migrations", body, utc));
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint)
-        {
-            Content = new StringContent(SignedRequests.Json(body), Encoding.UTF8, "application/json")
-        };
-        request.Headers.Add(SignedRequestHeaders.Address, signer.Address);
-        request.Headers.Add(SignedRequestHeaders.Signature, signer.EncodeSignature(signature));
-        request.Headers.Add(SignedRequestHeaders.Timestamp, utc.ToString("o"));
-
-        using var response = await host.Client.SendAsync(request);
-
-        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized));
+        Assert.That(status, Is.EqualTo(HttpStatusCode.BadRequest));
+        Assert.That(body, Does.Contain("X-SS58-Address"));
     }
 
     [Test]
@@ -353,7 +334,7 @@ public class MarketplaceEndpointTests
         var rentKey = new Solnet.Wallet.Account().PublicKey.KeyBytes;
         var wire = BuildWire(2, [rentKey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], Buy);
 
-        using var request = await SignedRequests.PostAsync(Endpoint, Body(wire), new SolanaRequestSigner(investor));
+        using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
