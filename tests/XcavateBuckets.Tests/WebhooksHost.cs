@@ -8,26 +8,30 @@ using Microsoft.Extensions.Hosting;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateProfileApi.Controllers;
+using XcavateProfileApi.Data;
 using XcavateProfileApi.GraphQL;
 
 namespace XcavateBuckets.Tests;
 
 /// <summary>
 /// An in-process host running the real <see cref="WebhooksController"/> over the real bucket domain
-/// services and a SQLite database — the counterpart to <see cref="RestHost"/> and
-/// <see cref="GraphQLHost"/>. It covers the property-asset webhook, including its idempotent
-/// redelivery, without the docker stack the E2E suite needs. The webhook carries no signature, so
-/// no signing client or validator is wired here.
+/// services and SQLite databases (bucket + profile stores) — the counterpart to
+/// <see cref="RestHost"/> and <see cref="GraphQLHost"/>. It covers the property-asset webhook,
+/// including its idempotent redelivery, without the docker stack the E2E suite needs. The webhook
+/// carries no signature, so no signing client or validator is wired here.
 /// </summary>
 public sealed class WebhooksHost : IAsyncDisposable
 {
     private readonly IHost _host;
     private readonly SqliteConnection _connection;
+    private readonly SqliteConnection _profileConnection;
 
-    private WebhooksHost(IHost host, SqliteConnection connection, HttpClient client)
+    private WebhooksHost(
+        IHost host, SqliteConnection connection, SqliteConnection profileConnection, HttpClient client)
     {
         _host = host;
         _connection = connection;
+        _profileConnection = profileConnection;
         Client = client;
     }
 
@@ -38,6 +42,10 @@ public sealed class WebhooksHost : IAsyncDisposable
     {
         var connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
+        // The profile store is a second context on its own in-memory database (the controller's
+        // wallet -> viewer-key resolution reads it).
+        var profileConnection = new SqliteConnection("DataSource=:memory:");
+        profileConnection.Open();
 
         var builder = Host.CreateDefaultBuilder();
         builder.ConfigureWebHost(web =>
@@ -52,6 +60,7 @@ public sealed class WebhooksHost : IAsyncDisposable
                     .AddApplicationPart(typeof(WebhooksController).Assembly);
 
                 services.AddDbContext<BucketDbContext>(o => o.UseSqlite(connection));
+                services.AddDbContext<ProfileDbContext>(o => o.UseSqlite(profileConnection));
 
                 // The domain wiring shared with the application host: BucketDbContext is the only
                 // thing AddBucketDomain expects the caller to supply (see its remarks).
@@ -70,9 +79,11 @@ public sealed class WebhooksHost : IAsyncDisposable
         {
             await scope.ServiceProvider.GetRequiredService<BucketDbContext>()
                 .Database.EnsureCreatedAsync();
+            await scope.ServiceProvider.GetRequiredService<ProfileDbContext>()
+                .Database.EnsureCreatedAsync();
         }
 
-        return new WebhooksHost(host, connection, host.GetTestClient());
+        return new WebhooksHost(host, connection, profileConnection, host.GetTestClient());
     }
 
     /// <summary>Every namespace straight out of the database, bypassing the API.</summary>
@@ -102,11 +113,21 @@ public sealed class WebhooksHost : IAsyncDisposable
         return await action(context);
     }
 
+    /// <summary>Runs a callback against a fresh ProfileDbContext scope — seeding wallets' X25519 keys.</summary>
+    public async Task<T> WithProfileDbAsync<T>(Func<ProfileDbContext, Task<T>> action)
+    {
+        using var scope = _host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ProfileDbContext>();
+
+        return await action(context);
+    }
+
     public async ValueTask DisposeAsync()
     {
         Client.Dispose();
         await _host.StopAsync();
         _host.Dispose();
         _connection.Dispose();
+        _profileConnection.Dispose();
     }
 }

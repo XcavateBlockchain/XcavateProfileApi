@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using XcavateBuckets.Domain.Entities;
+using XcavateProfile.Client;
 
 namespace XcavateBuckets.Tests;
 
@@ -10,8 +11,9 @@ namespace XcavateBuckets.Tests;
 /// The five property-lifecycle webhooks (claim started, lawyer elected, deal executed, agent
 /// appointed, shares transferred) driven against the real controller and bucket domain services
 /// over SQLite, like <see cref="PropertyAssetWebhookTests"/> does for the asset webhook. Covers
-/// the bucket-creation and lawyer-removal paths, the placeholder acknowledgements, the 404
-/// retry-me ordering contract, and idempotent redelivery.
+/// the bucket-creation, lawyer-removal and resale viewer-swap paths, the remaining placeholder
+/// acknowledgements (lawyer/agent wallet resolution), the 404 retry-me ordering contract, and
+/// idempotent redelivery.
 /// </summary>
 [TestFixture]
 public class PropertyLifecycleWebhookTests
@@ -325,19 +327,153 @@ public class PropertyLifecycleWebhookTests
     }
 
     [Test]
-    public async Task Shares_transferred_is_accepted_as_a_placeholder()
+    public async Task Shares_transferred_adds_the_buyer_viewer_and_removes_the_seller()
     {
         await using var host = await WebhooksHost.StartAsync();
-        await SeedLegalBucketAsync(host);
+        var bucketId = await SeedLegalBucketAsync(host);
+        var buyerKey = "0x" + new string('a', 64);
+        var sellerKey = "0x" + new string('b', 64);
+        await SeedProfileAsync(host, "BuyerWallet111", buyerKey);
+        await SeedProfileAsync(host, "SellerWallet111", sellerKey);
+        await SeedViewerAsync(host, bucketId, sellerKey);
+
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/shares_transferred_devnet", TransferJson());
+
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("processed"));
+            Assert.That(body.GetProperty("buyerViewerAdded").GetBoolean(), Is.True);
+            Assert.That(body.GetProperty("sellerViewerRemoved").GetBoolean(), Is.True);
+            Assert.That(viewers, Is.EqualTo(new[] { buyerKey }),
+                "the seller is out and the buyer is in");
+        });
+    }
+
+    [Test]
+    public async Task Shares_transferred_skips_a_side_whose_wallet_has_no_profile_key()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        var bucketId = await SeedLegalBucketAsync(host);
+        var sellerKey = "0x" + new string('b', 64);
+        await SeedProfileAsync(host, "SellerWallet111", sellerKey);
+        await SeedViewerAsync(host, bucketId, sellerKey);
+        // No profile for the buyer wallet at all.
+
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/shares_transferred_devnet", TransferJson());
+
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK), "a missing key is a skip, never an error");
+            Assert.That(body.GetProperty("buyerViewerAdded").GetBoolean(), Is.False);
+            Assert.That(body.GetProperty("buyerNote").GetString(), Does.Contain("no profile X25519 key"));
+            Assert.That(body.GetProperty("sellerViewerRemoved").GetBoolean(), Is.True);
+            Assert.That(viewers, Is.Empty);
+        });
+    }
+
+    [Test]
+    public async Task Shares_transferred_redelivery_is_idempotent()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        var bucketId = await SeedLegalBucketAsync(host);
+        var buyerKey = "0x" + new string('a', 64);
+        await SeedProfileAsync(host, "BuyerWallet111", buyerKey);
+
+        await PostAsync(host.Client, "/webhooks/shares_transferred_devnet", TransferJson());
+        var (secondStatus, _) = await PostAsync(
+            host.Client, "/webhooks/shares_transferred_devnet", TransferJson());
+
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(secondStatus, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(viewers, Is.EqualTo(new[] { buyerKey }), "no duplicate viewer row");
+        });
+    }
+
+    [Test]
+    public async Task Shares_transferred_resolves_a_migrated_wallet_through_wallet_migrations()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        var bucketId = await SeedLegalBucketAsync(host);
+        // The seller's profile still sits under its legacy SS58 address; the on-chain wallet is
+        // the Solana one, linked by a WalletMigrations row.
+        var sellerKey = new string('b', 64);
+        await host.WithProfileDbAsync(async db =>
+        {
+            db.Profiles.Add(new Profile { Ss58Address = "LegacySs58Seller", X25519Key = sellerKey });
+            db.WalletMigrations.Add(new WalletMigration
+            {
+                Ss58Address = "LegacySs58Seller",
+                SolanaAddress = "SellerWallet111"
+            });
+            await db.SaveChangesAsync();
+            return true;
+        });
+        await SeedViewerAsync(host, bucketId, sellerKey);
+
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/shares_transferred_devnet", TransferJson());
+
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("sellerViewerRemoved").GetBoolean(), Is.True);
+            Assert.That(viewers, Is.Empty);
+        });
+    }
+
+    [Test]
+    public async Task Shares_transferred_self_transfer_changes_nothing()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        var bucketId = await SeedLegalBucketAsync(host);
+        var key = "0x" + new string('a', 64);
+        await SeedProfileAsync(host, "SameWallet111", key);
 
         var json = new JsonObject
+        {
+            ["event"] = "property_shares_transferred",
+            ["kind"] = "direct_send",
+            ["property"] = AssetPda,
+            ["from"] = "SameWallet111",
+            ["to"] = "SameWallet111"
+        }.ToJsonString();
+
+        var (status, body) = await PostAsync(host.Client, "/webhooks/shares_transferred_devnet", json);
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("ignored"));
+            Assert.That(viewers, Is.Empty, "an add followed by a remove would wipe the access");
+        });
+    }
+
+    private const string BuyerWallet = "BuyerWallet111";
+    private const string SellerWallet = "SellerWallet111";
+
+    private static string TransferJson()
+    {
+        return new JsonObject
         {
             ["event"] = "property_shares_transferred",
             ["kind"] = "relisted_purchase",
             ["property"] = AssetPda,
             ["listing"] = "ListingPDA111",
-            ["from"] = "SellerWallet111",
-            ["to"] = "BuyerWallet111",
+            ["from"] = SellerWallet,
+            ["to"] = BuyerWallet,
             ["amount"] = 3,
             ["asset_id"] = ListingId,
             ["offer"] = null,
@@ -346,15 +482,33 @@ public class PropertyLifecycleWebhookTests
             ["block_time"] = "2026-09-10T11:00:00+00:00",
             ["program"] = "marketplace"
         }.ToJsonString();
+    }
 
-        var (status, body) = await PostAsync(host.Client, "/webhooks/shares_transferred_devnet", json);
-
-        Assert.Multiple(() =>
+    private static async Task SeedProfileAsync(WebhooksHost host, string wallet, string x25519Key)
+    {
+        await host.WithProfileDbAsync(async db =>
         {
-            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("accepted"));
-            Assert.That(body.GetProperty("acted").GetBoolean(), Is.False);
+            db.Profiles.Add(new Profile { Ss58Address = wallet, X25519Key = x25519Key });
+            await db.SaveChangesAsync();
+            return true;
         });
+    }
+
+    private static async Task SeedViewerAsync(WebhooksHost host, long bucketId, string viewerKey)
+    {
+        await host.WithDbAsync(async db =>
+        {
+            db.BucketViewers.Add(new BucketViewer { BucketId = bucketId, ViewerId = viewerKey });
+            await db.SaveChangesAsync();
+            return true;
+        });
+    }
+
+    private static async Task<List<string>> ViewerIdsAsync(WebhooksHost host, long bucketId)
+    {
+        return await host.WithDbAsync(async db =>
+            await Task.FromResult(
+                db.BucketViewers.Where(v => v.BucketId == bucketId).Select(v => v.ViewerId).ToList()));
     }
 
     [Test]

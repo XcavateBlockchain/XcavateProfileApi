@@ -5,6 +5,7 @@ using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateBuckets.Domain.Services;
+using XcavateProfileApi.Data;
 
 namespace XcavateProfileApi.Controllers;
 
@@ -26,17 +27,20 @@ namespace XcavateProfileApi.Controllers;
 public class WebhooksController : ControllerBase
 {
     private readonly BucketDbContext _db;
+    private readonly ProfileDbContext _profiles;
     private readonly NamespaceService _namespaces;
     private readonly BucketService _buckets;
     private readonly MembershipService _memberships;
 
     public WebhooksController(
         BucketDbContext db,
+        ProfileDbContext profiles,
         NamespaceService namespaces,
         BucketService buckets,
         MembershipService memberships)
     {
         _db = db;
+        _profiles = profiles;
         _namespaces = namespaces;
         _buckets = buckets;
         _memberships = memberships;
@@ -124,7 +128,8 @@ public class WebhooksController : ControllerBase
     //   spv_lawyer_elected           -> lawyer write + holder read access (PLACEHOLDER, see below)
     //   deal_executed                -> remove the lawyers from the bucket (implemented)
     //   letting_agent_appointed      -> add the letting agent (write) (PLACEHOLDER)
-    //   property_shares_transferred  -> swap seller -> buyer read access (PLACEHOLDER)
+    //   property_shares_transferred  -> swap seller -> buyer read access (implemented: wallets
+    //                                   resolve to viewer X25519 keys through the profiles)
     //
     // The placeholders and exactly what they are waiting for are documented in
     // docs/property-webhooks-uncertainties.md. Like the asset webhook, every endpoint is
@@ -387,13 +392,23 @@ public class WebhooksController : ControllerBase
 
     /// <summary>
     /// Receives the <c>property_shares_transferred</c> event (a resale: a relisted purchase, an
-    /// accepted offer, or a direct send). PLACEHOLDER: the flowchart swaps the seller's read
-    /// access for the buyer's, but bucket read access is the VIEWER role, whose id is a 32-byte
-    /// X25519 encryption key — and the transfer's <c>from</c>/<c>to</c> are wallets, so nothing
-    /// can be added or removed until a wallet -> viewer-key mapping exists
-    /// (docs/property-webhooks-uncertainties.md entry 5). Validates and resolves the namespace
-    /// and bucket (404 while missing), then acknowledges without acting.
+    /// accepted offer, or a direct send) and swaps read access on the property's legal bucket:
+    /// the seller's viewer is removed and the buyer is added as a viewer. Wallets are resolved to
+    /// viewer ids through the profiles: a bucket viewer id is a 32-byte X25519 key, and the
+    /// profile of a wallet stores it (<see cref="ProfileDbContext"/> — directly keyed by the
+    /// wallet, with <c>WalletMigrations</c> as the fallback for profiles still keyed by a legacy
+    /// SS58 address).
     /// </summary>
+    /// <remarks>
+    /// A side whose wallet has no profile key (or a malformed legacy one) is skipped and reported
+    /// — never an error, so the indexer does not retry a permanently-unactionable event forever
+    /// (the buyer simply appears in the bucket once they register a key AND a later transfer or
+    /// reconciliation pass adds them — see docs/property-webhooks-uncertainties.md entry 5).
+    /// Idempotent: viewer adds return the existing row and removes are no-ops when absent, so a
+    /// redelivery re-runs harmlessly. A self-transfer (<c>from</c> == <c>to</c>) changes nothing.
+    /// 404 while the namespace or bucket is missing; 400 when the body is not a valid
+    /// <c>property_shares_transferred</c> event.
+    /// </remarks>
     // POST: webhooks/shares_transferred_devnet
     [HttpPost("shares_transferred_devnet")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -423,15 +438,43 @@ public class WebhooksController : ControllerBase
             return NotFound("The property's legal bucket does not exist yet.");
         }
 
-        // TODO(uncertainties #5): map payload.From / payload.To (wallets) to viewer keys, then
-        //   await _memberships.RemoveViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, sellerViewerKey, ct);
-        //   await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, buyerViewerKey, ct);
+        // A self-transfer (same wallet on both sides) changes no access.
+        if (string.Equals(payload.From, payload.To, StringComparison.Ordinal))
+        {
+            return Ok(new { status = "ignored", reason = "self-transfer", bucketId = bucket.BucketId });
+        }
+
+        var buyerKey = await ResolveViewerKeyAsync(payload.To, ct);
+        var sellerKey = await ResolveViewerKeyAsync(payload.From, ct);
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        // A bucket created before the claim webhook existed may lack the operator admin row the
+        // viewer-add caller check needs; adding it is idempotent.
+        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
+
+        var buyerAdded = false;
+        if (buyerKey is not null)
+        {
+            await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, buyerKey, ct);
+            buyerAdded = true;
+        }
+
+        var sellerRemoved = false;
+        if (sellerKey is not null)
+        {
+            await _memberships.RemoveViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, sellerKey, ct);
+            sellerRemoved = true;
+        }
+        await transaction.CommitAsync(ct);
+
         return Ok(new
         {
-            status = "accepted",
-            acted = false,
-            pending = "holder viewer-key mapping (placeholder)",
-            bucketId = bucket.BucketId
+            status = "processed",
+            bucketId = bucket.BucketId,
+            buyerViewerAdded = buyerAdded,
+            buyerNote = buyerAdded ? null : "no profile X25519 key for the buyer wallet — skipped",
+            sellerViewerRemoved = sellerRemoved,
+            sellerNote = sellerRemoved ? null : "no profile X25519 key for the seller wallet — skipped"
         });
     }
 
@@ -470,6 +513,43 @@ public class WebhooksController : ControllerBase
     {
         return await _db.Buckets
             .FirstOrDefaultAsync(b => b.NamespaceId == namespaceId && b.Category == LegalBucketCategory, ct);
+    }
+
+    /// <summary>
+    /// The bucket viewer id (a 32-byte X25519 key) for a wallet, or null when the wallet has no
+    /// usable one: the profile keyed directly by the wallet first, then the
+    /// <c>WalletMigrations</c> fallback for a profile still keyed by the legacy SS58 address of a
+    /// migrated account. A stored key that is not well-formed 32-byte hex never reaches
+    /// <c>MembershipService.AddViewerAsync</c> — it would be an <c>InvalidInput</c> failure there
+    /// and, worse, an endless retry of a permanently-unactionable event.
+    /// </summary>
+    private async Task<string?> ResolveViewerKeyAsync(string wallet, CancellationToken ct)
+    {
+        var direct = await _profiles.Profiles
+            .Where(p => p.Ss58Address == wallet)
+            .Select(p => p.X25519Key)
+            .FirstOrDefaultAsync(ct);
+        var key = direct ?? await _profiles.WalletMigrations
+            .Where(m => m.SolanaAddress == wallet)
+            .Join(
+                _profiles.Profiles,
+                m => m.Ss58Address,
+                p => p.Ss58Address,
+                (m, p) => p.X25519Key)
+            .FirstOrDefaultAsync(ct);
+
+        return IsHex32Key(key) ? key : null;
+    }
+
+    /// <summary>The domain's viewer-id shape: exactly 32 bytes of hex, optional <c>0x</c> prefix.</summary>
+    private static bool IsHex32Key(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return false;
+        }
+        var hex = key.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? key[2..] : key;
+        return hex.Length == 64 && hex.All(Uri.IsHexDigit);
     }
 
     /// <summary>The bucket name, after the namespace's, clamped to the domain's 256-char bound.</summary>

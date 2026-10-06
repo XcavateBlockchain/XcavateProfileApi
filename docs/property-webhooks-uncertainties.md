@@ -19,7 +19,7 @@ backoff; a non-2xx answer means "retry forever" (30 s doubling, 1 h cap).
 | `spv_lawyer_elected` | `finalize_spv_election` | `SPV_LAWYER_ELECTED_WEBHOOK_URL` | `POST /webhooks/spv_lawyer_elected_devnet` | **placeholder** (#2, #3) |
 | `deal_executed` | `execute_deal` | `DEAL_EXECUTED_WEBHOOK_URL` | `POST /webhooks/deal_executed_devnet` | **implemented** (removes lawyers) |
 | `letting_agent_appointed` | property `finalize_agent_election` | `LETTING_AGENT_APPOINTED_WEBHOOK_URL` | `POST /webhooks/letting_agent_appointed_devnet` | **placeholder** (#4) |
-| `property_shares_transferred` | `buy_relisted_shares` / `accept_offer` / `send_property_shares` | `SHARES_TRANSFERRED_WEBHOOK_URL` | `POST /webhooks/shares_transferred_devnet` | **placeholder** (#5) |
+| `property_shares_transferred` | `buy_relisted_shares` / `accept_offer` / `send_property_shares` | `SHARES_TRANSFERRED_WEBHOOK_URL` | `POST /webhooks/shares_transferred_devnet` | **implemented** (viewer swap via profile X25519 keys — see #5) |
 
 Conventions the endpoints rely on: the property's namespace is found by `PropertyId == listing_id`
 (falling back to `Creator == <PropertyAsset PDA>`), and its legal-process bucket by
@@ -49,14 +49,15 @@ Open questions: should the lawyer also be a bucket **admin** (they steer the doc
 should the developer lawyer (`developerLawyer` on the same listing) be added here or only after
 `assign_developer_lawyer` (not currently a webhook — add one if needed)?
 
-## 3. Token-holder read access needs X25519 keys the chain does not have (placeholder)
+## 3. Token-holder read access — viewer keys solved, holder ENUMERATION still placeholder
 
-"Add property token holders (read) to bucket" maps to the bucket **Viewer** role — but a viewer
-id is a 32-byte X25519 encryption key (`InputValidator.Hex32Value`), not a wallet. The indexer
-knows wallets (GraphQL `shareHoldings(assetId, active: true)` enumerates them), not keys.
-Decide the mapping first: e.g. holders register a viewer key in the app (a wallet → viewer-key
-table), and this endpoint adds viewers for all currently-registered holders of the property.
-Until then no holder is added.
+"Add property token holders (read) to bucket" maps to the bucket **Viewer** role — a viewer id
+is a 32-byte X25519 encryption key (`InputValidator.Hex32Value`), not a wallet. **Resolved:**
+wallets map to keys through the profiles (`Profile.X25519Key`, direct wallet key with the
+`WalletMigrations` SS58 fallback — the same `ResolveViewerKeyAsync` the transfer webhook uses).
+**Still missing:** the current holder set — enumerating holders needs the indexer GraphQL
+`shareHoldings(assetId, active: true)`, and this API has no indexer client yet. Once one exists,
+`SpvLawyerElectedDevnet` can add every current holder with a registered key as a viewer.
 
 ## 4. Letting agent appointment (placeholder in `LettingAgentAppointedDevnet`)
 
@@ -70,17 +71,26 @@ accounts, then `AddContributorAsync(...)`. Also confirm `finalize_agent_election
 property), and whether the agent goes into the legal bucket or a separate management bucket —
 the flowchart shows one bucket, so the legal bucket is used.
 
-## 5. Share-transfer access swap (placeholder in `SharesTransferredDevnet`)
+## 5. Share-transfer access swap — IMPLEMENTED, with two caveats to review
 
-Same viewer-key blocker as #3 for both directions (`from` loses read, `to` gains it). Two more:
-(a) `accept_offer` payloads carry `amount: null` — the sold amount lives in the on-chain Offer
-account (`offer` carries its PDA); resolve via GraphQL `marketplaceOffer(...)` if the amount
-matters. (b) `send_property_shares` is a plain wallet-to-wallet send — it fires for gifts and
-self-transfers too, not only resales; if access should only swap on *sales*, drop the
-`direct_send` kind in the indexer mapper (`crates/indexer/src/mapping/marketplace.rs`) or filter
-here. Also note one dedup caveat: transfer event ids are `<tx_signature>:<instruction_path>` —
-two transfers in ONE transaction are distinct events, but a hypothetical atomic multi-transfer
-bundle would still deliver each.
+Implemented in `SharesTransferredDevnet`: the seller's viewer is removed and the buyer is added,
+resolving wallets to viewer keys through the profiles (direct wallet key, then the
+`WalletMigrations` SS58 fallback). Idempotent under redelivery; a self-transfer is a no-op.
+Caveats:
+
+- **A side without a profile key is skipped, not retried** (200 with a `buyerNote`/`sellerNote`).
+  A buyer who registers a key only AFTER the resale never gets added by this event — closing that
+  gap needs the reconcile-from-current-state pass (diff `shareHoldings` against bucket viewers,
+  same indexer-GraphQL dependency as #3).
+- **Partial sales remove the seller entirely.** The flowchart says "remove the seller", but a
+  seller who sold only SOME shares still holds tokens and loses read access anyway. If partial
+  sellers should keep access, the removal must be gated on the seller's remaining balance being
+  zero — again an indexer GraphQL lookup (`shareHoldings(assetId, owner: from)`).
+- `accept_offer` payloads carry `amount: null` (the amount lives in the on-chain Offer account;
+  `offer` carries its PDA) — only matters if the amount is ever needed here.
+- `send_property_shares` fires for gifts and self-transfers too, not only sales; self-transfers
+  are already no-ops, but if access should only swap on *sales*, drop the `direct_send` kind in
+  the indexer mapper (`crates/indexer/src/mapping/marketplace.rs`) or filter here.
 
 ## 6. `deal_executed` removes *all* write/manage members, not just lawyers
 
