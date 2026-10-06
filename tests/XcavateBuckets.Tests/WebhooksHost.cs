@@ -84,6 +84,24 @@ public sealed class WebhooksHost : IAsyncDisposable
         return await context.Namespaces.ToListAsync();
     }
 
+    /// <summary>Every bucket straight out of the database, bypassing the API.</summary>
+    public async Task<List<Bucket>> BucketsAsync()
+    {
+        using var scope = _host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<BucketDbContext>();
+
+        return await context.Buckets.ToListAsync();
+    }
+
+    /// <summary>Runs a callback against a fresh DbContext scope — seeding and membership reads.</summary>
+    public async Task<T> WithDbAsync<T>(Func<BucketDbContext, Task<T>> action)
+    {
+        using var scope = _host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<BucketDbContext>();
+
+        return await action(context);
+    }
+
     public async ValueTask DisposeAsync()
     {
         Client.Dispose();
