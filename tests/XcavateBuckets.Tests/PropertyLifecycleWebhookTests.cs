@@ -463,6 +463,163 @@ public class PropertyLifecycleWebhookTests
         });
     }
 
+    // ---- property_holder_changed: the primary-market holder lifecycle -------------------------
+
+    private static string HolderChangedJson(string action, string investor, string reason = "reserve_shares")
+    {
+        return new JsonObject
+        {
+            ["event"] = "property_holder_changed",
+            ["action"] = action,
+            ["reason"] = reason,
+            ["investor"] = investor,
+            ["listing"] = "ListingPDA111",
+            ["property"] = AssetPda,
+            ["listing_id"] = ListingId,
+            ["amount"] = action == "added" ? 5 : null,
+            ["slot"] = 487_550_000,
+            ["tx_signature"] = $"HolderTx{Guid.NewGuid():N}",
+            ["block_time"] = "2026-08-27T10:00:00+00:00",
+            ["program"] = "marketplace"
+        }.ToJsonString();
+    }
+
+    [Test]
+    public async Task Holder_changed_adds_the_investor_as_a_viewer()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        var bucketId = await SeedLegalBucketAsync(host);
+        var key = "0x" + new string('c', 64);
+        await SeedProfileAsync(host, "InvestorWallet111", key);
+
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/property_holder_changed_devnet",
+            HolderChangedJson("added", "InvestorWallet111"));
+
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("processed"));
+            Assert.That(body.GetProperty("action").GetString(), Is.EqualTo("added"));
+            Assert.That(viewers, Is.EqualTo(new[] { key }));
+        });
+    }
+
+    [Test]
+    public async Task Holder_changed_removes_the_investor_viewer()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        var bucketId = await SeedLegalBucketAsync(host);
+        var key = "0x" + new string('c', 64);
+        await SeedProfileAsync(host, "InvestorWallet111", key);
+        await SeedViewerAsync(host, bucketId, key);
+
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/property_holder_changed_devnet",
+            HolderChangedJson("removed", "InvestorWallet111", reason: "unreserve_shares"));
+
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("action").GetString(), Is.EqualTo("removed"));
+            Assert.That(viewers, Is.Empty);
+        });
+    }
+
+    [Test]
+    public async Task Holder_changed_defers_while_the_bucket_is_missing_not_a_retry_storm()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        await SeedNamespaceAsync(host.Client);
+
+        // The whole sale phase happens before the bucket exists: the event is ACKNOWLEDGED as
+        // deferred (the claim-started reconciliation covers it), never a 404 retry loop.
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/property_holder_changed_devnet",
+            HolderChangedJson("added", "InvestorWallet111"));
+
+        var buckets = await host.BucketsAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("deferred"));
+            Assert.That(buckets, Is.Empty);
+        });
+    }
+
+    [Test]
+    public async Task Holder_changed_skips_a_wallet_without_a_profile_key()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        var bucketId = await SeedLegalBucketAsync(host);
+
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/property_holder_changed_devnet",
+            HolderChangedJson("added", "NoProfileWallet999"));
+
+        var viewers = await ViewerIdsAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK), "a missing key is a skip, never an error");
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("skipped"));
+            Assert.That(viewers, Is.Empty);
+        });
+    }
+
+    [Test]
+    public async Task Claim_started_reconciles_the_current_holders_into_the_bucket()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        await SeedNamespaceAsync(host.Client);
+        // Two current holders at claim time: one with a registered key, one without.
+        var keyedWallet = "HolderWallet111";
+        var keyedKey = "0x" + new string('d', 64);
+        await SeedProfileAsync(host, keyedWallet, keyedKey);
+        host.Indexer.HolderWallets = new[] { keyedWallet, "KeylessWallet222" };
+
+        var (status, body) = await PostAsync(
+            host.Client, "/webhooks/property_claim_started_devnet", ClaimStartedJson());
+
+        var buckets = await host.BucketsAsync();
+        var viewers = await ViewerIdsAsync(host, buckets[0].BucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("created"));
+            Assert.That(body.GetProperty("holdersAdded").GetInt32(), Is.EqualTo(1));
+            Assert.That(body.GetProperty("holdersSkippedNoKey").GetInt32(), Is.EqualTo(1));
+            Assert.That(viewers, Is.EqualTo(new[] { keyedKey }));
+        });
+    }
+
+    [Test]
+    public async Task Claim_started_502s_and_rolls_the_bucket_back_when_the_indexer_is_down()
+    {
+        await using var host = await WebhooksHost.StartAsync();
+        await SeedNamespaceAsync(host.Client);
+        host.Indexer.ThrowOnQuery = true;
+
+        var (status, _) = await PostAsync(
+            host.Client, "/webhooks/property_claim_started_devnet", ClaimStartedJson());
+
+        var buckets = await host.BucketsAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.BadGateway),
+                "retryable: the indexer retries with backoff");
+            Assert.That(buckets, Is.Empty,
+                "the bucket creation must roll back with the failed reconciliation");
+        });
+    }
+
     private const string BuyerWallet = "BuyerWallet111";
     private const string SellerWallet = "SellerWallet111";
 

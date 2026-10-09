@@ -69,6 +69,15 @@ public interface IIndexerClient
 
     /// <summary>The property's total share supply (the quorum denominator), or null if absent.</summary>
     Task<long?> GetShareAmountAsync(long assetId, CancellationToken ct);
+
+    /// <summary>
+    /// The wallets of the listing's CURRENT stakeholder set (primary-market positions with
+    /// shares or an outstanding reservation, plus secondary-market share holdings), deduplicated.
+    /// Used by the claim-started webhook to seed the legal bucket's viewers at creation time:
+    /// holder events that arrived before the bucket existed are deferred exactly because this
+    /// reconciliation covers them.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetCurrentHolderWalletsAsync(long listingId, CancellationToken ct);
 }
 
 /// <summary>
@@ -95,15 +104,15 @@ public class IndexerClient(
               }
             }
             """,
-            new { id = listingId }, "listings", ct);
+            new { id = I64Var(listingId) }, "listings", ct);
 
         var node = FirstNode(nodes);
         return node is null
             ? null
             : new SpvElectionInfo(
-                (int)node.Value.GetProperty("spvElectionRound").GetInt64(),
-                node.Value.GetProperty("spvElectionExpiry").GetInt64(),
-                (int)node.Value.GetProperty("spvElectionCandidateCount").GetInt64(),
+                (int)LongOf(node.Value, "spvElectionRound"),
+                LongOf(node.Value, "spvElectionExpiry"),
+                (int)LongOf(node.Value, "spvElectionCandidateCount"),
                 node.Value.GetProperty("spvLawyer").GetString() ?? string.Empty);
     }
 
@@ -117,15 +126,15 @@ public class IndexerClient(
               }
             }
             """,
-            new { id = assetId }, "propertyLettings", ct);
+            new { id = I64Var(assetId) }, "propertyLettings", ct);
 
         var node = FirstNode(nodes);
         return node is null
             ? null
             : new PropertyLettingInfo(
                 node.Value.GetProperty("agent").GetString() ?? string.Empty,
-                node.Value.GetProperty("electionExpiry").GetInt64(),
-                node.Value.GetProperty("electionRound").GetInt64(),
+                LongOf(node.Value, "electionExpiry"),
+                LongOf(node.Value, "electionRound"),
                 Bps(node.Value, "electionQuorumBps"),
                 node.Value.GetProperty("governanceStrikes").GetInt32());
     }
@@ -141,14 +150,14 @@ public class IndexerClient(
               }
             }
             """,
-            new { id = assetId }, "proposals", ct);
+            new { id = I64Var(assetId) }, "proposals", ct);
 
-        var node = FindNode(nodes, n => n.GetProperty("proposalId").GetInt64() == proposalId);
+        var node = FindNode(nodes, n => LongOf(n, "proposalId") == proposalId);
         return node is null
             ? null
             : new ProposalInfo(
                 proposalId,
-                node.Value.GetProperty("expiry").GetInt64(),
+                LongOf(node.Value, "expiry"),
                 Bps(node.Value, "quorumBps"),
                 Bps(node.Value, "thresholdBps"));
     }
@@ -165,16 +174,16 @@ public class IndexerClient(
               }
             }
             """,
-            new { id = assetId }, "proposals", ct);
+            new { id = I64Var(assetId) }, "proposals", ct);
 
         var node = FindNode(nodes, n => n.GetProperty("id").GetString() == proposalPda);
         return node is null
             ? null
             : new ProposalResultInfo(
-                node.Value.GetProperty("proposalId").GetInt64(),
-                node.Value.GetProperty("tallyYes").GetInt64(),
-                node.Value.GetProperty("tallyNo").GetInt64(),
-                node.Value.GetProperty("tallyAbstain").GetInt64(),
+                LongOf(node.Value, "proposalId"),
+                LongOf(node.Value, "tallyYes"),
+                LongOf(node.Value, "tallyNo"),
+                LongOf(node.Value, "tallyAbstain"),
                 Bps(node.Value, "quorumBps"),
                 Bps(node.Value, "thresholdBps"));
     }
@@ -190,14 +199,14 @@ public class IndexerClient(
               }
             }
             """,
-            new { id = assetId }, "challenges", ct);
+            new { id = I64Var(assetId) }, "challenges", ct);
 
-        var node = FindNode(nodes, n => n.GetProperty("challengeId").GetInt64() == challengeId);
+        var node = FindNode(nodes, n => LongOf(n, "challengeId") == challengeId);
         return node is null
             ? null
             : new ChallengeInfo(
                 challengeId,
-                node.Value.GetProperty("expiry").GetInt64(),
+                LongOf(node.Value, "expiry"),
                 Bps(node.Value, "quorumBps"));
     }
 
@@ -212,16 +221,16 @@ public class IndexerClient(
               }
             }
             """,
-            new { id = assetId }, "challenges", ct);
+            new { id = I64Var(assetId) }, "challenges", ct);
 
         var node = FindNode(nodes, n => n.GetProperty("id").GetString() == challengePda);
         return node is null
             ? null
             : new ChallengeResultInfo(
-                node.Value.GetProperty("challengeId").GetInt64(),
-                node.Value.GetProperty("tallyYes").GetInt64(),
-                node.Value.GetProperty("tallyNo").GetInt64(),
-                node.Value.GetProperty("tallyAbstain").GetInt64(),
+                LongOf(node.Value, "challengeId"),
+                LongOf(node.Value, "tallyYes"),
+                LongOf(node.Value, "tallyNo"),
+                LongOf(node.Value, "tallyAbstain"),
                 Bps(node.Value, "quorumBps"));
     }
 
@@ -235,10 +244,92 @@ public class IndexerClient(
               }
             }
             """,
-            new { id = assetId }, "propertyAssets", ct);
+            new { id = I64Var(assetId) }, "propertyAssets", ct);
 
-        return FirstNode(nodes)?.GetProperty("shareAmount").GetInt64();
+        return FirstNode(nodes) is { } shareRow ? LongOf(shareRow, "shareAmount") : null;
     }
+
+    public async Task<IReadOnlyList<string>> GetCurrentHolderWalletsAsync(long listingId, CancellationToken ct)
+    {
+        var wallets = new HashSet<string>(StringComparer.Ordinal);
+
+        // Primary market: live positions with purchased or still-reserved shares.
+        await PageHoldersAsync(
+            """
+            query($id: I64!, $first: Int!, $offset: Int!) {
+              investorPositions(listingId: $id, active: true, first: $first, offset: $offset) {
+                nodes { investor shareAmount reservedShareAmount cancelled }
+              }
+            }
+            """,
+            "investorPositions", listingId, wallets,
+            n => !n.GetProperty("cancelled").GetBoolean()
+                && (LongOf(n, "shareAmount") > 0
+                    || LongOf(n, "reservedShareAmount") > 0)
+                    ? n.GetProperty("investor").GetString()
+                    : null,
+            ct);
+
+        // Secondary market: live holdings with a balance (buyers have no investor position).
+        await PageHoldersAsync(
+            """
+            query($id: I64!, $first: Int!, $offset: Int!) {
+              shareHoldings(assetId: $id, active: true, first: $first, offset: $offset) {
+                nodes { owner amount }
+              }
+            }
+            """,
+            "shareHoldings", listingId, wallets,
+            n => LongOf(n, "amount") > 0
+                ? n.GetProperty("owner").GetString()
+                : null,
+            ct);
+
+        return wallets.ToList();
+    }
+
+    /// <summary>One paged holder-enumeration query, folding qualifying wallets into the set.</summary>
+    private async Task PageHoldersAsync(
+        string query,
+        string rootField,
+        long id,
+        HashSet<string> wallets,
+        Func<JsonElement, string?> extract,
+        CancellationToken ct)
+    {
+        for (var page = 0; page < MaxHolderPages; page++)
+        {
+            var nodes = await QueryAsync(
+                query,
+                new { id = I64Var(id), first = HolderPageSize, offset = page * HolderPageSize },
+                rootField,
+                ct);
+
+            var count = 0;
+            if (nodes is { ValueKind: JsonValueKind.Array } arr)
+            {
+                foreach (var node in arr.EnumerateArray())
+                {
+                    count++;
+                    var wallet = extract(node);
+                    if (!string.IsNullOrWhiteSpace(wallet))
+                    {
+                        wallets.Add(wallet);
+                    }
+                }
+            }
+
+            if (count < HolderPageSize)
+            {
+                return; // a short page is the last page
+            }
+        }
+    }
+
+    private const int HolderPageSize = 500;
+
+    /// <summary>A bound on the paging loop (20k wallets), not a limit anyone should reach.</summary>
+    private const int MaxHolderPages = 40;
 
     /// <summary>
     /// The property program's pass rule, mirrored from the chain: turnout strictly over the
@@ -266,7 +357,22 @@ public class IndexerClient(
     public static string Iso8601(long unixSeconds) =>
         DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime.ToString("O");
 
-    private static int Bps(JsonElement node, string name) => node.GetProperty(name).GetInt32();
+    private static int Bps(JsonElement node, string name) => (int)LongOf(node, name);
+
+    /// <summary>The wire form of an I64 variable: juniper serves and accepts it as a STRING.</summary>
+    private static string I64Var(long value) => value.ToString();
+
+    /// <summary>
+    /// Reads an I64 field, which the indexer serves as a JSON STRING ("123") — accepting a bare
+    /// number too, so the parse is robust against either scalar flavor.
+    /// </summary>
+    private static long LongOf(JsonElement node, string name)
+    {
+        var value = node.GetProperty(name);
+        return value.ValueKind == JsonValueKind.String
+            ? long.Parse(value.GetString()!)
+            : value.GetInt64();
+    }
 
     private static JsonElement? FirstNode(JsonElement? nodes) =>
         nodes is { ValueKind: JsonValueKind.Array } arr && arr.GetArrayLength() > 0 ? arr[0] : null;

@@ -17,6 +17,7 @@ public sealed class TestIndexerClient : IIndexerClient
     public ChallengeInfo? OpenChallenge { get; set; }
     public ChallengeResultInfo? FinalizedChallenge { get; set; }
     public long? ShareAmount { get; set; } = 1_000;
+    public IReadOnlyList<string>? HolderWallets { get; set; } = [];
     public bool ThrowOnQuery { get; set; }
 
     public Task<SpvElectionInfo?> GetListingSpvElectionAsync(long listingId, CancellationToken ct)
@@ -41,6 +42,16 @@ public sealed class TestIndexerClient : IIndexerClient
 
     public Task<long?> GetShareAmountAsync(long assetId, CancellationToken ct)
         => Respond(ShareAmount);
+
+    public Task<IReadOnlyList<string>> GetCurrentHolderWalletsAsync(long listingId, CancellationToken ct)
+    {
+        if (ThrowOnQuery)
+        {
+            throw new IndexerQueryException("the indexer is down (simulated)");
+        }
+
+        return Task.FromResult(HolderWallets ?? (IReadOnlyList<string>)[]);
+    }
 
     private Task<T?> Respond<T>(T? value)
         => ThrowOnQuery

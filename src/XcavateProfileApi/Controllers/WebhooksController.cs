@@ -141,12 +141,15 @@ public class WebhooksController : ControllerBase
     //
     // The five events that continue the flow the asset webhook starts:
     //
-    //   property_claim_started       -> create the property's legal-process bucket (implemented)
+    //   property_claim_started       -> create the property's legal-process bucket (implemented;
+    //                                   also reconciles the current holder set into its viewers)
     //   spv_lawyer_elected           -> lawyer write + holder read access (PLACEHOLDER, see below)
     //   deal_executed                -> remove the lawyers from the bucket (implemented)
     //   letting_agent_appointed      -> add the letting agent (write) (PLACEHOLDER)
     //   property_shares_transferred  -> swap seller -> buyer read access (implemented: wallets
     //                                   resolve to viewer X25519 keys through the profiles)
+    //   property_holder_changed      -> primary-market holder joins/leaves (implemented; sale-phase
+    //                                   events defer to the claim-started reconciliation)
     //
     // The placeholders and exactly what they are waiting for are documented in
     // docs/property-webhooks-uncertainties.md. Like the asset webhook, every endpoint is
@@ -165,6 +168,9 @@ public class WebhooksController : ControllerBase
     /// manager), named after the namespace, categorised <c>legal-process</c> (the marker the
     /// other lifecycle webhooks look the bucket up by), and the creator is also installed as a
     /// bucket admin so the later membership webhooks have a caller that passes the admin check.
+    /// The current holder set (reservers and buyers, resolved from the indexer's mirror) is then
+    /// seeded as viewers — the reconciliation that makes the sale phase's deferred holder events
+    /// lossless; an indexer failure answers 502 and the whole event (bucket included) retries.
     /// Idempotent via the bucket lookup: a redelivery finds the existing bucket and is ignored.
     /// 404 while the namespace is missing (the asset webhook has not landed yet — the indexer
     /// retries); 400 when the body is not a valid <c>property_claim_started</c> event.
@@ -228,9 +234,46 @@ public class WebhooksController : ControllerBase
         // manager) as a BucketAdmin row, so later membership webhooks can pass it as the caller
         // the admin check expects.
         await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
+
+        // Seed the bucket's readers from the CURRENT holder set (the indexer's mirror):
+        // holder events during the sale phase answered "deferred" because the bucket did not
+        // exist yet — this reconciliation is what makes those deferrals lossless. It runs inside
+        // the transaction, so an indexer failure (502 via ResolveAsync) rolls the bucket back
+        // with it and the event retries whole. Wallets without a profile X25519 key are skipped
+        // (counted), never retried: they appear on their next qualifying holder event.
+        var holdersAdded = 0;
+        var holdersSkipped = 0;
+        if (payload.ListingId is { } reconcileListingId)
+        {
+            var resolve = await ResolveAsync(
+                ct, async c => await _indexer.GetCurrentHolderWalletsAsync(reconcileListingId, c));
+            if (resolve.Failed)
+            {
+                return resolve.Failure!;
+            }
+
+            foreach (var wallet in resolve.Value!)
+            {
+                var key = await ResolveViewerKeyAsync(wallet, ct);
+                if (key is null)
+                {
+                    holdersSkipped++;
+                    continue;
+                }
+
+                await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
+                holdersAdded++;
+            }
+        }
         await transaction.CommitAsync(ct);
 
-        return Ok(new { status = "created", bucketId = bucket.BucketId });
+        return Ok(new
+        {
+            status = "created",
+            bucketId = bucket.BucketId,
+            holdersAdded,
+            holdersSkippedNoKey = holdersSkipped
+        });
     }
 
     /// <summary>
@@ -502,6 +545,91 @@ public class WebhooksController : ControllerBase
             buyerNote = buyerAdded ? null : "no profile X25519 key for the buyer wallet — skipped",
             sellerViewerRemoved = sellerRemoved,
             sellerNote = sellerRemoved ? null : "no profile X25519 key for the seller wallet — skipped"
+        });
+    }
+
+    /// <summary>
+    /// Receives the <c>property_holder_changed</c> event (the primary market's holder lifecycle:
+    /// <c>reserve_shares</c>/<c>buy_property_shares</c> add, <c>unreserve_shares</c>,
+    /// <c>release_reservation</c>, <c>close_cancelled_position</c> and the three
+    /// <c>withdraw_*</c> exits remove) and mirrors it as bucket read access: the investor's
+    /// viewer is added or removed, the wallet resolved to its X25519 key through the profiles
+    /// (the same <see cref="ResolveViewerKeyAsync"/> the transfer webhook uses).
+    /// </summary>
+    /// <remarks>
+    /// The legal bucket only exists from claim start, so events from the sale phase arrive long
+    /// before it: those answer 200 <c>deferred</c> — NOT 404 — because the claim-started handler
+    /// reconciles the whole current holder set from the indexer at bucket-creation time, making
+    /// the deferral lossless without a weeks-long retry storm per property. A wallet without a
+    /// profile key is skipped, never retried (the investor appears on their next qualifying event
+    /// or a later reconciliation). Idempotent: viewer adds return the existing row and removes
+    /// are no-ops when absent. 404 only while the namespace is missing; 400 when the body is not
+    /// a valid <c>property_holder_changed</c> event.
+    /// </remarks>
+    // POST: webhooks/property_holder_changed_devnet
+    [HttpPost("property_holder_changed_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> PropertyHolderChangedDevnet(
+        [FromBody] PropertyHolderChangedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, HolderChangedEventName, StringComparison.Ordinal)
+            || payload.Action is not ("added" or "removed")
+            || string.IsNullOrWhiteSpace(payload.Investor)
+            || (payload.ListingId is null && string.IsNullOrWhiteSpace(payload.Property)))
+        {
+            return BadRequest("The body is not a valid 'property_holder_changed' webhook payload.");
+        }
+
+        var ns = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        {
+            return NotFound("No webhook-created namespace matches this listing yet.");
+        }
+
+        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
+        if (bucket is null)
+        {
+            return Ok(new
+            {
+                status = "deferred",
+                reason = "the legal bucket does not exist yet; the claim-started reconciliation "
+                    + "adds every current holder when it is created"
+            });
+        }
+
+        var key = await ResolveViewerKeyAsync(payload.Investor, ct);
+        if (key is null)
+        {
+            return Ok(new
+            {
+                status = "skipped",
+                acted = false,
+                reason = "no profile X25519 key for the investor wallet"
+            });
+        }
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        // A bucket created before the claim webhook existed may lack the operator admin row the
+        // viewer-add caller check needs; adding it is idempotent.
+        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
+        if (payload.Action == "added")
+        {
+            await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
+        }
+        else
+        {
+            await _memberships.RemoveViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
+        }
+        await transaction.CommitAsync(ct);
+
+        return Ok(new
+        {
+            status = "processed",
+            action = payload.Action,
+            bucketId = bucket.BucketId
         });
     }
 
@@ -1102,6 +1230,7 @@ public class WebhooksController : ControllerBase
     private const string ProposalFinalizedEventName = "proposal_finalized";
     private const string ChallengeCreatedEventName = "challenge_created";
     private const string ChallengeFinalizedEventName = "challenge_finalized";
+    private const string HolderChangedEventName = "property_holder_changed";
 
     /// <summary>The all-zero pubkey: what an unassigned <c>LawyerAssignment.lawyer</c> reads as.</summary>
     private const string SystemDefaultPubkey = "11111111111111111111111111111111";
@@ -1732,6 +1861,64 @@ public sealed class ChallengeFinalizedPayload
     public DateTime? BlockTime { get; set; }
 
     /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>
+/// The <c>property_holder_changed</c> webhook payload the indexer POSTs verbatim (the primary
+/// market's holder lifecycle: <c>reserve_shares</c> / <c>buy_property_shares</c> add,
+/// <c>unreserve_shares</c>, <c>release_reservation</c>, <c>close_cancelled_position</c> and the
+/// three <c>withdraw_*</c> exits remove). Field names are the indexer's snake_case wire names,
+/// pinned with <c>JsonPropertyName</c>.
+/// </summary>
+public sealed class PropertyHolderChangedPayload
+{
+    /// <summary>Always <c>property_holder_changed</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary><c>added</c> (reserve/buy) or <c>removed</c> (cancel/release/withdraw).</summary>
+    [JsonPropertyName("action")]
+    public string? Action { get; set; }
+
+    /// <summary>The instruction that produced the event, e.g. <c>reserve_shares</c>.</summary>
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+
+    /// <summary>The base58 wallet whose membership changed.</summary>
+    [JsonPropertyName("investor")]
+    public string? Investor { get; set; }
+
+    /// <summary>The base58 Listing PDA — null for <c>unreserve_shares</c> variants without one.</summary>
+    [JsonPropertyName("listing")]
+    public string? Listing { get; set; }
+
+    /// <summary>The base58 PropertyAsset PDA (the namespace's creator) — null when the instruction does not carry it.</summary>
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    /// <summary>The on-chain listing id (the namespace's PropertyId).</summary>
+    [JsonPropertyName("listing_id")]
+    public long? ListingId { get; set; }
+
+    /// <summary>The reserved/bought amount — set only on the two add paths.</summary>
+    [JsonPropertyName("amount")]
+    public long? Amount { get; set; }
+
+    /// <summary>The slot the change landed in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
     [JsonPropertyName("program")]
     public string? Program { get; set; }
 }
