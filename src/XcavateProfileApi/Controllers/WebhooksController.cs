@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -6,6 +9,7 @@ using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateBuckets.Domain.Services;
 using XcavateProfileApi.Data;
+using XcavateProfileApi.Services.Indexer;
 
 namespace XcavateProfileApi.Controllers;
 
@@ -21,6 +25,13 @@ namespace XcavateProfileApi.Controllers;
 /// lawyer-election / agent-appointment / transfer webhooks manage its membership (partly
 /// placeholder — see docs/property-webhooks-uncertainties.md), and the deal-executed webhook
 /// removes the lawyers when the sale settles.
+///
+/// A second group — the voting webhooks — announces on-chain governance votes as messages in the
+/// property's legal-process bucket, so the messenger clients can render vote state without an
+/// indexer round-trip: terms-vote open/finalize (marketplace, pre-settlement), letting-agent
+/// election open, agent spending-proposal create/finalize and challenge create/finalize
+/// (property program, post-settlement). Messages are plaintext JSON (the server holds no bucket
+/// X25519 key) posted under a synthetic system identity — see the group remark below.
 /// </summary>
 [ApiController]
 [Route("webhooks")]
@@ -31,19 +42,25 @@ public class WebhooksController : ControllerBase
     private readonly NamespaceService _namespaces;
     private readonly BucketService _buckets;
     private readonly MembershipService _memberships;
+    private readonly MessageService _messages;
+    private readonly IIndexerClient _indexer;
 
     public WebhooksController(
         BucketDbContext db,
         ProfileDbContext profiles,
         NamespaceService namespaces,
         BucketService buckets,
-        MembershipService memberships)
+        MembershipService memberships,
+        MessageService messages,
+        IIndexerClient indexer)
     {
         _db = db;
         _profiles = profiles;
         _namespaces = namespaces;
         _buckets = buckets;
         _memberships = memberships;
+        _messages = messages;
+        _indexer = indexer;
     }
 
     /// <summary>
@@ -217,53 +234,63 @@ public class WebhooksController : ControllerBase
     }
 
     /// <summary>
-    /// Receives the <c>spv_lawyer_elected</c> event (the SPV lawyer election finalized with a
-    /// winner). PLACEHOLDER: the payload's <c>winner_registry</c> is the winner's on-chain Lawyer
-    /// REGISTRY PDA, not their wallet, and the token holders' read access needs X25519 viewer keys
-    /// the chain does not carry — see docs/property-webhooks-uncertainties.md entries 2 and 3.
-    /// The endpoint validates, resolves the namespace and bucket (404 while either is missing, so
-    /// the indexer retries), and records the event as accepted; the membership changes themselves
-    /// are the documented TODO.
+    /// Receives the <c>spv_lawyer_elected</c> event (the SPV lawyer election finalized) and posts
+    /// a <c>voting/result</c> message: "ratified" when the listing's row shows an assigned SPV
+    /// lawyer, "rejected" when the round failed open (the seat stays empty and a new round may
+    /// open). The payload's <c>winner_registry</c> is the winner's on-chain Lawyer REGISTRY PDA,
+    /// not their wallet — the assignment is resolved from the indexer's listing row instead.
+    /// MEMBERSHIP PLACEHOLDER: the lawyer's write access and the token holders' read access still
+    /// wait on wallet resolution and X25519 viewer keys — see
+    /// docs/property-webhooks-uncertainties.md entries 2 and 3.
     /// </summary>
     // POST: webhooks/spv_lawyer_elected_devnet
     [HttpPost("spv_lawyer_elected_devnet")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> SpvLawyerElectedDevnet(
         [FromBody] SpvLawyerElectedPayload payload, CancellationToken ct)
     {
         if (payload is null
             || !string.Equals(payload.Event, LawyerElectedEventName, StringComparison.Ordinal)
-            || (payload.ListingId is null && string.IsNullOrWhiteSpace(payload.Property)))
+            || payload.ListingId is null)
         {
             return BadRequest("The body is not a valid 'spv_lawyer_elected' webhook payload.");
         }
 
-        var ns = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
-        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        var resolve = await ResolveAsync(
+            ct, async c => await _indexer.GetListingSpvElectionAsync(payload.ListingId.Value, c));
+        if (resolve.Failed)
         {
-            return NotFound("No webhook-created namespace matches this listing yet.");
+            return resolve.Failure!;
         }
+        var election = resolve.Value!;
+        var status = election.SpvLawyer is { Length: > 0 } lawyer
+                   && lawyer != SystemDefaultPubkey
+                ? "ratified"
+                : "rejected";
 
-        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        if (bucket is null)
-        {
-            return NotFound("The property's legal bucket does not exist yet.");
-        }
+        var result = await PostVotingMessageAsync(
+            payload.ListingId, payload.Property,
+            tag: VotingResultTag,
+            reference: $"voting/result/terms/{payload.ListingId}/round/{election.Round}",
+            description: $"SPV lawyer election round {election.Round} {status}",
+            buildBody: listingId => new JsonObject
+            {
+                ["kind"] = "terms",
+                ["listingId"] = listingId,
+                ["round"] = election.Round,
+                ["status"] = status
+            },
+            ct);
 
         // TODO(uncertainties #2/#3): resolve WinnerRegistry -> the lawyer's wallet via the indexer
         // GraphQL `marketplaceListing(...).spvLawyer`, then
         //   await _memberships.AddContributorAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, lawyerWallet, ct);
         // and add each current token holder as a viewer once the wallet -> X25519 viewer-key
-        // mapping exists. Until then the event is only acknowledged.
-        return Ok(new
-        {
-            status = "accepted",
-            acted = false,
-            pending = "lawyer wallet resolution and holder viewer keys (placeholder)",
-            bucketId = bucket.BucketId
-        });
+        // mapping exists. Until then only the vote announcement above is acted on.
+        return result;
     }
 
     /// <summary>
@@ -478,6 +505,509 @@ public class WebhooksController : ControllerBase
         });
     }
 
+    // ---- Voting webhooks: on-chain governance announced into the legal-process bucket ---------
+    //
+    // Seven events, two shapes: open/update messages (tagged voting/terms, voting/election,
+    // voting/proposal or voting/challenge, status "open") and result messages (tagged
+    // voting/result, carrying the outcome and the vote powers). The indexer's webhook payloads
+    // carry only instruction-derivable evidence (ids, PDAs, args — its mapper is pure and
+    // DB-less), so every handler first RESOLVES the display facts — rounds, expiries, quorums,
+    // tallies, the passed/failed outcome — from the indexer's own GraphQL mirror via
+    // IIndexerClient. That read is consistent for free: the event row and the account rows it
+    // reports commit in one indexer transaction. A resolution failure (indexer unreachable, or the
+    // expected row missing) answers 502 so delivery retries with backoff instead of posting a
+    // hollow announcement. One deliberate skip: a `proposal_created` whose Proposal PDA never
+    // survived its own transaction is an auto-approved (low-tier) spend — no vote ever opens, so
+    // nothing is announced.
+    //
+    // The message body is plaintext JSON — the server holds no bucket X25519 key, and the clients
+    // tolerate plaintext voting announcements; the body's content hash is the sha256 of the exact
+    // bytes stored, so a client can still verify integrity.
+    //
+    // Posting runs under a synthetic system identity (VotingSystemIdentity), installed as a
+    // bucket contributor by each handler — idempotently, so the deal_executed sweep removing
+    // every contributor cannot permanently evict it: the next voting webhook simply re-adds it.
+    // Because webhook-created legal buckets start locked (the pallet's Status::default()) and the
+    // only admin is the PropertyAsset PDA no wallet can sign for, the handler also unlocks the
+    // bucket server-side (ResumeWriting as the namespace creator) with a PLACEHOLDER encryption
+    // key before the first post. The domain has no "system writes while locked" bypass, and
+    // unlocking grants no capability the lifecycle does not already intend — the legal bucket's
+    // contributors are meant to write. The placeholder key means bucket content is NOT
+    // end-to-end-encrypted until a real key ceremony runs (which, the operator admin being a PDA,
+    // must itself be server-mediated); voting messages are plaintext by design either way.
+    //
+    // Idempotency: every handler builds its message body deterministically (same event -> same
+    // bytes) and skips the post when a message with the same tag and identical body already
+    // exists, so an at-least-once redelivery never duplicates a user-visible announcement, while
+    // a genuinely new event (a new round, a new proposal id) produces a different body and posts.
+    // 404 while the namespace or bucket is missing, so the indexer retries (deliveries across
+    // event types are unordered); 400 when the body is not a valid payload for the event.
+
+    /// <summary>
+    /// Receives the <c>spv_case_claimed</c> event (a lawyer stood for the listing's SPV case —
+    /// the candidacy investors vote on, surfaced in the apps as the "terms" vote) and posts a
+    /// <c>voting/terms</c> open message carrying the round plus the election's expiry resolved
+    /// from the indexer. The indexer fires the event per candidacy; the deterministic body
+    /// (property + round only) makes later candidacies of the same round duplicate-guarded, so
+    /// one round still produces exactly one announcement.
+    /// </summary>
+    // POST: webhooks/spv_case_claimed_devnet
+    [HttpPost("spv_case_claimed_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> SpvCaseClaimedDevnet(
+        [FromBody] SpvCaseClaimedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, SpvCaseClaimedEventName, StringComparison.Ordinal)
+            || payload.PropertyId is null
+            || payload.Round is null)
+        {
+            return BadRequest("The body is not a valid 'spv_case_claimed' webhook payload.");
+        }
+
+        var resolve = await ResolveAsync(
+            ct, async c => await _indexer.GetListingSpvElectionAsync(payload.PropertyId.Value, c));
+        if (resolve.Failed)
+        {
+            return resolve.Failure!;
+        }
+        var election = resolve.Value!;
+
+        return await PostVotingMessageAsync(
+            payload.PropertyId, payload.Property,
+            tag: TermsVotingTag,
+            reference: $"voting/terms/{payload.PropertyId}/round/{payload.Round}/open",
+            description: $"SPV lawyer election round {payload.Round} opened",
+            buildBody: listingId => new JsonObject
+            {
+                ["kind"] = "terms",
+                ["listingId"] = listingId,
+                ["round"] = payload.Round.Value,
+                ["expiresAt"] = IndexerClient.Iso8601(election.Expiry),
+                ["status"] = "open"
+            },
+            ct);
+    }
+
+    /// <summary>
+    /// Receives the <c>agent_election_opened</c> event (a letting agent stood for the property's
+    /// seat election — the indexer fires it per candidacy) and posts a <c>voting/election</c> open
+    /// message with the round plus the expiry resolved from the letting row. The deterministic
+    /// body collapses redeliveries AND later candidacies of the same round into one announcement:
+    /// same property + same round = same bytes = duplicate-guarded.
+    /// </summary>
+    // POST: webhooks/agent_election_opened_devnet
+    [HttpPost("agent_election_opened_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> AgentElectionOpenedDevnet(
+        [FromBody] AgentElectionOpenedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, AgentElectionOpenedEventName, StringComparison.Ordinal)
+            || payload.PropertyId is null
+            || payload.Round is null)
+        {
+            return BadRequest("The body is not a valid 'agent_election_opened' webhook payload.");
+        }
+
+        var resolve = await ResolveAsync(
+            ct, async c => await _indexer.GetPropertyLettingAsync(payload.PropertyId.Value, c));
+        if (resolve.Failed)
+        {
+            return resolve.Failure!;
+        }
+        var letting = resolve.Value!;
+
+        return await PostVotingMessageAsync(
+            payload.PropertyId, payload.Property,
+            tag: ElectionVotingTag,
+            reference: $"voting/election/{payload.PropertyId}/round/{payload.Round}/open",
+            description: $"Letting-agent election round {payload.Round} opened",
+            buildBody: listingId => new JsonObject
+            {
+                ["kind"] = "election",
+                ["listingId"] = listingId,
+                ["round"] = payload.Round.Value,
+                ["expiresAt"] = IndexerClient.Iso8601(letting.ElectionExpiry),
+                ["quorumBps"] = letting.ElectionQuorumBps,
+                ["status"] = "open"
+            },
+            ct);
+    }
+
+    /// <summary>
+    /// Receives the <c>proposal_created</c> event (the letting agent opened a spending proposal)
+    /// and posts a <c>voting/proposal</c> open message with the proposal id plus the expiry,
+    /// quorum and threshold resolved from the indexer. A low-tier spend is auto-approved BY THE
+    /// CHAIN in the same transaction, so its Proposal PDA never survives and no vote can ever be
+    /// cast — the handler answers 200 "ignored" instead of advertising a phantom vote. The
+    /// amount and details hash stay readable through the indexer GraphQL <c>proposals</c> query.
+    /// </summary>
+    // POST: webhooks/proposal_created_devnet
+    [HttpPost("proposal_created_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> ProposalCreatedDevnet(
+        [FromBody] ProposalCreatedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, ProposalCreatedEventName, StringComparison.Ordinal)
+            || payload.PropertyId is null
+            || payload.ProposalId is null)
+        {
+            return BadRequest("The body is not a valid 'proposal_created' webhook payload.");
+        }
+
+        var resolve = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetOpenProposalAsync(
+                payload.PropertyId.Value, payload.ProposalId.Value, c),
+            allowMissing: true);
+        if (resolve.Failed)
+        {
+            return resolve.Failure!;
+        }
+        if (resolve.Value is null)
+        {
+            return Ok(new
+            {
+                status = "ignored",
+                reason = "auto-approved proposal leaves no vote open on-chain"
+            });
+        }
+        var proposal = resolve.Value;
+
+        return await PostVotingMessageAsync(
+            payload.PropertyId, payload.Letting,
+            tag: ProposalVotingTag,
+            reference: $"voting/proposal/{payload.PropertyId}/{payload.ProposalId}/open",
+            description: $"Spending proposal {payload.ProposalId} opened",
+            buildBody: listingId => new JsonObject
+            {
+                ["kind"] = "proposal",
+                ["listingId"] = listingId,
+                ["id"] = payload.ProposalId.Value,
+                ["expiresAt"] = IndexerClient.Iso8601(proposal.Expiry),
+                ["quorumBps"] = proposal.QuorumBps,
+                ["thresholdBps"] = proposal.ThresholdBps,
+                ["status"] = "open"
+            },
+            ct);
+    }
+
+    /// <summary>
+    /// Receives the <c>proposal_finalized</c> event (a spending proposal's vote closed and its
+    /// PDA closed) and posts a <c>voting/result</c> message. The outcome is derived from the
+    /// frozen tallies against the snapshotted quorum/threshold and the share supply — the same
+    /// rule the chain applied — since the payload carries only the closed PDA's key.
+    /// </summary>
+    // POST: webhooks/proposal_finalized_devnet
+    [HttpPost("proposal_finalized_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> ProposalFinalizedDevnet(
+        [FromBody] ProposalFinalizedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, ProposalFinalizedEventName, StringComparison.Ordinal)
+            || payload.PropertyId is null
+            || string.IsNullOrWhiteSpace(payload.Proposal))
+        {
+            return BadRequest("The body is not a valid 'proposal_finalized' webhook payload.");
+        }
+
+        var resolve = await ResolveAsync(
+            ct,
+            async c =>
+            {
+                var proposal = await _indexer.GetFinalizedProposalAsync(
+                    payload.PropertyId.Value, payload.Proposal, c);
+                var shareAmount = await _indexer.GetShareAmountAsync(payload.PropertyId.Value, c);
+                return proposal is null || shareAmount is null
+                    ? null
+                    : new VoteAndSupply<ProposalResultInfo>(proposal, shareAmount.Value);
+            });
+        if (resolve.Failed)
+        {
+            return resolve.Failure!;
+        }
+        var (proposal, shareAmount) = (resolve.Value!.Vote, resolve.Value.ShareAmount);
+        var status = IndexerClient.VotePassed(
+            proposal.TallyYes, proposal.TallyNo, proposal.TallyAbstain,
+            proposal.QuorumBps, proposal.ThresholdBps, shareAmount)
+            ? "passed"
+            : "failed";
+
+        return await PostVotingMessageAsync(
+            payload.PropertyId, payload.Property,
+            tag: VotingResultTag,
+            reference: $"voting/result/proposal/{payload.PropertyId}/{proposal.ProposalId}",
+            description: $"Spending proposal {proposal.ProposalId} {status}",
+            buildBody: listingId => new JsonObject
+            {
+                ["kind"] = "proposal",
+                ["listingId"] = listingId,
+                ["id"] = proposal.ProposalId,
+                ["status"] = status,
+                ["yes"] = proposal.TallyYes,
+                ["no"] = proposal.TallyNo,
+                ["abstain"] = proposal.TallyAbstain
+            },
+            ct);
+    }
+
+    /// <summary>
+    /// Receives the <c>challenge_created</c> event (a token holder challenged the letting agent)
+    /// and posts a <c>voting/challenge</c> open message with the challenge id plus the expiry and
+    /// quorum resolved from the indexer.
+    /// </summary>
+    // POST: webhooks/challenge_created_devnet
+    [HttpPost("challenge_created_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> ChallengeCreatedDevnet(
+        [FromBody] ChallengeCreatedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, ChallengeCreatedEventName, StringComparison.Ordinal)
+            || payload.PropertyId is null
+            || payload.ChallengeId is null)
+        {
+            return BadRequest("The body is not a valid 'challenge_created' webhook payload.");
+        }
+
+        var resolve = await ResolveAsync(
+            ct, async c => await _indexer.GetOpenChallengeAsync(
+                payload.PropertyId.Value, payload.ChallengeId.Value, c));
+        if (resolve.Failed)
+        {
+            return resolve.Failure!;
+        }
+        var challenge = resolve.Value!;
+
+        return await PostVotingMessageAsync(
+            payload.PropertyId, payload.Letting,
+            tag: ChallengeVotingTag,
+            reference: $"voting/challenge/{payload.PropertyId}/{payload.ChallengeId}/open",
+            description: $"Agent challenge {payload.ChallengeId} opened",
+            buildBody: listingId => new JsonObject
+            {
+                ["kind"] = "challenge",
+                ["listingId"] = listingId,
+                ["id"] = payload.ChallengeId.Value,
+                ["expiresAt"] = IndexerClient.Iso8601(challenge.Expiry),
+                ["quorumBps"] = challenge.QuorumBps,
+                ["status"] = "open"
+            },
+            ct);
+    }
+
+    /// <summary>
+    /// Receives the <c>challenge_finalized</c> event (a challenge's vote closed and its PDA
+    /// closed) and posts a <c>voting/result</c> message with the outcome — derived from the
+    /// frozen tallies like the proposal path — and the yes/no/abstain powers. A passed challenge
+    /// at the third strike also removes the agent on-chain; the seat's current state stays
+    /// readable through the indexer GraphQL <c>propertyLettings</c> query.
+    /// </summary>
+    // POST: webhooks/challenge_finalized_devnet
+    [HttpPost("challenge_finalized_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> ChallengeFinalizedDevnet(
+        [FromBody] ChallengeFinalizedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, ChallengeFinalizedEventName, StringComparison.Ordinal)
+            || payload.PropertyId is null
+            || string.IsNullOrWhiteSpace(payload.Challenge))
+        {
+            return BadRequest("The body is not a valid 'challenge_finalized' webhook payload.");
+        }
+
+        var resolve = await ResolveAsync(
+            ct,
+            async c =>
+            {
+                var challenge = await _indexer.GetFinalizedChallengeAsync(
+                    payload.PropertyId.Value, payload.Challenge, c);
+                var shareAmount = await _indexer.GetShareAmountAsync(payload.PropertyId.Value, c);
+                return challenge is null || shareAmount is null
+                    ? null
+                    : new VoteAndSupply<ChallengeResultInfo>(challenge, shareAmount.Value);
+            });
+        if (resolve.Failed)
+        {
+            return resolve.Failure!;
+        }
+        var (challenge, shareAmount) = (resolve.Value!.Vote, resolve.Value.ShareAmount);
+        var status = IndexerClient.VotePassed(
+            challenge.TallyYes, challenge.TallyNo, challenge.TallyAbstain,
+            challenge.QuorumBps, null, shareAmount)
+            ? "passed"
+            : "failed";
+
+        return await PostVotingMessageAsync(
+            payload.PropertyId, payload.Property,
+            tag: VotingResultTag,
+            reference: $"voting/result/challenge/{payload.PropertyId}/{challenge.ChallengeId}",
+            description: $"Agent challenge {challenge.ChallengeId} {status}",
+            buildBody: listingId => new JsonObject
+            {
+                ["kind"] = "challenge",
+                ["listingId"] = listingId,
+                ["id"] = challenge.ChallengeId,
+                ["status"] = status,
+                ["yes"] = challenge.TallyYes,
+                ["no"] = challenge.TallyNo,
+                ["abstain"] = challenge.TallyAbstain
+            },
+            ct);
+    }
+
+    /// <summary>A finalized vote's frozen row plus the share supply its quorum is measured against.</summary>
+    private sealed record VoteAndSupply<T>(T Vote, long ShareAmount) where T : class;
+
+    /// <summary>
+    /// Runs one enrichment query, translating its outcomes into the webhook vocabulary: a thrown
+    /// <see cref="IndexerQueryException"/> (indexer down/erroring) or a missing expected row both
+    /// become a 502, so the indexer's at-least-once delivery retries with backoff until the mirror
+    /// can answer. <paramref name="allowMissing"/> marks the lookups where absence is a real state
+    /// (the auto-approved proposal) rather than a retryable gap.
+    /// </summary>
+    private async Task<(bool Failed, IActionResult? Failure, T? Value)> ResolveAsync<T>(
+        CancellationToken ct, Func<CancellationToken, Task<T?>> query, bool allowMissing = false)
+    {
+        T? value;
+        try
+        {
+            value = await query(ct);
+        }
+        catch (IndexerQueryException ex)
+        {
+            return (true,
+                StatusCode(StatusCodes.Status502BadGateway, $"Could not resolve vote state: {ex.Message}"),
+                default);
+        }
+
+        if (value is null && !allowMissing)
+        {
+            return (true,
+                StatusCode(StatusCodes.Status502BadGateway,
+                    "Could not resolve vote state: the indexer has no row for it yet."),
+                default);
+        }
+
+        return (false, null, value);
+    }
+
+    /// <summary>
+    /// The shared flow behind every voting webhook: resolve the property's namespace and legal
+    /// bucket (404 while either is missing), skip an exact duplicate (idempotent redelivery), then
+    /// post the message under the system identity — installing the operator admin and the system
+    /// contributor and unlocking the bucket first, all idempotently, inside one transaction.
+    /// <paramref name="buildBody"/> receives the numeric listing id (the payload's
+    /// <c>property_id</c>, or the namespace's as a fallback) and returns the deterministic
+    /// plaintext JSON body.
+    /// </summary>
+    private async Task<IActionResult> PostVotingMessageAsync(
+        long? propertyId,
+        string? propertyPda,
+        string tag,
+        string reference,
+        string description,
+        Func<long, JsonObject> buildBody,
+        CancellationToken ct)
+    {
+        var ns = await FindNamespaceAsync(propertyId, propertyPda, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        {
+            return NotFound("No webhook-created namespace matches this property yet.");
+        }
+
+        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
+        if (bucket is null)
+        {
+            return NotFound("The property's legal bucket does not exist yet.");
+        }
+
+        var listingId = propertyId ?? ns.PropertyId;
+        if (listingId is null)
+        {
+            return BadRequest("Neither the payload nor the namespace carries a numeric property id.");
+        }
+
+        var body = buildBody(listingId.Value).ToJsonString();
+
+        // Redelivery guard: the same event rebuilds the same body bytes, so an identical tagged
+        // message already in the bucket means this exact announcement was posted before.
+        var duplicate = await _db.Messages
+            .AnyAsync(m => m.BucketId == bucket.BucketId && m.Tag == tag && m.IpfsContent == body, ct);
+        if (duplicate)
+        {
+            return Ok(new
+            {
+                status = "ignored",
+                reason = "an identical voting message was already posted",
+                bucketId = bucket.BucketId
+            });
+        }
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        // A bucket created before the claim webhook existed may lack the operator admin row the
+        // contributor-add and resume-writing caller checks need; adding it is idempotent.
+        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
+        // The system poster. Idempotent too, which doubles as the guard against the deal_executed
+        // sweep: if it removed every contributor, the next voting webhook re-adds this one.
+        await _memberships.AddContributorAsync(
+            ns.Creator, ns.NamespaceId, bucket.BucketId, VotingSystemIdentity, ct);
+        if (!bucket.IsWritable)
+        {
+            // See the group remark: the only admin is the PropertyAsset PDA, so unlocking can only
+            // ever happen server-side. The placeholder key is no E2E key — voting messages are
+            // plaintext by design.
+            await _buckets.ResumeWritingAsync(
+                ns.Creator, ns.NamespaceId, bucket.BucketId, PlaceholderEncryptionKey, ct);
+        }
+
+        var message = await _messages.WriteAsync(
+            VotingSystemIdentity,
+            ns.NamespaceId,
+            bucket.BucketId,
+            new MessageWriteRequest(
+                Reference: reference,
+                Tag: tag,
+                IpfsContent: body,
+                Description: description,
+                ContentType: VotingContentType,
+                ContentHash: VotingContentHash(body),
+                Properties: null),
+            ct);
+        await transaction.CommitAsync(ct);
+
+        return Ok(new { status = "posted", bucketId = bucket.BucketId, messageId = message.MessageId });
+    }
+
+    /// <summary>
+    /// The message content hash: sha256 over the exact body bytes stored, as 0x-prefixed uppercase
+    /// hex — the house hex style (CryptoHelper.HashHex).
+    /// </summary>
+    private static string VotingContentHash(string body) =>
+        "0x" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)));
+
     /// <summary>
     /// The namespace one of these events belongs to: by on-chain property id first (the asset
     /// webhook stores the listing id as <see cref="Namespace.PropertyId"/>), falling back to the
@@ -566,9 +1096,43 @@ public class WebhooksController : ControllerBase
     private const string DealExecutedEventName = "deal_executed";
     private const string AgentAppointedEventName = "letting_agent_appointed";
     private const string SharesTransferredEventName = "property_shares_transferred";
+    private const string SpvCaseClaimedEventName = "spv_case_claimed";
+    private const string AgentElectionOpenedEventName = "agent_election_opened";
+    private const string ProposalCreatedEventName = "proposal_created";
+    private const string ProposalFinalizedEventName = "proposal_finalized";
+    private const string ChallengeCreatedEventName = "challenge_created";
+    private const string ChallengeFinalizedEventName = "challenge_finalized";
+
+    /// <summary>The all-zero pubkey: what an unassigned <c>LawyerAssignment.lawyer</c> reads as.</summary>
+    private const string SystemDefaultPubkey = "11111111111111111111111111111111";
 
     /// <summary>The bucket category marking a property's legal-process bucket.</summary>
     private const string LegalBucketCategory = "legal-process";
+
+    /// <summary>The tags the voting announcements are posted under (open per kind, one result tag).</summary>
+    private const string TermsVotingTag = "voting/terms";
+    private const string ElectionVotingTag = "voting/election";
+    private const string ProposalVotingTag = "voting/proposal";
+    private const string ChallengeVotingTag = "voting/challenge";
+    private const string VotingResultTag = "voting/result";
+
+    /// <summary>
+    /// The synthetic contributor identity the voting announcements are posted under. Not a wallet:
+    /// it exists only as a bucket-contributor row, satisfies no chain format (so it never receives
+    /// pushes), and no signature can ever be produced for it.
+    /// </summary>
+    private const string VotingSystemIdentity = "system:voting";
+
+    /// <summary>The content type of every voting announcement: the body is plaintext JSON.</summary>
+    private const string VotingContentType = "application/json";
+
+    /// <summary>
+    /// The key a voting webhook unlocks a still-locked legal bucket with: 32 zero bytes, an obvious
+    /// placeholder. Bucket content is not end-to-end-encrypted under it; a real key ceremony has to
+    /// be server-mediated anyway, because the bucket's only admin is the PropertyAsset PDA.
+    /// </summary>
+    private const string PlaceholderEncryptionKey =
+        "0x0000000000000000000000000000000000000000000000000000000000000000";
 
     /// <summary>The domain's bucket-name bound (InputValidator.MaxNameLen).</summary>
     private const int MaxBucketNameLen = 256;
@@ -870,6 +1434,304 @@ public sealed class SharesTransferredPayload
     public DateTime? BlockTime { get; set; }
 
     /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>
+/// The <c>spv_case_claimed</c> webhook payload the indexer POSTs verbatim (marketplace
+/// <c>claim_spv_case</c> — fires per candidacy, not just at round open). The election's
+/// expiry is resolved through the indexer GraphQL — the payload carries instruction evidence.
+/// </summary>
+public sealed class SpvCaseClaimedPayload
+{
+    /// <summary>Always <c>spv_case_claimed</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary>The on-chain listing id (the namespace's PropertyId).</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The election round the candidacy belongs to (1-based).</summary>
+    [JsonPropertyName("round")]
+    public int? Round { get; set; }
+
+    /// <summary>The lawyer's proposed costs for the case (provenance; not re-posted).</summary>
+    [JsonPropertyName("costs")]
+    public long? Costs { get; set; }
+
+    /// <summary>The base58 wallet of the claiming lawyer.</summary>
+    [JsonPropertyName("lawyer")]
+    public string? Lawyer { get; set; }
+
+    /// <summary>The base58 Listing PDA.</summary>
+    [JsonPropertyName("listing")]
+    public string? Listing { get; set; }
+
+    /// <summary>The base58 PropertyAsset PDA (the namespace's creator; the lookup fallback).</summary>
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    /// <summary>The base58 LawyerCandidacy PDA the claim created.</summary>
+    [JsonPropertyName("candidacy")]
+    public string? Candidacy { get; set; }
+
+    /// <summary>The slot the candidacy landed in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>
+/// The <c>agent_election_opened</c> webhook payload the indexer POSTs verbatim (the property
+/// program's <c>claim_property</c> — fires per candidacy, not just at round open).
+/// </summary>
+public sealed class AgentElectionOpenedPayload
+{
+    /// <summary>Always <c>agent_election_opened</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary>The property program's asset id — equals the marketplace listing id (the
+    /// namespace's PropertyId).</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The election round (1-based).</summary>
+    [JsonPropertyName("round")]
+    public int? Round { get; set; }
+
+    /// <summary>The base58 wallet of the agent this candidacy belongs to.</summary>
+    [JsonPropertyName("agent")]
+    public string? Agent { get; set; }
+
+    /// <summary>The base58 PropertyAsset PDA (the namespace's creator; the lookup fallback).</summary>
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    /// <summary>The base58 PropertyLetting PDA.</summary>
+    [JsonPropertyName("letting")]
+    public string? Letting { get; set; }
+
+    /// <summary>The base58 AgentCandidacy PDA the claim created.</summary>
+    [JsonPropertyName("candidacy")]
+    public string? Candidacy { get; set; }
+
+    /// <summary>The slot the candidacy landed in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>
+/// The <c>proposal_created</c> webhook payload the indexer POSTs verbatim (the property
+/// program's <c>propose</c> — including the auto-approval path, where no Proposal PDA survives).
+/// </summary>
+public sealed class ProposalCreatedPayload
+{
+    /// <summary>Always <c>proposal_created</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The on-chain proposal id.</summary>
+    [JsonPropertyName("proposal_id")]
+    public long? ProposalId { get; set; }
+
+    /// <summary>The spending amount under vote (provenance; the message does not re-post it).</summary>
+    [JsonPropertyName("amount")]
+    public long? Amount { get; set; }
+
+    /// <summary>The 32-byte hash of the proposal details, base58 (provenance).</summary>
+    [JsonPropertyName("details_hash")]
+    public string? DetailsHash { get; set; }
+
+    /// <summary>The base58 PropertyLetting PDA.</summary>
+    [JsonPropertyName("letting")]
+    public string? Letting { get; set; }
+
+    /// <summary>The base58 Proposal PDA — absent on-chain by the time the event delivers when
+    /// the chain auto-approved the spend.</summary>
+    [JsonPropertyName("proposal")]
+    public string? Proposal { get; set; }
+
+    /// <summary>The slot the proposal was created in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>
+/// The <c>proposal_finalized</c> webhook payload the indexer POSTs verbatim (a spending
+/// proposal closed — the payload names the CLOSED PDA whose frozen row has the outcome).
+/// </summary>
+public sealed class ProposalFinalizedPayload
+{
+    /// <summary>Always <c>proposal_finalized</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The base58 PropertyLetting PDA.</summary>
+    [JsonPropertyName("letting")]
+    public string? Letting { get; set; }
+
+    /// <summary>The base58 PropertyAsset PDA (the namespace's creator; the lookup fallback).</summary>
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    /// <summary>The base58 Proposal PDA that was finalized (and closed).</summary>
+    [JsonPropertyName("proposal")]
+    public string? Proposal { get; set; }
+
+    /// <summary>The slot the proposal finalized in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>
+/// The <c>challenge_created</c> webhook payload the indexer POSTs verbatim (a token holder
+/// challenging the letting agent).
+/// </summary>
+public sealed class ChallengeCreatedPayload
+{
+    /// <summary>Always <c>challenge_created</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The on-chain challenge id.</summary>
+    [JsonPropertyName("challenge_id")]
+    public long? ChallengeId { get; set; }
+
+    /// <summary>The base58 wallet of the challenger.</summary>
+    [JsonPropertyName("challenger")]
+    public string? Challenger { get; set; }
+
+    /// <summary>The base58 PropertyLetting PDA.</summary>
+    [JsonPropertyName("letting")]
+    public string? Letting { get; set; }
+
+    /// <summary>The base58 Challenge PDA the challenge created.</summary>
+    [JsonPropertyName("challenge")]
+    public string? Challenge { get; set; }
+
+    /// <summary>The slot the challenge was created in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+/// <summary>
+/// The <c>challenge_finalized</c> webhook payload the indexer POSTs verbatim (a challenge's
+/// vote closed — the payload names the CLOSED PDA whose frozen row has the outcome; the
+/// optional agent entry is provenance for the seat affected).
+/// </summary>
+public sealed class ChallengeFinalizedPayload
+{
+    /// <summary>Always <c>challenge_finalized</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The base58 PropertyLetting PDA.</summary>
+    [JsonPropertyName("letting")]
+    public string? Letting { get; set; }
+
+    /// <summary>The base58 PropertyAsset PDA (the namespace's creator; the lookup fallback).</summary>
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    /// <summary>The base58 Challenge PDA that was finalized (and closed).</summary>
+    [JsonPropertyName("challenge")]
+    public string? Challenge { get; set; }
+
+    /// <summary>The base58 LettingAgent ENTRY PDA of the seat holder at close — provenance,
+    /// not the wallet; null when the instruction omitted the optional account.</summary>
+    [JsonPropertyName("agent_entry")]
+    public string? AgentEntry { get; set; }
+
+    /// <summary>The slot the challenge finalized in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
     [JsonPropertyName("program")]
     public string? Program { get; set; }
 }

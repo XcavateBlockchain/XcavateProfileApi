@@ -105,6 +105,23 @@ public class PushNotificationTests
     }
 
     [Test]
+    public async Task A_voting_tagged_message_pushes_the_voting_type()
+    {
+        var bucket = await _fixture.SeedBucketAsync(
+            null, isWritable: true, admins: [TestDb.Carol], contributors: [TestDb.Bob]);
+        var message = new Message
+        {
+            BucketId = bucket.BucketId,
+            Contributor = TestDb.Bob,
+            Tag = "voting/terms"
+        };
+
+        await _notifier.MessageWrittenAsync(bucket, message, Ct);
+
+        Assert.That(Drain().Select(p => p.Type), Is.All.EqualTo(PushNotification.VotingType));
+    }
+
+    [Test]
     public async Task Member_added_pushes_name_the_granted_role()
     {
         var bucket = await _fixture.SeedBucketAsync(null);

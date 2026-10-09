@@ -13,4 +13,10 @@ public sealed record PushNotification(
 
     public const string MessageType = "bucket_message";
     public const string MemberAddedType = "member_added";
+
+    /// <summary>
+    /// The type for messages carrying a <c>voting/…</c> tag (the webhook-posted governance
+    /// announcements), so the mobile app deep-links to the property's vote rather than the chat.
+    /// </summary>
+    public const string VotingType = "voting";
 }

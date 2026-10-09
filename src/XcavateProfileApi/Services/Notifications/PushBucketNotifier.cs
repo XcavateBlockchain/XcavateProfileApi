@@ -50,10 +50,13 @@ public class PushBucketNotifier(
             var sender = await SenderLabelAsync(message.Contributor, ct);
             var title = Truncate(BucketLabel(bucket), MaxTitleLength);
             var body = Truncate($"New message from {sender}", MaxBodyLength);
+            var type = message.Tag?.StartsWith("voting/", StringComparison.Ordinal) == true
+                ? PushNotification.VotingType
+                : PushNotification.MessageType;
 
             foreach (var recipient in recipients)
             {
-                EnqueueTo(recipient, title, body, PushNotification.MessageType, bucket.BucketId);
+                EnqueueTo(recipient, title, body, type, bucket.BucketId);
             }
         }
         catch (Exception ex)

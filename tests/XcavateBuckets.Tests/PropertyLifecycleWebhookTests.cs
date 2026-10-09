@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using XcavateBuckets.Domain.Entities;
 using XcavateProfile.Client;
+using XcavateProfileApi.Services.Indexer;
 
 namespace XcavateBuckets.Tests;
 
@@ -266,10 +267,12 @@ public class PropertyLifecycleWebhookTests
     // ---- The placeholders: accepted, unresolved, retry-safe --------------------------------
 
     [Test]
-    public async Task Lawyer_elected_is_accepted_as_a_placeholder_once_the_bucket_exists()
+    public async Task Lawyer_elected_posts_the_result_message_once_the_bucket_exists()
     {
         await using var host = await WebhooksHost.StartAsync();
         var bucketId = await SeedLegalBucketAsync(host);
+        // The indexer's listing row shows the seat filled: the result is "ratified".
+        host.Indexer.SpvElection = new SpvElectionInfo(1, 1_790_000_000, 1, "LawyerWallet111");
 
         var json = new JsonObject
         {
@@ -289,8 +292,7 @@ public class PropertyLifecycleWebhookTests
         Assert.Multiple(() =>
         {
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("accepted"));
-            Assert.That(body.GetProperty("acted").GetBoolean(), Is.False);
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("posted"));
             Assert.That(body.GetProperty("bucketId").GetInt64(), Is.EqualTo(bucketId));
         });
     }
@@ -550,6 +552,9 @@ public class PropertyLifecycleWebhookTests
             ["from"] = "SellerWallet111",
             ["to"] = "BuyerWallet111"
         }.ToJsonString();
+
+        // With a resolvable election row the namespace lookup is what fails.
+        host.Indexer.SpvElection = new SpvElectionInfo(1, 1_790_000_000, 1, "LawyerWallet111");
 
         var (electedStatus, _) = await PostAsync(host.Client, "/webhooks/spv_lawyer_elected_devnet", elected);
         var (transferredStatus, _) = await PostAsync(host.Client, "/webhooks/shares_transferred_devnet", transferred);

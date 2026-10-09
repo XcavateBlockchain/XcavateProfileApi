@@ -10,6 +10,7 @@ using XcavateBuckets.Domain.Entities;
 using XcavateProfileApi.Controllers;
 using XcavateProfileApi.Data;
 using XcavateProfileApi.GraphQL;
+using XcavateProfileApi.Services.Indexer;
 
 namespace XcavateBuckets.Tests;
 
@@ -27,16 +28,27 @@ public sealed class WebhooksHost : IAsyncDisposable
     private readonly SqliteConnection _profileConnection;
 
     private WebhooksHost(
-        IHost host, SqliteConnection connection, SqliteConnection profileConnection, HttpClient client)
+        IHost host,
+        SqliteConnection connection,
+        SqliteConnection profileConnection,
+        HttpClient client,
+        TestIndexerClient indexer)
     {
         _host = host;
         _connection = connection;
         _profileConnection = profileConnection;
         Client = client;
+        Indexer = indexer;
     }
 
     /// <summary>A raw client — the webhook needs no credentials.</summary>
     public HttpClient Client { get; }
+
+    /// <summary>
+    /// The stub GraphQL client behind the voting webhooks' state resolution: set its properties to
+    /// script what "the indexer says" before posting a webhook.
+    /// </summary>
+    public TestIndexerClient Indexer { get; }
 
     public static async Task<WebhooksHost> StartAsync()
     {
@@ -46,6 +58,8 @@ public sealed class WebhooksHost : IAsyncDisposable
         // wallet -> viewer-key resolution reads it).
         var profileConnection = new SqliteConnection("DataSource=:memory:");
         profileConnection.Open();
+
+        var indexer = new TestIndexerClient();
 
         var builder = Host.CreateDefaultBuilder();
         builder.ConfigureWebHost(web =>
@@ -61,6 +75,10 @@ public sealed class WebhooksHost : IAsyncDisposable
 
                 services.AddDbContext<BucketDbContext>(o => o.UseSqlite(connection));
                 services.AddDbContext<ProfileDbContext>(o => o.UseSqlite(profileConnection));
+
+                // The voting webhooks resolve vote state through this stub instead of the live
+                // indexer GraphQL.
+                services.AddSingleton<IIndexerClient>(indexer);
 
                 // The domain wiring shared with the application host: BucketDbContext is the only
                 // thing AddBucketDomain expects the caller to supply (see its remarks).
@@ -83,7 +101,7 @@ public sealed class WebhooksHost : IAsyncDisposable
                 .Database.EnsureCreatedAsync();
         }
 
-        return new WebhooksHost(host, connection, profileConnection, host.GetTestClient());
+        return new WebhooksHost(host, connection, profileConnection, host.GetTestClient(), indexer);
     }
 
     /// <summary>Every namespace straight out of the database, bypassing the API.</summary>

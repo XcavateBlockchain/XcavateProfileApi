@@ -20,6 +20,12 @@ backoff; a non-2xx answer means "retry forever" (30 s doubling, 1 h cap).
 | `deal_executed` | `execute_deal` | `DEAL_EXECUTED_WEBHOOK_URL` | `POST /webhooks/deal_executed_devnet` | **implemented** (removes lawyers) |
 | `letting_agent_appointed` | property `finalize_agent_election` | `LETTING_AGENT_APPOINTED_WEBHOOK_URL` | `POST /webhooks/letting_agent_appointed_devnet` | **placeholder** (#4) |
 | `property_shares_transferred` | `buy_relisted_shares` / `accept_offer` / `send_property_shares` | `SHARES_TRANSFERRED_WEBHOOK_URL` | `POST /webhooks/shares_transferred_devnet` | **implemented** (viewer swap via profile X25519 keys — see #5) |
+| `spv_case_claimed` | marketplace `claim_spv_case` | `SPV_CASE_CLAIMED_WEBHOOK_URL` | `POST /webhooks/spv_case_claimed_devnet` | **implemented** (posts a `voting/terms` message — see #9) |
+| `agent_election_opened` | property program opens a letting-agent election | *(indexer env var)* | `POST /webhooks/agent_election_opened_devnet` | **implemented** (posts a `voting/election` message — see #9) |
+| `proposal_created` | property program creates an agent spending proposal | *(indexer env var)* | `POST /webhooks/proposal_created_devnet` | **implemented** (posts a `voting/proposal` message — see #9) |
+| `proposal_finalized` | property program finalizes a spending proposal | *(indexer env var)* | `POST /webhooks/proposal_finalized_devnet` | **implemented** (posts a `voting/result` message — see #9) |
+| `challenge_created` | property program creates an agent challenge | *(indexer env var)* | `POST /webhooks/challenge_created_devnet` | **implemented** (posts a `voting/challenge` message — see #9) |
+| `challenge_finalized` | property program finalizes a challenge | *(indexer env var)* | `POST /webhooks/challenge_finalized_devnet` | **implemented** (posts a `voting/result` message — see #9) |
 
 Conventions the endpoints rely on: the property's namespace is found by `PropertyId == listing_id`
 (falling back to `Creator == <PropertyAsset PDA>`), and its legal-process bucket by
@@ -117,3 +123,88 @@ indexer's `docker-compose.yml` / `deploy.yml` (already added on the indexer bran
 the matching GitHub secrets (`PROPERTY_CLAIM_STARTED_WEBHOOK_URL`, `SPV_LAWYER_ELECTED_WEBHOOK_URL`,
 `DEAL_EXECUTED_WEBHOOK_URL`, `LETTING_AGENT_APPOINTED_WEBHOOK_URL`, `SHARES_TRANSFERRED_WEBHOOK_URL`).
 Unset = that event type accumulates undelivered in `webhook_events` and drains when configured.
+The voting endpoints (#9) take the same treatment: the indexer routes
+`SPV_CASE_CLAIMED_WEBHOOK_URL` (new, ADR-37) plus the existing
+`SPV_LAWYER_ELECTED_WEBHOOK_URL`, `AGENT_ELECTION_OPENED_WEBHOOK_URL`,
+`PROPOSAL_CREATED_WEBHOOK_URL`, `PROPOSAL_FINALIZED_WEBHOOK_URL`,
+`CHALLENGE_CREATED_WEBHOOK_URL`, `CHALLENGE_FINALIZED_WEBHOOK_URL` to these `*_devnet`
+paths, and this service needs `INDEXER_GRAPHQL_URL` pointing at the indexer's GraphQL for
+the resolution reads.
+
+## 9. Voting webhooks — IMPLEMENTED, with the design decisions recorded here
+
+Six governance events are announced as plaintext JSON messages in the property's
+legal-process bucket, so the messenger SPA and the mobile app can render vote state from
+the bucket they already read, without an indexer round-trip: `spv_case_claimed` +
+`spv_lawyer_elected` on the marketplace (the SPV lawyer election — the flow the apps
+surface as the "terms" vote; it uses only instructions the deployed program already has —
+an earlier terms-ratification instruction design was deliberately NOT shipped on-chain),
+and `agent_election_opened`, `proposal_created`/`proposal_finalized`,
+`challenge_created`/`challenge_finalized` on the property program. Decisions baked into the implementation (`VotingWebhookTests` pins them):
+
+- **System identity.** Messages are posted under the synthetic contributor `system:voting` — not
+  a wallet, no signature can exist for it, and it matches no chain format so it never receives
+  pushes. Each handler (re-)installs it idempotently, which is also the answer to the
+  `deal_executed` sweep (#6): settlement evicts it along with every other contributor, and the
+  next post-settlement voting webhook simply re-adds it.
+- **Locked bucket.** Webhook-created legal buckets start `IsWritable=false`, and their only admin
+  is the PropertyAsset PDA — an address no wallet can sign for — so unlocking can only ever
+  happen server-side. The domain has no "write while locked" bypass, and unlocking grants nothing
+  the lifecycle does not already intend (contributors are meant to write; viewers stay read-only
+  either way), so each handler calls `ResumeWritingAsync` as the namespace creator before its
+  first post. The encryption key it sets is **32 zero bytes, an explicit placeholder**: bucket
+  content is not end-to-end-encrypted under it. Voting announcements are plaintext by design
+  (the server holds no bucket X25519 key); if the legal-document flow later wants real E2E, the
+  key ceremony must itself be server-mediated (a future webhook rotating the key as the PDA
+  admin) — see #2/#3.
+- **Tags need no pre-creation.** `MessageService.WriteAsync` registers an unknown tag on the fly
+  (recording the writer as its creator), so the `voting/terms`, `voting/election`,
+  `voting/proposal`, `voting/challenge` and `voting/result` tags appear with the first message.
+- **Idempotency.** Each handler builds its body deterministically (same event → same bytes) and
+  skips the post when a message with the same tag and identical body already exists. A redelivery
+  duplicates nothing; a genuinely new event (new round, new proposal/challenge id) produces a
+  different body and posts. The guard is exact-match on `(bucket, tag, body)` — cheap, and it
+  also means a late redelivered *open* after the *final* does not re-announce anything (different
+  tag and body from the result message, but identical to the already-posted open).
+- **Payloads are instruction evidence; bodies are resolved.** The indexer's mapper is pure (no
+  DB), so a webhook payload carries only ids, PDAs and instruction args. The display facts —
+  round/expiry/quorum for opens, tallies + passed/failed for finals — are resolved HERE from the
+  indexer's GraphQL (`Services/Indexer/IndexerClient.cs`, env var `INDEXER_GRAPHQL_URL`, first
+  outbound indexer client in this service). Consistency is free: the event row and the account
+  rows commit in one indexer transaction. A resolution failure (indexer down, or the row
+  missing) answers **502 so delivery retries**; `VotingWebhookTests` pins that too. This also
+  resolves the older notes above that wanted an outbound indexer client for wallet resolution —
+  the mechanism now exists and those endpoints can adopt it when they leave placeholder status.
+- **Auto-approved proposals are skipped, not announced.** The property program's `propose` fires
+  the webhook on the low-tier path too, but that path closes the just-created Proposal inside the
+  same transaction, so no vote ever opens. `proposal_created` with no live row answers 200
+  "ignored" rather than advertising a phantom vote.
+- **`agent_election_opened` fires per CANDIDACY**, not just at round open (the mapper cannot
+  distinguish); the deterministic body (property + round only) makes later candidacies of the
+  same round duplicate-guarded, so one round still produces exactly one announcement.
+- **Body shape is exactly contract B** (the cross-repo agreement): open messages carry `kind`,
+  `listingId`, `id?`/`round?`, `documentsHash?` (terms only), `expiresAt`, `quorumBps?`,
+  `thresholdBps?` (proposals only) and `status: "open"`; result messages carry `kind`,
+  `listingId`, `id?`/`round?`, `status` (`ratified`/`rejected` for terms, `passed`/`failed` for
+  proposals and challenges) and `yes`/`no` (/`abstain`). The outcome is derived here from the
+  frozen tallies with the chain's own rule (`IndexerClient.VotePassed`: turnout strictly over
+  quorum × supply, yes strictly over no, plus the high-tier threshold for proposals). Nothing
+  else — the proposal `amount`/`details_hash` and the challenge `agent_removed` stay readable
+  through the indexer GraphQL (`proposals`/`challenges`/`propertyLettings` queries).
+- **`expiresAt` is ISO-8601** (the messenger voting schema requires a `Date.parse`-able string);
+  it is converted server-side from the on-chain unix `i64`. The webhook payloads themselves keep
+  whatever the indexer sent.
+- **`documents_hash` / `details_hash` are passed through verbatim** as strings; this API never
+  interprets their encoding (the indexer emits them base58-encoded).
+- **Content integrity without encryption:** `ContentHash` is the sha256 of the exact stored body
+  bytes (`0x`-prefixed uppercase hex), `ContentType` is `application/json`, and `Reference` is a
+  stable synthetic path (e.g. `voting/terms/12/round/1/open`) since there is no IPFS CID.
+- **`property_id` on property-program events is assumed to equal the marketplace listing id**
+  (the same assumption as #4a); the namespace lookup still falls back to the PropertyAsset PDA,
+  and when both a payload id and a namespace id exist the payload's own value is what the body
+  echoes. Verify on devnet and tighten.
+- **Push type:** messages tagged `voting/…` fan out with push type `voting` (next to
+  `bucket_message` / `member_added`) so the mobile app can deep-link to the vote. Note the legal
+  bucket's membership after settlement is just the operator PDA plus the system identity, so
+  election/proposal/challenge pushes currently reach no human wallet — holder push fan-out needs
+  the holder-enumeration work in #3 like everything else.

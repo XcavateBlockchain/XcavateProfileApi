@@ -9,6 +9,7 @@ using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Services;
+using XcavateProfileApi.Services.Indexer;
 using XcavateProfileApi.Services.Notifications;
 using XcavateProfileApi.SocketIo;
 using XcavateProfileApi.Swagger;
@@ -84,6 +85,20 @@ if (!string.IsNullOrWhiteSpace(notificationsApiKey))
     builder.Services.AddHostedService<NotificationDispatcher>();
     builder.Services.AddScoped<PushBucketNotifier>();
 }
+
+// Indexer GraphQL read client: the governance voting webhooks resolve their display facts
+// (rounds, expiries, tallies, outcomes) from the indexer's mirror — see WebhooksController's
+// voting group remark. Read-only and unauthenticated, like the indexer's public API.
+var indexerGraphqlUrl = builder.Configuration["INDEXER_GRAPHQL_URL"];
+builder.Services.AddSingleton(new IndexerOptions
+{
+    BaseUrl = string.IsNullOrWhiteSpace(indexerGraphqlUrl)
+        ? IndexerOptions.DefaultBaseUrl
+        : indexerGraphqlUrl
+});
+builder.Services.AddHttpClient(IndexerClient.HttpClientName,
+    http => http.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton<IIndexerClient, IndexerClient>();
 
 // Realtime bucket messages: a Socket.IO-compatible websocket endpoint at /socket.io/. Always on —
 // it needs no external backend. See docs/superpowers/specs/2026-08-24-socketio-bucket-messages-design.md.

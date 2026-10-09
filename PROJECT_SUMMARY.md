@@ -31,6 +31,11 @@ XcavateProfile/
 │   │   │   ├── ProfilesController.cs
 │   │   │   ├── CompaniesController.cs
 │   │   │   ├── MigrationsController.cs
+│   │   │   ├── MarketplaceController.cs # server-side rent-collector signing for marketplace txs
+│   │   │   ├── WebhooksController.cs    # indexer webhooks: property namespace & buckets
+│   │   │   │                            # lifecycle (asset/claim/lawyer/deal/agent/transfer),
+│   │   │   │                            # plus governance voting announcements posted into the
+│   │   │   │                            # legal bucket (terms/election/proposal/challenge)
 │   │   │   ├── FieldValidation.cs      # wallet/email/length checks both controllers share
 │   │   │   └── ImageUploads.cs         # the extension allow-list both upload endpoints share
 │   │   ├── Data/                       # ProfileDbContext, ModelBuilderExtensions, JsonColumn
