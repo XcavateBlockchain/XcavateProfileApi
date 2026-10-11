@@ -78,6 +78,14 @@ public interface IIndexerClient
     /// reconciliation covers them.
     /// </summary>
     Task<IReadOnlyList<string>> GetCurrentHolderWalletsAsync(long listingId, CancellationToken ct);
+
+    /// <summary>
+    /// The wallet behind a letting-agent ENTRY PDA (a property-program <c>LettingAgent</c>
+    /// account, seeded <c>["agent", wallet]</c>), or null when the indexer has no such row. The
+    /// GraphQL <c>lettingAgents</c> connection filters by wallet or region only — never by entry
+    /// PDA — so the lookup pages the registry and matches the node's <c>id</c> client-side.
+    /// </summary>
+    Task<string?> GetLettingAgentWalletAsync(string entryPda, CancellationToken ct);
 }
 
 /// <summary>
@@ -287,6 +295,45 @@ public class IndexerClient(
 
         return wallets.ToList();
     }
+
+    public async Task<string?> GetLettingAgentWalletAsync(string entryPda, CancellationToken ct)
+    {
+        // No server-side filter on the entry PDA exists (the resolver's wallet/region args
+        // filter other columns), so page the registry and match the id client-side; a closed
+        // entry still answers, so a late redelivery of an appointment resolves the same wallet.
+        for (var page = 0; page < MaxRegistryPages; page++)
+        {
+            var nodes = await QueryAsync(
+                """
+                query($first: Int!, $offset: Int!) {
+                  lettingAgents(first: $first, offset: $offset) {
+                    nodes { id wallet }
+                  }
+                }
+                """,
+                new { first = RegistryPageSize, offset = page * RegistryPageSize },
+                "lettingAgents",
+                ct);
+
+            var node = FindNode(nodes, n => n.GetProperty("id").GetString() == entryPda);
+            if (node is not null)
+            {
+                return node.Value.GetProperty("wallet").GetString();
+            }
+
+            if (nodes is not { ValueKind: JsonValueKind.Array } arr || arr.GetArrayLength() < RegistryPageSize)
+            {
+                return null; // a short page is the last page: no such entry
+            }
+        }
+
+        return null;
+    }
+
+    private const int RegistryPageSize = 500;
+
+    /// <summary>A bound on the registry paging loop (20k entries), not a limit anyone should reach.</summary>
+    private const int MaxRegistryPages = 40;
 
     /// <summary>One paged holder-enumeration query, folding qualifying wallets into the set.</summary>
     private async Task PageHoldersAsync(

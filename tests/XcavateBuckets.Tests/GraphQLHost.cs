@@ -13,6 +13,7 @@ using Substrate.NetApi.Model.Types;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Services;
 using XcavateProfile.Client;
+using XcavateProfileApi.Data;
 using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
@@ -31,11 +32,14 @@ public sealed class GraphQLHost : IAsyncDisposable
 {
     private readonly IHost _host;
     private readonly SqliteConnection _connection;
+    private readonly SqliteConnection _profileConnection;
 
-    private GraphQLHost(IHost host, SqliteConnection connection, HttpClient client)
+    private GraphQLHost(
+        IHost host, SqliteConnection connection, SqliteConnection profileConnection, HttpClient client)
     {
         _host = host;
         _connection = connection;
+        _profileConnection = profileConnection;
         Client = client;
     }
 
@@ -75,6 +79,10 @@ public sealed class GraphQLHost : IAsyncDisposable
     {
         var connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
+        // The profile store is a second context on its own in-memory database: the offer-bucket
+        // mutations resolve wallets to viewer X25519 keys through it.
+        var profileConnection = new SqliteConnection("DataSource=:memory:");
+        profileConnection.Open();
 
         var builder = Host.CreateDefaultBuilder();
         builder.ConfigureWebHost(web =>
@@ -84,6 +92,7 @@ public sealed class GraphQLHost : IAsyncDisposable
             {
                 services.AddRouting();
                 services.AddDbContext<BucketDbContext>(o => o.UseSqlite(connection));
+                services.AddDbContext<ProfileDbContext>(o => o.UseSqlite(profileConnection));
 
                 // The same signature validator the REST controllers use.
                 services.AddSingleton(adminAddresses.ToList());
@@ -119,9 +128,29 @@ public sealed class GraphQLHost : IAsyncDisposable
         {
             await scope.ServiceProvider.GetRequiredService<BucketDbContext>()
                 .Database.EnsureCreatedAsync();
+            await scope.ServiceProvider.GetRequiredService<ProfileDbContext>()
+                .Database.EnsureCreatedAsync();
         }
 
-        return new GraphQLHost(host, connection, host.GetTestClient());
+        return new GraphQLHost(host, connection, profileConnection, host.GetTestClient());
+    }
+
+    /// <summary>Runs a callback against a fresh BucketDbContext scope — seeding and row assertions.</summary>
+    public async Task<T> WithDbAsync<T>(Func<BucketDbContext, Task<T>> action)
+    {
+        using var scope = _host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<BucketDbContext>();
+
+        return await action(context);
+    }
+
+    /// <summary>Runs a callback against a fresh ProfileDbContext scope — seeding wallets' X25519 keys.</summary>
+    public async Task<T> WithProfileDbAsync<T>(Func<ProfileDbContext, Task<T>> action)
+    {
+        using var scope = _host.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<ProfileDbContext>();
+
+        return await action(context);
     }
 
     /// <summary>Runs a query with no credentials.</summary>
@@ -180,6 +209,7 @@ public sealed class GraphQLHost : IAsyncDisposable
         await _host.StopAsync();
         _host.Dispose();
         await _connection.DisposeAsync();
+        await _profileConnection.DisposeAsync();
     }
 }
 

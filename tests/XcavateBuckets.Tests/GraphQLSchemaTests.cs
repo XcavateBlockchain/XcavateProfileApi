@@ -6,6 +6,7 @@ using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Services;
 using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.GraphQL.Auth;
+using XcavateProfileApi.Services;
 
 namespace XcavateBuckets.Tests;
 
@@ -30,6 +31,7 @@ public class GraphQLSchemaTests
         services.AddScoped<MembershipService>();
         services.AddScoped<TagService>();
         services.AddScoped<MessageService>();
+        services.AddScoped<ViewerKeyResolver>();
         services.AddScoped<IBucketNotifier, NullBucketNotifier>();
         services.AddScoped<CallerContext>();
         services.AddScoped<ICallerContext>(sp => sp.GetRequiredService<CallerContext>());

@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Services;
 using XcavateProfileApi.GraphQL.Auth;
+using XcavateProfileApi.Services;
 
 namespace XcavateProfileApi.GraphQL;
 
@@ -15,7 +16,9 @@ public static class BucketRegistration
     /// <summary>
     /// Registers the domain services and per-request caller context. The caller registers
     /// <see cref="XcavateBuckets.Domain.Data.BucketDbContext"/> separately, because the host uses
-    /// PostgreSQL and tests use SQLite.
+    /// PostgreSQL and tests use SQLite; it must also register
+    /// <see cref="XcavateProfileApi.Data.ProfileDbContext"/>, which
+    /// <see cref="ViewerKeyResolver"/> reads.
     /// </summary>
     public static IServiceCollection AddBucketDomain(this IServiceCollection services)
     {
@@ -28,6 +31,7 @@ public static class BucketRegistration
         services.AddScoped<MembershipService>();
         services.AddScoped<TagService>();
         services.AddScoped<MessageService>();
+        services.AddScoped<ViewerKeyResolver>();
 
         services.AddScoped<CallerContext>();
         services.AddScoped<ICallerContext>(sp => sp.GetRequiredService<CallerContext>());

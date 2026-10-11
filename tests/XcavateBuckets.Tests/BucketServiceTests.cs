@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Entities;
+using XcavateBuckets.Domain.Services;
 
 namespace XcavateBuckets.Tests;
 
@@ -45,6 +46,37 @@ public class BucketServiceTests
             TestDb.Bob, ns.NamespaceId, "deeds", "legal", null, Ct))!;
 
         Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.NotManager));
+    }
+
+    [Test]
+    public async Task CreateAsync_allows_a_non_manager_in_an_offers_namespace()
+    {
+        var ns = await _fixture.SeedNamespaceAsync(TestDb.Alice);
+        ns.Category = BucketService.OffersNamespaceCategory;
+        await _fixture.Db.SaveChangesAsync();
+
+        var bucket = await _fixture.Buckets.CreateAsync(
+            TestDb.Bob, ns.NamespaceId, "Offer: Villa Sol #7", "realXmarket", null, Ct);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(bucket.Creator, Is.EqualTo(TestDb.Bob));
+            Assert.That(bucket.IsWritable, Is.False, "Status::default() is Locked");
+        });
+    }
+
+    [Test]
+    public async Task CreateAsync_still_rejects_a_non_manager_in_any_other_namespace_category()
+    {
+        var ns = await _fixture.SeedNamespaceAsync(TestDb.Alice);
+        ns.Category = "property";
+        await _fixture.Db.SaveChangesAsync();
+
+        var ex = Assert.ThrowsAsync<BucketException>(() => _fixture.Buckets.CreateAsync(
+            TestDb.Bob, ns.NamespaceId, "deeds", "legal", null, Ct))!;
+
+        Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.NotManager),
+            "the open-create relaxation is scoped to the offers category only");
     }
 
     [Test]

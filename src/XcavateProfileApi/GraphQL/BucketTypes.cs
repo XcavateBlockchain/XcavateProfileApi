@@ -9,6 +9,13 @@ using Tag = XcavateBuckets.Domain.Entities.Tag;
 namespace XcavateProfileApi.GraphQL;
 
 /// <summary>
+/// The result of the composed <c>setupOfferBucket</c> mutation: the offers namespace (found or
+/// created for the asset and cluster), the new offer bucket, and the message id of the offer
+/// message — the second of the two messages the bucket opens with.
+/// </summary>
+public sealed record SetupOfferBucketPayload(long NamespaceId, long BucketId, long OfferMessageId);
+
+/// <summary>
 /// Composite entity ids, matching the strings the SubQuery indexer used so existing consumers keep
 /// working. Bucket and namespace ids are a bare number because they are globally unique; the pair
 /// tables need both halves.

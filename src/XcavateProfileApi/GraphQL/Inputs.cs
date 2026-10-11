@@ -30,6 +30,36 @@ public sealed record MessageInput(
     string? IpfsContent,
     MessageMetadataInput Metadata);
 
+/// <summary>
+/// Find-or-create input for a property's realXmarket offers namespace. <see cref="Name"/> is the
+/// property name; the mutation appends " offers" when it is not already suffixed. The namespace is
+/// keyed for reuse by <see cref="AssetId"/> (a u64 decimal string, stored in its properties map)
+/// and <see cref="Cluster"/>.
+/// </summary>
+public sealed record CreateOffersNamespaceInput(
+    string Name,
+    string AssetId,
+    string Cluster);
+
+/// <summary>
+/// One-call setup of an offer bucket in the property's offers namespace: namespace find-or-create,
+/// bucket creation, buyer/seller membership, bucket unlock and the opening key-sharing and offer
+/// messages. The caller signs as the buyer. <see cref="BucketEncryptionKey"/> is the bucket's
+/// X25519 public key (32-byte hex); <see cref="BuyerViewerKey"/> and <see cref="SellerViewerKey"/>
+/// override the parties' viewer X25519 keys, which otherwise resolve from their profiles.
+/// </summary>
+public sealed record SetupOfferBucketInput(
+    string PropertyName,
+    string AssetId,
+    string ShareListingId,
+    string Cluster,
+    string Seller,
+    string BucketEncryptionKey,
+    string? BuyerViewerKey,
+    string? SellerViewerKey,
+    MessageInput KeySharingMessage,
+    MessageInput OfferMessage);
+
 internal static class PropertyInputExtensions
 {
     /// <summary>

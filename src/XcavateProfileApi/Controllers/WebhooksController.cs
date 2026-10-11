@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
@@ -9,6 +10,7 @@ using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateBuckets.Domain.Services;
 using XcavateProfileApi.Data;
+using XcavateProfileApi.Services;
 using XcavateProfileApi.Services.Indexer;
 
 namespace XcavateProfileApi.Controllers;
@@ -22,9 +24,8 @@ namespace XcavateProfileApi.Controllers;
 ///
 /// The set implements the "Property namespace &amp; buckets" lifecycle: the asset webhook creates
 /// the property's namespace, the claim-started webhook creates its legal-process bucket, the
-/// lawyer-election / agent-appointment / transfer webhooks manage its membership (partly
-/// placeholder — see docs/property-webhooks-uncertainties.md), and the deal-executed webhook
-/// removes the lawyers when the sale settles.
+/// lawyer-election / agent-appointment / transfer webhooks manage its membership, and the
+/// deal-executed webhook removes the lawyers when the sale settles.
 ///
 /// A second group — the voting webhooks — announces on-chain governance votes as messages in the
 /// property's legal-process bucket, so the messenger clients can render vote state without an
@@ -38,7 +39,7 @@ namespace XcavateProfileApi.Controllers;
 public class WebhooksController : ControllerBase
 {
     private readonly BucketDbContext _db;
-    private readonly ProfileDbContext _profiles;
+    private readonly ViewerKeyResolver _viewerKeys;
     private readonly NamespaceService _namespaces;
     private readonly BucketService _buckets;
     private readonly MembershipService _memberships;
@@ -47,7 +48,7 @@ public class WebhooksController : ControllerBase
 
     public WebhooksController(
         BucketDbContext db,
-        ProfileDbContext profiles,
+        ViewerKeyResolver viewerKeys,
         NamespaceService namespaces,
         BucketService buckets,
         MembershipService memberships,
@@ -55,7 +56,7 @@ public class WebhooksController : ControllerBase
         IIndexerClient indexer)
     {
         _db = db;
-        _profiles = profiles;
+        _viewerKeys = viewerKeys;
         _namespaces = namespaces;
         _buckets = buckets;
         _memberships = memberships;
@@ -143,15 +144,16 @@ public class WebhooksController : ControllerBase
     //
     //   property_claim_started       -> create the property's legal-process bucket (implemented;
     //                                   also reconciles the current holder set into its viewers)
-    //   spv_lawyer_elected           -> lawyer write + holder read access (PLACEHOLDER, see below)
+    //   spv_lawyer_elected           -> lawyer write + holder read access (implemented: the vote
+    //                                   result message, then the membership grants)
     //   deal_executed                -> remove the lawyers from the bucket (implemented)
-    //   letting_agent_appointed      -> add the letting agent (write) (PLACEHOLDER)
+    //   letting_agent_appointed      -> add the letting agent (write) (implemented)
     //   property_shares_transferred  -> swap seller -> buyer read access (implemented: wallets
     //                                   resolve to viewer X25519 keys through the profiles)
     //   property_holder_changed      -> primary-market holder joins/leaves (implemented; sale-phase
     //                                   events defer to the claim-started reconciliation)
     //
-    // The placeholders and exactly what they are waiting for are documented in
+    // The design decisions behind them are recorded in
     // docs/property-webhooks-uncertainties.md. Like the asset webhook, every endpoint is
     // idempotent and answers 2xx whether it acted or deliberately ignored a redelivery. The one
     // new status is 404: the event's namespace or bucket is not there YET (deliveries are
@@ -281,11 +283,25 @@ public class WebhooksController : ControllerBase
     /// a <c>voting/result</c> message: "ratified" when the listing's row shows an assigned SPV
     /// lawyer, "rejected" when the round failed open (the seat stays empty and a new round may
     /// open). The payload's <c>winner_registry</c> is the winner's on-chain Lawyer REGISTRY PDA,
-    /// not their wallet — the assignment is resolved from the indexer's listing row instead.
-    /// MEMBERSHIP PLACEHOLDER: the lawyer's write access and the token holders' read access still
-    /// wait on wallet resolution and X25519 viewer keys — see
-    /// docs/property-webhooks-uncertainties.md entries 2 and 3.
+    /// not their wallet — the wallet is the listing row's <c>spvLawyer</c>, which the chain's
+    /// <c>finalize_spv_election</c> sets to the winning candidacy's wallet, and the indexer
+    /// commits the event and the listing row in one transaction, so the announcement and the
+    /// grant below never disagree.
     /// </summary>
+    /// <remarks>
+    /// When the election ratified, the handler additionally grants access on the property's legal
+    /// bucket, atomically in one transaction: the winning lawyer becomes a contributor (WRITE)
+    /// and the current token holders are re-synced as viewers (READ) — the same reconciliation
+    /// the claim-started webhook runs at bucket creation, so a holder who registered their X25519
+    /// key only after their last holder event is picked up here (wallets without a key are
+    /// skipped and counted, never retried). Idempotent: the message duplicate-guard plus the
+    /// membership services' return-existing semantics make a redelivery a harmless re-run, and
+    /// the counters report what THIS delivery changed. A resolution failure (indexer down, the
+    /// listing row missing, or the holder enumeration failing) answers 502 so the indexer
+    /// retries — a failure mid-grant rolls the transaction back, and the redelivery completes it
+    /// with the already-committed message skipped by the guard. 404 while the namespace or bucket
+    /// is missing; 400 when the body is not a valid <c>spv_lawyer_elected</c> event.
+    /// </remarks>
     // POST: webhooks/spv_lawyer_elected_devnet
     [HttpPost("spv_lawyer_elected_devnet")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -309,10 +325,9 @@ public class WebhooksController : ControllerBase
             return resolve.Failure!;
         }
         var election = resolve.Value!;
-        var status = election.SpvLawyer is { Length: > 0 } lawyer
-                   && lawyer != SystemDefaultPubkey
-                ? "ratified"
-                : "rejected";
+        var ratified = election.SpvLawyer is { Length: > 0 } lawyer
+                    && lawyer != SystemDefaultPubkey;
+        var status = ratified ? "ratified" : "rejected";
 
         var result = await PostVotingMessageAsync(
             payload.ListingId, payload.Property,
@@ -328,12 +343,79 @@ public class WebhooksController : ControllerBase
             },
             ct);
 
-        // TODO(uncertainties #2/#3): resolve WinnerRegistry -> the lawyer's wallet via the indexer
-        // GraphQL `marketplaceListing(...).spvLawyer`, then
-        //   await _memberships.AddContributorAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, lawyerWallet, ct);
-        // and add each current token holder as a viewer once the wallet -> X25519 viewer-key
-        // mapping exists. Until then only the vote announcement above is acted on.
-        return result;
+        // A rejected round grants no access, and a non-Ok answer (the 404 retry paths) means the
+        // bucket is not there to grant on — either way there is no membership work to do.
+        if (!ratified || result is not OkObjectResult)
+        {
+            return WithMembershipCounts(result, lawyerContributorAdded: false, 0, 0);
+        }
+
+        // The Ok answer implies the namespace and legal bucket both exist (the post 404s
+        // otherwise); re-fetch them as the grant's subjects.
+        var ns = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        {
+            return WithMembershipCounts(result, lawyerContributorAdded: false, 0, 0);
+        }
+
+        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
+        if (bucket is null)
+        {
+            return WithMembershipCounts(result, lawyerContributorAdded: false, 0, 0);
+        }
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        // A bucket created before the claim webhook existed may lack the operator admin row the
+        // membership caller checks need; adding it is idempotent.
+        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
+
+        // The lawyer gets WRITE. The add itself is idempotent (the service returns the existing
+        // row), so the "added" flag is computed beforehand: a redelivery reports the grant as
+        // already in place instead of double-counting it.
+        var lawyerContributorAdded = !await _db.BucketContributors
+            .AnyAsync(c => c.BucketId == bucket.BucketId && c.SubjectId == election.SpvLawyer, ct);
+        await _memberships.AddContributorAsync(
+            ns.Creator, ns.NamespaceId, bucket.BucketId, election.SpvLawyer, ct);
+
+        // The holders get READ, re-synced from the indexer's CURRENT holder set — the
+        // claim-started reconciliation block, with the same semantics: it runs inside the
+        // transaction, so an indexer failure answers 502, rolls the lawyer's grant back with it,
+        // and the event retries whole.
+        var holderResolve = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetCurrentHolderWalletsAsync(payload.ListingId.Value, c),
+            what: "the current holder set");
+        if (holderResolve.Failed)
+        {
+            return holderResolve.Failure!;
+        }
+
+        var existingViewers = (await _db.BucketViewers
+                .Where(v => v.BucketId == bucket.BucketId)
+                .Select(v => v.ViewerId)
+                .ToListAsync(ct))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var holdersAdded = 0;
+        var holdersSkipped = 0;
+        foreach (var wallet in holderResolve.Value!)
+        {
+            var key = await ResolveViewerKeyAsync(wallet, ct);
+            if (key is null)
+            {
+                holdersSkipped++;
+                continue;
+            }
+
+            await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
+            if (existingViewers.Add(key))
+            {
+                holdersAdded++;
+            }
+        }
+        await transaction.CommitAsync(ct);
+
+        return WithMembershipCounts(result, lawyerContributorAdded, holdersAdded, holdersSkipped);
     }
 
     /// <summary>
@@ -415,17 +497,26 @@ public class WebhooksController : ControllerBase
 
     /// <summary>
     /// Receives the <c>letting_agent_appointed</c> event (the property program's agent election
-    /// finalized). PLACEHOLDER: the payload's <c>winner_entry</c> is the winner's LettingAgent
-    /// ENTRY PDA, not the agent's wallet — the wallet must be resolved via the indexer GraphQL
-    /// before the agent can be added as a contributor (docs/property-webhooks-uncertainties.md
-    /// entry 4). Validates and resolves the namespace and bucket (404 while missing), then
-    /// acknowledges without acting.
+    /// finalized) and adds the winning letting agent as a contributor (WRITE) on the property's
+    /// legal bucket. The payload's <c>winner_entry</c> is the winner's LettingAgent ENTRY PDA, not
+    /// their wallet; the wallet is resolved from the indexer's <c>lettingAgents</c> mirror (the
+    /// row whose <c>id</c> is the entry PDA).
     /// </summary>
+    /// <remarks>
+    /// A payload without <c>winner_entry</c> is a round that seated no agent: acknowledged
+    /// (200 <c>ignored</c>) without acting, because the omitted optional account can never appear
+    /// on retry. A resolution failure (indexer down, or no row for the entry) answers 502 so the
+    /// indexer retries rather than the write-grant being silently skipped. Idempotent: the
+    /// contributor-add returns the existing row, so a redelivery answers 200 and changes nothing.
+    /// 404 while the namespace or bucket is missing; 400 when the body is not a valid
+    /// <c>letting_agent_appointed</c> event.
+    /// </remarks>
     // POST: webhooks/letting_agent_appointed_devnet
     [HttpPost("letting_agent_appointed_devnet")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> LettingAgentAppointedDevnet(
         [FromBody] LettingAgentAppointedPayload payload, CancellationToken ct)
     {
@@ -448,15 +539,39 @@ public class WebhooksController : ControllerBase
             return NotFound("The property's legal bucket does not exist yet.");
         }
 
-        // TODO(uncertainties #4): resolve WinnerEntry -> the agent's wallet via the indexer
-        // GraphQL, then
-        //   await _memberships.AddContributorAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, agentWallet, ct);
+        if (string.IsNullOrWhiteSpace(payload.WinnerEntry))
+        {
+            return Ok(new
+            {
+                status = "ignored",
+                acted = false,
+                reason = "the payload carries no winner_entry — the election seated no agent",
+                bucketId = bucket.BucketId
+            });
+        }
+
+        var resolve = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetLettingAgentWalletAsync(payload.WinnerEntry, c),
+            what: "the letting agent's wallet");
+        if (resolve.Failed)
+        {
+            return resolve.Failure!;
+        }
+        var agentWallet = resolve.Value!;
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        // A bucket created before the claim webhook existed may lack the operator admin row the
+        // contributor-add caller check needs; adding it is idempotent.
+        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
+        await _memberships.AddContributorAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, agentWallet, ct);
+        await transaction.CommitAsync(ct);
+
         return Ok(new
         {
-            status = "accepted",
-            acted = false,
-            pending = "letting-agent wallet resolution (placeholder)",
-            bucketId = bucket.BucketId
+            status = "agent_added",
+            bucketId = bucket.BucketId,
+            agent = agentWallet
         });
     }
 
@@ -1014,10 +1129,12 @@ public class WebhooksController : ControllerBase
     /// <see cref="IndexerQueryException"/> (indexer down/erroring) or a missing expected row both
     /// become a 502, so the indexer's at-least-once delivery retries with backoff until the mirror
     /// can answer. <paramref name="allowMissing"/> marks the lookups where absence is a real state
-    /// (the auto-approved proposal) rather than a retryable gap.
+    /// (the auto-approved proposal) rather than a retryable gap. <paramref name="what"/> names the
+    /// thing being resolved in the 502 body (the vote state, a wallet, the holder set).
     /// </summary>
     private async Task<(bool Failed, IActionResult? Failure, T? Value)> ResolveAsync<T>(
-        CancellationToken ct, Func<CancellationToken, Task<T?>> query, bool allowMissing = false)
+        CancellationToken ct, Func<CancellationToken, Task<T?>> query, bool allowMissing = false,
+        string what = "vote state")
     {
         T? value;
         try
@@ -1027,7 +1144,7 @@ public class WebhooksController : ControllerBase
         catch (IndexerQueryException ex)
         {
             return (true,
-                StatusCode(StatusCodes.Status502BadGateway, $"Could not resolve vote state: {ex.Message}"),
+                StatusCode(StatusCodes.Status502BadGateway, $"Could not resolve {what}: {ex.Message}"),
                 default);
         }
 
@@ -1035,11 +1152,32 @@ public class WebhooksController : ControllerBase
         {
             return (true,
                 StatusCode(StatusCodes.Status502BadGateway,
-                    "Could not resolve vote state: the indexer has no row for it yet."),
+                    $"Could not resolve {what}: the indexer has no row for it yet."),
                 default);
         }
 
         return (false, null, value);
+    }
+
+    /// <summary>
+    /// Adds the membership-grant counters (<c>lawyerContributorAdded</c>, <c>holdersAdded</c>,
+    /// <c>holdersSkippedNoKey</c>) to a voting handler's Ok body, so the lawyer-election response
+    /// reports the announcement and the grants together. A non-Ok answer (the 404 retry paths)
+    /// passes through untouched.
+    /// </summary>
+    private static IActionResult WithMembershipCounts(
+        IActionResult result, bool lawyerContributorAdded, int holdersAdded, int holdersSkippedNoKey)
+    {
+        if (result is not OkObjectResult ok)
+        {
+            return result;
+        }
+
+        var body = JsonSerializer.SerializeToNode(ok.Value)!.AsObject();
+        body["lawyerContributorAdded"] = lawyerContributorAdded;
+        body["holdersAdded"] = holdersAdded;
+        body["holdersSkippedNoKey"] = holdersSkippedNoKey;
+        return new OkObjectResult(body);
     }
 
     /// <summary>
@@ -1175,40 +1313,14 @@ public class WebhooksController : ControllerBase
 
     /// <summary>
     /// The bucket viewer id (a 32-byte X25519 key) for a wallet, or null when the wallet has no
-    /// usable one: the profile keyed directly by the wallet first, then the
-    /// <c>WalletMigrations</c> fallback for a profile still keyed by the legacy SS58 address of a
-    /// migrated account. A stored key that is not well-formed 32-byte hex never reaches
+    /// usable one. Delegates to the shared <see cref="ViewerKeyResolver"/>: the profile keyed
+    /// directly by the wallet first, then the <c>WalletMigrations</c> fallback, and a stored key
+    /// that is not well-formed 32-byte hex never reaches
     /// <c>MembershipService.AddViewerAsync</c> — it would be an <c>InvalidInput</c> failure there
     /// and, worse, an endless retry of a permanently-unactionable event.
     /// </summary>
-    private async Task<string?> ResolveViewerKeyAsync(string wallet, CancellationToken ct)
-    {
-        var direct = await _profiles.Profiles
-            .Where(p => p.Ss58Address == wallet)
-            .Select(p => p.X25519Key)
-            .FirstOrDefaultAsync(ct);
-        var key = direct ?? await _profiles.WalletMigrations
-            .Where(m => m.SolanaAddress == wallet)
-            .Join(
-                _profiles.Profiles,
-                m => m.Ss58Address,
-                p => p.Ss58Address,
-                (m, p) => p.X25519Key)
-            .FirstOrDefaultAsync(ct);
-
-        return IsHex32Key(key) ? key : null;
-    }
-
-    /// <summary>The domain's viewer-id shape: exactly 32 bytes of hex, optional <c>0x</c> prefix.</summary>
-    private static bool IsHex32Key(string? key)
-    {
-        if (string.IsNullOrWhiteSpace(key))
-        {
-            return false;
-        }
-        var hex = key.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? key[2..] : key;
-        return hex.Length == 64 && hex.All(Uri.IsHexDigit);
-    }
+    private Task<string?> ResolveViewerKeyAsync(string wallet, CancellationToken ct) =>
+        _viewerKeys.ResolveAsync(wallet, ct);
 
     /// <summary>The bucket name, after the namespace's, clamped to the domain's 256-char bound.</summary>
     private static string LegalBucketName(Namespace ns)
@@ -1382,9 +1494,9 @@ public sealed class SpvLawyerElectedPayload
     public string? Property { get; set; }
 
     /// <summary>
-    /// The base58 Lawyer REGISTRY PDA of the election winner — NOT the lawyer's wallet; resolving
-    /// it is placeholder work (see docs/property-webhooks-uncertainties.md entry 2). Null when the
-    /// instruction omitted the optional account.
+    /// The base58 Lawyer REGISTRY PDA of the election winner — NOT the lawyer's wallet (the wallet
+    /// is the listing row's <c>spvLawyer</c>, which the handler resolves; this stays provenance).
+    /// Null when the instruction omitted the optional account.
     /// </summary>
     [JsonPropertyName("winner_registry")]
     public string? WinnerRegistry { get; set; }
@@ -1464,9 +1576,8 @@ public sealed class LettingAgentAppointedPayload
     public string? Event { get; set; }
 
     /// <summary>
-    /// The on-chain asset id. Whether this equals the marketplace listing id (the namespace's
-    /// PropertyId) is unverified — see docs/property-webhooks-uncertainties.md entry 4; the
-    /// lookup falls back to the PropertyAsset PDA.
+    /// The on-chain asset id, assumed to equal the marketplace listing id (the namespace's
+    /// PropertyId); when no namespace carries it, the lookup falls back to the PropertyAsset PDA.
     /// </summary>
     [JsonPropertyName("asset_id")]
     public long? AssetId { get; set; }
@@ -1480,9 +1591,10 @@ public sealed class LettingAgentAppointedPayload
     public string? Property { get; set; }
 
     /// <summary>
-    /// The base58 LettingAgent ENTRY PDA of the winner — NOT the agent's wallet; resolving it is
-    /// placeholder work (docs/property-webhooks-uncertainties.md entry 4). Null when the
-    /// instruction omitted the optional account.
+    /// The base58 LettingAgent ENTRY PDA of the winner — NOT the agent's wallet; the handler
+    /// resolves the wallet from the indexer's <c>lettingAgents</c> mirror (the row whose
+    /// <c>id</c> is this PDA). Null when the instruction omitted the optional account — a round
+    /// that seated no agent.
     /// </summary>
     [JsonPropertyName("winner_entry")]
     public string? WinnerEntry { get; set; }
