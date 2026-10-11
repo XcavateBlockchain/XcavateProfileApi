@@ -4,7 +4,8 @@ The indexer (`~/Indexer`, branch `agent/20261006-property-webhooks`, ADR-36) emi
 webhook event types for the "Property namespace & buckets" flow, and this API hosts their
 endpoints (`src/XcavateProfileApi/Controllers/WebhooksController.cs`). What was **not** certain
 is collected here: each entry says what the code does today, why it is a placeholder, and how to
-complete it. Entries are numbered; the controller's `TODO(uncertainties #N)` comments point here.
+complete it — or, once completed, what the resolution was. Entries are numbered, and resolved
+entries keep their number and say so in the heading.
 
 Wire format note: every payload carries `event`, the event's subject keys, `slot`,
 `tx_signature`, `block_time` (ISO-8601), and `program`. Delivery is at-least-once with per-event
@@ -16,9 +17,9 @@ backoff; a non-2xx answer means "retry forever" (30 s doubling, 1 h cap).
 |---|---|---|---|---|
 | `property_asset_registered` | marketplace `init_property_assets` | `INIT_PROPERTY_ASSET_WEBHOOK_URL` | `POST /webhooks/init_property_asset_devnet` | done (pre-existing) |
 | `property_claim_started` | first `claim_shares` per listing | `PROPERTY_CLAIM_STARTED_WEBHOOK_URL` | `POST /webhooks/property_claim_started_devnet` | **implemented** (creates the legal bucket) |
-| `spv_lawyer_elected` | `finalize_spv_election` | `SPV_LAWYER_ELECTED_WEBHOOK_URL` | `POST /webhooks/spv_lawyer_elected_devnet` | **placeholder** (#2, #3) |
+| `spv_lawyer_elected` | `finalize_spv_election` | `SPV_LAWYER_ELECTED_WEBHOOK_URL` | `POST /webhooks/spv_lawyer_elected_devnet` | **implemented** (result message + lawyer write + holder read re-sync — #2, #3) |
 | `deal_executed` | `execute_deal` | `DEAL_EXECUTED_WEBHOOK_URL` | `POST /webhooks/deal_executed_devnet` | **implemented** (removes lawyers) |
-| `letting_agent_appointed` | property `finalize_agent_election` | `LETTING_AGENT_APPOINTED_WEBHOOK_URL` | `POST /webhooks/letting_agent_appointed_devnet` | **placeholder** (#4) |
+| `letting_agent_appointed` | property `finalize_agent_election` | `LETTING_AGENT_APPOINTED_WEBHOOK_URL` | `POST /webhooks/letting_agent_appointed_devnet` | **implemented** (agent write — #4) |
 | `property_shares_transferred` | `buy_relisted_shares` / `accept_offer` / `send_property_shares` | `SHARES_TRANSFERRED_WEBHOOK_URL` | `POST /webhooks/shares_transferred_devnet` | **implemented** (viewer swap via profile X25519 keys — see #5) |
 | `spv_case_claimed` | marketplace `claim_spv_case` | `SPV_CASE_CLAIMED_WEBHOOK_URL` | `POST /webhooks/spv_case_claimed_devnet` | **implemented** (posts a `voting/terms` message — see #9) |
 | `agent_election_opened` | property program opens a letting-agent election | *(indexer env var)* | `POST /webhooks/agent_election_opened_devnet` | **implemented** (posts a `voting/election` message — see #9) |
@@ -26,6 +27,7 @@ backoff; a non-2xx answer means "retry forever" (30 s doubling, 1 h cap).
 | `proposal_finalized` | property program finalizes a spending proposal | *(indexer env var)* | `POST /webhooks/proposal_finalized_devnet` | **implemented** (posts a `voting/result` message — see #9) |
 | `challenge_created` | property program creates an agent challenge | *(indexer env var)* | `POST /webhooks/challenge_created_devnet` | **implemented** (posts a `voting/challenge` message — see #9) |
 | `challenge_finalized` | property program finalizes a challenge | *(indexer env var)* | `POST /webhooks/challenge_finalized_devnet` | **implemented** (posts a `voting/result` message — see #9) |
+| `property_holder_changed` | marketplace `reserve_shares` / `buy_property_shares` (added) and `unreserve_shares` / `release_reservation` / `close_cancelled_position` / `withdraw_*` (removed) | `HOLDER_CHANGED_WEBHOOK_URL` | `POST /webhooks/property_holder_changed_devnet` | **implemented** (viewer add/remove + creation-time reconcile — see #3) |
 
 Conventions the endpoints rely on: the property's namespace is found by `PropertyId == listing_id`
 (falling back to `Creator == <PropertyAsset PDA>`), and its legal-process bucket by
@@ -44,38 +46,66 @@ record in `crates/indexer/src/batcher.rs`); note the account upsert path has no 
 block time, so `webhook_events.tx_signature`/`block_time` would need placeholders or a new
 migration relaxing those NOT NULL columns.
 
-## 2. SPV lawyer wallet resolution (placeholder in `SpvLawyerElectedDevnet`)
+## 2. SPV lawyer wallet resolution — RESOLVED (the listing row's `spvLawyer` IS the wallet)
 
 `finalize_spv_election` carries only the winner's Lawyer **registry PDA** (`winner_registry`,
-optional, null when omitted) — not the lawyer's wallet. To complete: query the indexer GraphQL
-`marketplaceListing(...)` for `spvLawyer` (a base58 wallet; it is set on the listing row by the
-same finalization), then
-`_memberships.AddContributorAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, lawyerWallet, ct)`.
-Open questions: should the lawyer also be a bucket **admin** (they steer the doc review), and
-should the developer lawyer (`developerLawyer` on the same listing) be added here or only after
-`assign_developer_lawyer` (not currently a webhook — add one if needed)?
+optional, null when omitted) — not the lawyer's wallet. Verified against the chain
+(`marketplace/instructions/election.rs`): the instruction sets `listing.spv_lawyer.lawyer =
+winner`, where `winner` is the winning candidacy's `lawyer` — the claiming lawyer's WALLET (the
+registry PDA is derived from it as `["lawyer", wallet]`). And the indexer commits the event row
+and the listing row in one transaction, so `GetListingSpvElectionAsync(...).SpvLawyer` (GraphQL
+`listings.spvLawyer`) is the wallet, is already fetched for the announcement, and can never
+disagree with it. The handler therefore grants the lawyer WRITE straight from the election row;
+the `lawyers`-query detour was rejected because its `lawyer` arg filters the wallet column, not
+the registry PDA (marketplace.rs:798), so it would have been an unfiltered paged scan matched
+client-side on `id`. Decisions: the lawyer is a **contributor** (write), not an admin — bucket
+adminship stays with the operator PDA; the developer lawyer is out of scope here —
+`assign_developer_lawyer` has no webhook (add one if that side needs bucket access before
+`deal_executed`).
 
-## 3. Token-holder read access — viewer keys solved, holder ENUMERATION still placeholder
+## 3. Token-holder read access — IMPLEMENTED (holder events + creation-time reconcile + election re-sync)
 
 "Add property token holders (read) to bucket" maps to the bucket **Viewer** role — a viewer id
-is a 32-byte X25519 encryption key (`InputValidator.Hex32Value`), not a wallet. **Resolved:**
-wallets map to keys through the profiles (`Profile.X25519Key`, direct wallet key with the
-`WalletMigrations` SS58 fallback — the same `ResolveViewerKeyAsync` the transfer webhook uses).
-**Still missing:** the current holder set — enumerating holders needs the indexer GraphQL
-`shareHoldings(assetId, active: true)`, and this API has no indexer client yet. Once one exists,
-`SpvLawyerElectedDevnet` can add every current holder with a registered key as a viewer.
+is a 32-byte X25519 encryption key (`InputValidator.Hex32Value`), not a wallet. Both halves are
+now solved:
 
-## 4. Letting agent appointment (placeholder in `LettingAgentAppointedDevnet`)
+- **Wallet → key:** through the profiles (`Profile.X25519Key`, direct wallet key with the
+  `WalletMigrations` SS58 fallback — `ResolveViewerKeyAsync`).
+- **Holder set:** event-driven via the indexer's `property_holder_changed` (ADR-38:
+  reserve/buy → added, unreserve/release/close-cancelled/withdraw → removed), applied
+  immediately once the bucket exists. Events from the sale phase (the bucket does not exist
+  before claim start) answer **200 "deferred"** — not 404, so no weeks-long retry storm — and
+  the claim-started handler reconciles the CURRENT holder set at bucket-creation time via the
+  new `IndexerClient.GetCurrentHolderWalletsAsync` (`investorPositions` + `shareHoldings`,
+  paged), atomically with the bucket; a reconcile failure is a 502 and the whole event retries.
+  Wallets without a registered key are skipped (counted in the response), never retried.
 
-Two uncertainties. (a) **Identity:** the property program's `finalize_agent_election` arg is
-`asset_id`; unverified whether it numerically equals the marketplace `listing_id` stored as the
-namespace's `PropertyId`. The lookup therefore falls back to the PropertyAsset PDA (namespace
-`Creator`) — verify on devnet and tighten. (b) **Wallet:** `winner_entry` is the winner's
-LettingAgent **entry PDA**; resolve the agent wallet via the indexer GraphQL letting-agent
-accounts, then `AddContributorAsync(...)`. Also confirm `finalize_agent_election` is the intended
-"appointed" signal (not `add_letting_agent`, which registers an agent for a *postcode*, not a
-property), and whether the agent goes into the legal bucket or a separate management bucket —
-the flowchart shows one bucket, so the legal bucket is used.
+Remaining gap, deliberate: the two crank closes that never name the investor on-chain
+(`close_reservation`, `close_share_holding`) emit no event — their wallets keep access until
+another exit event or a manual cleanup (a batcher-side hook could cover them later). The former
+gap (b) — a holder who registers their X25519 key only after their last holder event — is closed
+at the next lifecycle milestone: `SpvLawyerElectedDevnet` re-runs the same reconcile
+(`GetCurrentHolderWalletsAsync` → `ViewerKeyResolver` → `AddViewerAsync`, counted as
+`holdersAdded`/`holdersSkippedNoKey`) inside its grant transaction on a ratified election, the
+flow's step 6.
+
+## 4. Letting agent appointment — RESOLVED (`lettingAgents` id-match → contributor)
+
+Implemented in `LettingAgentAppointedDevnet`. (a) **Identity:** the property program's
+`finalize_agent_election` arg is `asset_id`, assumed to equal the marketplace `listing_id` (the
+namespace's `PropertyId`); the lookup still falls back to the PropertyAsset PDA (`Creator`) — the
+same assumption the voting webhooks bake in (#9). Verify on devnet and tighten. (b) **Wallet:**
+`winner_entry` is the winner's LettingAgent **entry PDA**; the wallet is resolved from the
+indexer GraphQL `lettingAgents` root field (juniper camelCases `letting_agents`) via
+`IndexerClient.GetLettingAgentWalletAsync` — the resolver's `wallet`/`regionId` args filter other
+columns, never the entry PDA (property.rs:463), so the client pages the registry unfiltered and
+matches `node.id == winner_entry`, taking `node.wallet`. The query carries no `active` filter, so
+a closed entry still answers and a late redelivery resolves the same wallet. A payload with no
+`winner_entry` is a round that seated no agent — acknowledged 200 `ignored`, since the omitted
+optional account can never appear on retry; a missing row or an indexer error answers 502 so the
+write-grant is never silently skipped. `finalize_agent_election` is the intended "appointed"
+signal (`add_letting_agent` registers an agent for a *postcode*, not a property), and the agent
+joins the legal bucket as a contributor — the flowchart shows one bucket.
 
 ## 5. Share-transfer access swap — IMPLEMENTED, with two caveats to review
 
@@ -101,10 +131,11 @@ Caveats:
 ## 6. `deal_executed` removes *all* write/manage members, not just lawyers
 
 Implemented as: remove every contributor and every admin except the operator admin (namespace
-creator). This assumes only lawyers hold write/manage on the legal bucket at deal time. If entry
-#4 later adds the letting agent as a contributor *before* the deal executes, the agent is swept
-too — either order the flow so agents join after `deal_executed`, or key removal to resolved
-lawyer wallets (needs #2's resolution) instead of clearing the bucket.
+creator). This assumes only lawyers hold write/manage on the legal bucket at deal time. Entry #4
+now adds the letting agent as a contributor; in the documented order the appointment (step 9)
+follows the settlement, so the sweep never meets an agent — but if an appointment ever lands
+*before* the deal executes, the agent is swept too, and the fix is keying removal to the resolved
+lawyer wallets (#2's resolution now exists) instead of clearing the bucket.
 
 ## 7. 404-retry semantics and permanently-unactionable events
 
@@ -128,8 +159,25 @@ The voting endpoints (#9) take the same treatment: the indexer routes
 `SPV_LAWYER_ELECTED_WEBHOOK_URL`, `AGENT_ELECTION_OPENED_WEBHOOK_URL`,
 `PROPOSAL_CREATED_WEBHOOK_URL`, `PROPOSAL_FINALIZED_WEBHOOK_URL`,
 `CHALLENGE_CREATED_WEBHOOK_URL`, `CHALLENGE_FINALIZED_WEBHOOK_URL` to these `*_devnet`
-paths, and this service needs `INDEXER_GRAPHQL_URL` pointing at the indexer's GraphQL for
+paths, plus `HOLDER_CHANGED_WEBHOOK_URL` for the holder-membership route (#3), and this
+service needs `INDEXER_GRAPHQL_URL` pointing at the indexer's GraphQL for
 the resolution reads.
+
+## 10. IndexerClient I64 wire format — BUG FOUND AND FIXED (affected every resolution read)
+
+The indexer's juniper `I64` scalar is **string-typed on the wire** (`"8"`, not `8`), in both
+directions. The IndexerClient as built sent `id` variables as JSON numbers and parsed I64
+response fields with `GetInt64()` — every resolution query (`GetListingSpvElectionAsync`,
+`GetPropertyLettingAsync`, proposals/challenges, `GetShareAmountAsync`) failed against the
+real GraphQL with variable-coercion errors, and would have failed parsing even with correct
+variables. The unit tests never caught it: `TestIndexerClient` mocks the interface, so the
+client itself was never exercised live. Fixed: variables go out as strings (`I64Var`), and
+parsing accepts either scalar flavor (`LongOf`). Verified live against
+`https://indexer-devnet.xcavate.io/graphql`: the claim-started reconcile enumerated a real
+sold-out listing's holders, and a `spv_case_claimed` call resolved its real election row.
+Related gap found in the same pass: the indexer repo's `deploy.yml` never rendered the six
+ADR-37 governance `*_WEBHOOK_URL` secrets into `server.env` — added there (with the holder
+route) on branch `agent/20261009-holder-membership-webhook`.
 
 ## 9. Voting webhooks — IMPLEMENTED, with the design decisions recorded here
 
@@ -174,7 +222,8 @@ and `agent_election_opened`, `proposal_created`/`proposal_finalized`,
   rows commit in one indexer transaction. A resolution failure (indexer down, or the row
   missing) answers **502 so delivery retries**; `VotingWebhookTests` pins that too. This also
   resolves the older notes above that wanted an outbound indexer client for wallet resolution —
-  the mechanism now exists and those endpoints can adopt it when they leave placeholder status.
+  the mechanism now exists and the membership endpoints adopted it when they left placeholder
+  status (#2, #4).
 - **Auto-approved proposals are skipped, not announced.** The property program's `propose` fires
   the webhook on the low-tier path too, but that path closes the just-created Proposal inside the
   same transaction, so no vote ever opens. `proposal_created` with no live row answers 200

@@ -15,11 +15,20 @@ public class BucketService(
     TimeProvider clock)
 {
     /// <summary>
+    /// The namespace category marking a realXmarket secondary-market offers namespace. Bucket
+    /// creation in such a namespace is open to any signed caller — see <see cref="CreateAsync"/>.
+    /// </summary>
+    public const string OffersNamespaceCategory = "realXmarket-offers";
+
+    /// <summary>
     /// Creates a bucket. With a namespace, the caller must be a manager of that namespace, not a
-    /// bucket admin. Without one, any signed caller may create a standalone bucket and becomes the
-    /// creator who stands in for the namespace manager. Either way the new bucket is locked,
-    /// because the pallet's <c>Status::default()</c> is <c>Locked</c> — it accepts no messages
-    /// until <see cref="ResumeWritingAsync"/> supplies a key.
+    /// bucket admin — relaxed for the single <see cref="OffersNamespaceCategory"/> category, where
+    /// any signed caller may create a bucket (a buyer opens an offer bucket in the property's
+    /// offers namespace without being a manager of it). Without a namespace, any signed caller may
+    /// create a standalone bucket and becomes the creator who stands in for the namespace manager.
+    /// Either way the new bucket is locked, because the pallet's <c>Status::default()</c> is
+    /// <c>Locked</c> — it accepts no messages until <see cref="ResumeWritingAsync"/> supplies a
+    /// key.
     /// </summary>
     public async Task<Bucket> CreateAsync(
         string caller,
@@ -35,8 +44,14 @@ public class BucketService(
 
         if (namespaceId is long ownerNamespaceId)
         {
-            await auth.EnsureNamespaceExistsAsync(ownerNamespaceId, ct);
-            await auth.EnsureIsManagerAsync(ownerNamespaceId, caller, ct);
+            var owner = await db.Namespaces
+                .FirstOrDefaultAsync(n => n.NamespaceId == ownerNamespaceId, ct)
+                ?? throw BucketException.UnknownNamespace();
+
+            if (!string.Equals(owner.Category, OffersNamespaceCategory, StringComparison.Ordinal))
+            {
+                await auth.EnsureIsManagerAsync(ownerNamespaceId, caller, ct);
+            }
         }
 
         var now = clock.GetUtcNow().UtcDateTime;

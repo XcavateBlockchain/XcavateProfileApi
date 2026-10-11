@@ -198,7 +198,9 @@ type Query {
 Write side of the bucket API: one mutation per pallet extrinsic, in call-index order. Each is a
 thin wrapper that resolves the signed caller, runs the domain service inside a transaction, and
 returns the result. The 15 role-based mutations require a signature; the 5 force*
-mutations require an admin address, standing in for the pallet's ForceOrigin.
+mutations require an admin address, standing in for the pallet's ForceOrigin. After those come
+the composed realXmarket offer flows, which have no pallet call index: one signature sets up a
+whole offer bucket (the setupOfferBucket mutation below).
 """
 type Mutation {
   createNamespace(metadata: NamespaceMetadataInput!): Namespace!
@@ -243,6 +245,23 @@ type Mutation {
   addViewer(namespaceId: BigInt, bucketId: BigInt!, viewer: String!): BucketViewer!
     @cost(weight: "10")
   removeViewer(namespaceId: BigInt, bucketId: BigInt!, viewer: String!): Boolean!
+    @cost(weight: "10")
+  """
+  Finds the property's offers namespace — the one categorised realXmarket-offers in
+  the input's cluster whose properties map carries the input's assetId — or creates it under
+  the caller with the name "<name> offers".
+  """
+  createOffersNamespace(input: CreateOffersNamespaceInput!): Namespace!
+    @cost(weight: "10")
+  """
+  The one-signature offer bucket setup. The caller signs as the buyer. In one transaction:
+  find-or-create the property's offers namespace, create the offer bucket in it (offers
+  namespaces are open to any signed caller — the relaxation on
+  BucketService.CreateAsync), install both parties as bucket admins and contributors
+  and their X25519 keys as viewers, unlock the bucket with the supplied bucket X25519 public
+  key, and write the opening key-sharing and offer messages under their protocol-fixed tags.
+  """
+  setupOfferBucket(input: SetupOfferBucketInput!): SetupOfferBucketPayload!
     @cost(weight: "10")
 }
 
@@ -484,6 +503,17 @@ type PageInfo {
   endCursor: String
 }
 
+"""
+The result of the composed setupOfferBucket mutation: the offers namespace (found or
+created for the asset and cluster), the new offer bucket, and the message id of the offer
+message — the second of the two messages the bucket opens with.
+"""
+type SetupOfferBucketPayload {
+  namespaceId: BigInt!
+  bucketId: BigInt!
+  offerMessageId: BigInt!
+}
+
 type Tag {
   id: ID! @cost(weight: "10")
   bucketId: BigInt!
@@ -635,6 +665,18 @@ input BucketViewerSortInput {
   bucket: BucketSortInput @cost(weight: "10")
   viewerId: SortEnumType @cost(weight: "10")
   addedAt: SortEnumType @cost(weight: "10")
+}
+
+"""
+Find-or-create input for a property's realXmarket offers namespace. Name is the
+property name; the mutation appends " offers" when it is not already suffixed. The namespace is
+keyed for reuse by AssetId (a u64 decimal string, stored in its properties map)
+and Cluster.
+"""
+input CreateOffersNamespaceInput {
+  name: String!
+  assetId: String!
+  cluster: String!
 }
 
 input DateTimeOperationFilterInput {
@@ -840,6 +882,26 @@ input NamespaceSortInput {
 input PropertyInput {
   key: String!
   value: String!
+}
+
+"""
+One-call setup of an offer bucket in the property's offers namespace: namespace find-or-create,
+bucket creation, buyer/seller membership, bucket unlock and the opening key-sharing and offer
+messages. The caller signs as the buyer. BucketEncryptionKey is the bucket's
+X25519 public key (32-byte hex); BuyerViewerKey and SellerViewerKey
+override the parties' viewer X25519 keys, which otherwise resolve from their profiles.
+"""
+input SetupOfferBucketInput {
+  propertyName: String!
+  assetId: String!
+  shareListingId: String!
+  cluster: String!
+  seller: String!
+  bucketEncryptionKey: String!
+  buyerViewerKey: String
+  sellerViewerKey: String
+  keySharingMessage: MessageInput!
+  offerMessage: MessageInput!
 }
 
 input StringOperationFilterInput {

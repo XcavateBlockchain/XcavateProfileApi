@@ -17,7 +17,16 @@ public sealed class TestIndexerClient : IIndexerClient
     public ChallengeInfo? OpenChallenge { get; set; }
     public ChallengeResultInfo? FinalizedChallenge { get; set; }
     public long? ShareAmount { get; set; } = 1_000;
+    public IReadOnlyList<string>? HolderWallets { get; set; } = [];
+    public string? LettingAgentWallet { get; set; }
     public bool ThrowOnQuery { get; set; }
+
+    /// <summary>
+    /// Fails ONLY the holder enumeration, so a test can script "the election/announcement resolves
+    /// but the holder reconciliation does not" — the mid-grant 502 path <see cref="ThrowOnQuery"/>
+    /// (which fails every query, including the announcement's own resolution) cannot reach.
+    /// </summary>
+    public bool ThrowOnHolders { get; set; }
 
     public Task<SpvElectionInfo?> GetListingSpvElectionAsync(long listingId, CancellationToken ct)
         => Respond(SpvElection);
@@ -41,6 +50,19 @@ public sealed class TestIndexerClient : IIndexerClient
 
     public Task<long?> GetShareAmountAsync(long assetId, CancellationToken ct)
         => Respond(ShareAmount);
+
+    public Task<IReadOnlyList<string>> GetCurrentHolderWalletsAsync(long listingId, CancellationToken ct)
+    {
+        if (ThrowOnQuery || ThrowOnHolders)
+        {
+            throw new IndexerQueryException("the indexer is down (simulated)");
+        }
+
+        return Task.FromResult(HolderWallets ?? (IReadOnlyList<string>)[]);
+    }
+
+    public Task<string?> GetLettingAgentWalletAsync(string entryPda, CancellationToken ct)
+        => Respond(LettingAgentWallet);
 
     private Task<T?> Respond<T>(T? value)
         => ThrowOnQuery

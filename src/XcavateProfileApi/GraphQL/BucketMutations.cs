@@ -1,8 +1,11 @@
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateBuckets.Domain.Services;
 using XcavateProfileApi.GraphQL.Auth;
+using XcavateProfileApi.Services;
 
 // HotChocolate.Types also defines Tag; the domain entity is what we mean throughout.
 using Tag = XcavateBuckets.Domain.Entities.Tag;
@@ -13,7 +16,9 @@ namespace XcavateProfileApi.GraphQL;
 /// Write side of the bucket API: one mutation per pallet extrinsic, in call-index order. Each is a
 /// thin wrapper that resolves the signed caller, runs the domain service inside a transaction, and
 /// returns the result. The 15 role-based mutations require a signature; the 5 <c>force*</c>
-/// mutations require an admin address, standing in for the pallet's ForceOrigin.
+/// mutations require an admin address, standing in for the pallet's ForceOrigin. After those come
+/// the composed realXmarket offer flows, which have no pallet call index: one signature sets up a
+/// whole offer bucket (the <c>setupOfferBucket</c> mutation below).
 /// </summary>
 [GraphQLName("Mutation")]
 public class BucketMutations
@@ -278,6 +283,250 @@ public class BucketMutations
         CancellationToken ct) =>
         InTransaction(db, ct, () => memberships.RemoveViewerAsync(
             caller.RequireAddress(), namespaceId, bucketId, viewer, ct));
+
+    // ---- realXmarket secondary-market offers ----------------------------------------------
+    //
+    // No call index: these are composed marketplace flows, not pallet extrinsics. One signature
+    // from the buyer sets up the whole offer bucket — namespace, bucket, membership, unlock and
+    // the two opening messages — inside a single transaction.
+
+    /// <summary>
+    /// Finds the property's offers namespace — the one categorised <c>realXmarket-offers</c> in
+    /// the input's cluster whose properties map carries the input's assetId — or creates it under
+    /// the caller with the name "<c>&lt;name&gt; offers</c>".
+    /// </summary>
+    [RequireSignature]
+    public Task<Namespace> CreateOffersNamespace(
+        CreateOffersNamespaceInput input,
+        ICallerContext caller,
+        BucketDbContext db,
+        NamespaceService namespaces,
+        InputValidator validator,
+        CancellationToken ct)
+    {
+        var address = caller.RequireAddress();
+        ValidateOffersNamespaceInput(input.Name, input.AssetId, input.Cluster, "name", validator);
+
+        return InTransaction(db, ct, () => FindOrCreateOffersNamespaceAsync(
+            address, input.Name, input.AssetId, input.Cluster, db, namespaces, ct));
+    }
+
+    /// <summary>
+    /// The one-signature offer bucket setup. The caller signs as the buyer. In one transaction:
+    /// find-or-create the property's offers namespace, create the offer bucket in it (offers
+    /// namespaces are open to any signed caller — the relaxation on
+    /// <c>BucketService.CreateAsync</c>), install both parties as bucket admins and contributors
+    /// and their X25519 keys as viewers, unlock the bucket with the supplied bucket X25519 public
+    /// key, and write the opening key-sharing and offer messages under their protocol-fixed tags.
+    /// </summary>
+    [RequireSignature]
+    public Task<SetupOfferBucketPayload> SetupOfferBucket(
+        SetupOfferBucketInput input,
+        ICallerContext caller,
+        BucketDbContext db,
+        NamespaceService namespaces,
+        BucketService buckets,
+        MembershipService memberships,
+        MessageService messages,
+        ViewerKeyResolver viewerKeys,
+        InputValidator validator,
+        CancellationToken ct)
+    {
+        var buyer = caller.RequireAddress();
+
+        ValidateOffersNamespaceInput(
+            input.PropertyName, input.AssetId, input.Cluster, "propertyName", validator);
+        validator.Required(input.ShareListingId, MaxShareListingIdLen, "shareListingId");
+        validator.Hex32Value(input.BucketEncryptionKey, "bucketEncryptionKey");
+        if (input.BuyerViewerKey is not null)
+        {
+            validator.Hex32Value(input.BuyerViewerKey, "buyerViewerKey");
+        }
+        if (input.SellerViewerKey is not null)
+        {
+            validator.Hex32Value(input.SellerViewerKey, "sellerViewerKey");
+        }
+        if (string.IsNullOrWhiteSpace(input.Seller))
+        {
+            throw new BucketApiException("SELLER_REQUIRED", "'seller' is required.");
+        }
+        validator.Text(input.Seller, validator.Options.MaxNameLen, "seller");
+
+        return InTransaction(db, ct, async () =>
+        {
+            var ns = await FindOrCreateOffersNamespaceAsync(
+                buyer, input.PropertyName, input.AssetId, input.Cluster, db, namespaces, ct);
+
+            var bucket = await buckets.CreateAsync(
+                buyer,
+                ns.NamespaceId,
+                $"Offer: {input.PropertyName} #{input.ShareListingId}",
+                OfferBucketCategory,
+                new Dictionary<string, string>
+                {
+                    [AssetIdPropertyKey] = input.AssetId,
+                    ["shareListingId"] = input.ShareListingId,
+                    ["buyer"] = buyer,
+                    ["seller"] = input.Seller
+                },
+                ct);
+
+            // Admins are appointed by a namespace manager, and the buyer typically is not one —
+            // the open-create relaxation is what let them create the bucket. The appointment
+            // therefore runs under the namespace's first manager (the internal-caller pattern the
+            // webhooks use); when this very call created the namespace, that IS the buyer.
+            var manager = await db.NamespaceManagers
+                .Where(m => m.NamespaceId == ns.NamespaceId)
+                .OrderBy(m => m.AddedAt)
+                .ThenBy(m => m.Manager)
+                .Select(m => m.Manager)
+                .FirstAsync(ct);
+
+            await memberships.AddAdminAsync(manager, ns.NamespaceId, bucket.BucketId, buyer, ct);
+            await memberships.AddAdminAsync(manager, ns.NamespaceId, bucket.BucketId, input.Seller, ct);
+
+            // The buyer is an admin from here on, so the remaining role checks pass under their
+            // own identity.
+            await memberships.AddContributorAsync(buyer, ns.NamespaceId, bucket.BucketId, buyer, ct);
+            await memberships.AddContributorAsync(
+                buyer, ns.NamespaceId, bucket.BucketId, input.Seller, ct);
+
+            var buyerViewer = input.BuyerViewerKey
+                ?? await viewerKeys.ResolveAsync(buyer, ct)
+                ?? throw new BucketApiException(
+                    "VIEWER_KEY_UNRESOLVED",
+                    $"No X25519 viewer key for the buyer '{buyer}': pass 'buyerViewerKey' or " +
+                    "register one on the buyer's profile.");
+            var sellerViewer = input.SellerViewerKey
+                ?? await viewerKeys.ResolveAsync(input.Seller, ct)
+                ?? throw new BucketApiException(
+                    "VIEWER_KEY_UNRESOLVED",
+                    $"No X25519 viewer key for the seller '{input.Seller}': pass 'sellerViewerKey' " +
+                    "or register one on the seller's profile.");
+
+            await memberships.AddViewerAsync(buyer, ns.NamespaceId, bucket.BucketId, buyerViewer, ct);
+            await memberships.AddViewerAsync(buyer, ns.NamespaceId, bucket.BucketId, sellerViewer, ct);
+
+            await buckets.ResumeWritingAsync(
+                buyer, ns.NamespaceId, bucket.BucketId, input.BucketEncryptionKey, ct);
+
+            // The opening pair, both written by the buyer. The tags are protocol-fixed: whatever
+            // tag the caller put on the message input is replaced.
+            await messages.WriteAsync(
+                buyer, ns.NamespaceId, bucket.BucketId,
+                ToRequest(input.KeySharingMessage, KeySharingTag), ct);
+            var offer = await messages.WriteAsync(
+                buyer, ns.NamespaceId, bucket.BucketId,
+                ToRequest(input.OfferMessage, OfferTag), ct);
+
+            return new SetupOfferBucketPayload(ns.NamespaceId, bucket.BucketId, offer.MessageId);
+        });
+    }
+
+    /// <summary>
+    /// The property's offers namespace: the existing one carrying the assetId, else a new one
+    /// under the caller. The properties map is a JSON document the entity model exposes as a
+    /// string, so the category/cluster columns narrow the candidates in the query and the assetId
+    /// match is checked on the parsed document.
+    /// </summary>
+    private static async Task<Namespace> FindOrCreateOffersNamespaceAsync(
+        string caller,
+        string propertyName,
+        string assetId,
+        string cluster,
+        BucketDbContext db,
+        NamespaceService namespaces,
+        CancellationToken ct)
+    {
+        var candidates = await db.Namespaces
+            .Where(n => n.Category == BucketService.OffersNamespaceCategory && n.Cluster == cluster)
+            .ToListAsync(ct);
+
+        foreach (var candidate in candidates)
+        {
+            if (ReadAssetId(candidate.Properties) == assetId)
+            {
+                return candidate;
+            }
+        }
+
+        return await namespaces.CreateAsync(
+            caller,
+            OffersNamespaceName(propertyName),
+            schemaUri: null,
+            properties: [new KeyValuePair<string, string>(AssetIdPropertyKey, assetId)],
+            ct,
+            new NamespaceAttributes(
+                Category: BucketService.OffersNamespaceCategory,
+                Cluster: cluster));
+    }
+
+    private static void ValidateOffersNamespaceInput(
+        string propertyName, string assetId, string cluster, string nameField, InputValidator validator)
+    {
+        // 200 leaves headroom for the " offers" suffix and the "Offer: ... #id" wrap under the
+        // domain's 256-char name bound.
+        validator.Required(propertyName, MaxOfferPropertyNameLen, nameField);
+        validator.Required(assetId, MaxAssetIdLen, "assetId");
+        if (!assetId.All(char.IsDigit))
+        {
+            throw BucketException.InvalidInput("'assetId' must be a u64 decimal string.");
+        }
+        validator.Required(cluster, validator.Options.MaxClusterLen, "cluster");
+    }
+
+    /// <summary>"&lt;propertyName&gt; offers", appending the suffix only when it is not already there.</summary>
+    private static string OffersNamespaceName(string propertyName) =>
+        propertyName.EndsWith(OffersSuffix, StringComparison.OrdinalIgnoreCase)
+            ? propertyName
+            : propertyName + OffersSuffix;
+
+    /// <summary>The assetId in a namespace's JSON properties map, or null when absent/malformed.</summary>
+    private static string? ReadAssetId(string? propertiesJson)
+    {
+        if (string.IsNullOrWhiteSpace(propertiesJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(propertiesJson);
+            return document.RootElement.TryGetProperty(AssetIdPropertyKey, out var value)
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A message input with the protocol-fixed tag the composed flow writes it under.</summary>
+    private static MessageWriteRequest ToRequest(MessageInput message, string tag) =>
+        new(
+            message.Reference,
+            tag,
+            message.IpfsContent,
+            message.Metadata.Description,
+            message.Metadata.ContentType,
+            message.Metadata.ContentHash,
+            message.Metadata.Properties.ToPairs());
+
+    // The realXmarket secondary-market offers protocol. The namespace category constant itself
+    // lives on BucketService, which enforces the open-create relaxation for it.
+    private const string OffersSuffix = " offers";
+    private const string OfferBucketCategory = "realXmarket";
+    private const string AssetIdPropertyKey = "assetId";
+    private const string KeySharingTag = "didcomm/key-sharing-v1";
+    private const string OfferTag = "realXmarket/offer";
+    private const int MaxOfferPropertyNameLen = 200;
+
+    /// <summary>u64 decimal strings are at most 20 digits; 64 gives the contract headroom.</summary>
+    private const int MaxAssetIdLen = 64;
+
+    /// <summary>Keeps "Offer: &lt;name&gt; #&lt;id&gt;" inside the domain's 256-char name bound.</summary>
+    private const int MaxShareListingIdLen = 40;
 
     /// <summary>
     /// Runs a mutation atomically. A pallet extrinsic either applies wholly or not at all, and
