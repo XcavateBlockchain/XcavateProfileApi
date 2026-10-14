@@ -38,6 +38,7 @@ services:
       - ADMIN_ADDRESSES=${ADMIN_ADDRESSES}
       - NOTIFICATIONS_API_URL=${NOTIFICATIONS_API_URL:-https://notifications-api.xcavate.io}
       - NOTIFICATIONS_API_KEY=${NOTIFICATIONS_API_KEY}
+      - INDEXER_WEBHOOK_SECRET=${INDEXER_WEBHOOK_SECRET}
     depends_on:
       postgres:
         condition: service_healthy

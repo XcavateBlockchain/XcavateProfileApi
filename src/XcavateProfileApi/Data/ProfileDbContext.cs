@@ -17,6 +17,8 @@ public class ProfileDbContext : DbContext
 
     public DbSet<WalletMigration> WalletMigrations { get; set; } = default!;
 
+    public DbSet<ProcessedWebhookEvent> ProcessedWebhookEvents { get; set; } = default!;
+
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
         SyncNicknameKeys();
@@ -116,6 +118,19 @@ public class ProfileDbContext : DbContext
             entity.HasKey(m => m.Ss58Address);
             entity.Property(m => m.Ss58Address).IsRequired();
             entity.Property(m => m.SolanaAddress).IsRequired();
+        });
+
+        // Configure ProcessedWebhookEvent entity. Keyed by the event's natural dedupe key
+        // (see the entity's remarks); EventType/TxSignature stay queryable for operator
+        // forensics ("did we get the distribution for tx X?").
+        modelBuilder.Entity<ProcessedWebhookEvent>(entity =>
+        {
+            entity.HasKey(e => e.EventKey);
+            entity.Property(e => e.EventKey).IsRequired().HasMaxLength(512);
+            entity.Property(e => e.EventType).IsRequired().HasMaxLength(64);
+            entity.Property(e => e.TxSignature).IsRequired().HasMaxLength(128);
+            entity.HasIndex(e => e.TxSignature);
+            entity.Property(e => e.ProcessedAt).IsRequired();
         });
     }
 

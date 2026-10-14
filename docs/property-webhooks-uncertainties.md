@@ -29,6 +29,19 @@ backoff; a non-2xx answer means "retry forever" (30 s doubling, 1 h cap).
 | `challenge_finalized` | property program finalizes a challenge | *(indexer env var)* | `POST /webhooks/challenge_finalized_devnet` | **implemented** (posts a `voting/result` message — see #9) |
 | `property_holder_changed` | marketplace `reserve_shares` / `buy_property_shares` (added) and `unreserve_shares` / `release_reservation` / `close_cancelled_position` / `withdraw_*` (removed) | `HOLDER_CHANGED_WEBHOOK_URL` | `POST /webhooks/property_holder_changed_devnet` | **implemented** (viewer add/remove + creation-time reconcile — see #3) |
 
+A third group — the notification webhooks — fans out into push notifications instead of bucket
+state (`src/XcavateProfileApi/Controllers/NotificationWebhooksController.cs`). Unlike the groups
+above they are gated by a shared secret (`INDEXER_WEBHOOK_SECRET`, sent as the route URL's
+`?secret=` query parameter or the `X-Webhook-Secret` header; unset = the endpoints fail closed
+with 503), because a forged POST here is push spam, not an idempotent bucket mutation. They
+dedupe on the event's natural key in `ProcessedWebhookEvents` (recorded before the 2xx), and
+push only to wallets that map to a registered profile (direct, or via `WalletMigrations`).
+
+| Indexer event type | Trigger (on-chain) | Env var (indexer) | Endpoint here | Status |
+|---|---|---|---|---|
+| `income_distributed` | property `distribute_income` (rent paid into a property's vault) | `INCOME_DISTRIBUTED_WEBHOOK_URL` | `POST /webhooks/income_distributed_devnet` | **implemented** (pushes "Rent received" to every current holder with a profile — the fanout set is the indexer's active `shareHoldings`) |
+| `shares_transferred` | marketplace `send_property_shares` (a direct wallet-to-wallet send) | `SHARES_RECEIVED_WEBHOOK_URL` | `POST /webhooks/shares_received_devnet` | **implemented** (pushes "You received property shares" to the receiver; property name best-effort from the indexer) |
+
 Conventions the endpoints rely on: the property's namespace is found by `PropertyId == listing_id`
 (falling back to `Creator == <PropertyAsset PDA>`), and its legal-process bucket by
 `Category == "legal-process"` inside that namespace. The namespace creator (the PropertyAsset PDA)
