@@ -93,6 +93,7 @@ jobs:
             NOTIFICATIONS_API_KEY=${{ secrets.HETZNER_NOTIFICATIONS_API_KEY }}
             RENT_COLLECTOR_PRIVATE_KEY=${{ secrets.RENT_COLLECTOR_PRIVATE_KEY }}
             RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID=${{ secrets.RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID }}
+            RENT_COLLECTOR_PROPERTY_PROGRAM_ID=${{ secrets.RENT_COLLECTOR_PROPERTY_PROGRAM_ID }}
             EOF
             
             docker compose down
