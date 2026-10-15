@@ -18,12 +18,22 @@ public class MarketplaceEndpointTests
 {
     private const string Endpoint = "/api/marketplace/rent-collector-signature";
     private const string ProgramIdBase58 = "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T";
+    private const string PropertyProgramIdBase58 = "deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq";
 
     private static readonly byte[] Buy = [4, 160, 53, 28, 202, 98, 234, 11];
     private static readonly byte[] ClaimShares = [130, 131, 29, 237, 134, 20, 110, 245];
+    private static readonly byte[] ClaimSpvCase = [175, 185, 102, 63, 166, 39, 168, 56];
+    private static readonly byte[] BuyRelistedShares = [205, 204, 84, 12, 55, 204, 167, 234];
     private static readonly byte[] Reserve = [137, 47, 218, 50, 106, 149, 133, 110];
+    private static readonly byte[] SendPropertyShares = [214, 10, 132, 137, 120, 190, 89, 240];
+    private static readonly byte[] ClaimIncome = [6, 24, 199, 191, 118, 141, 95, 123];
+    private static readonly byte[] CloseIncomeCheckpoint = [178, 97, 236, 81, 222, 159, 104, 227];
+    private static readonly byte[] VoteOnAgent = [203, 127, 40, 102, 254, 243, 11, 244];
+    private static readonly byte[] VoteOnProposal = [188, 239, 13, 88, 119, 199, 251, 119];
+    private static readonly byte[] VoteOnChallenge = [19, 36, 128, 75, 123, 135, 79, 64];
 
     private static byte[] ProgramId => Encoders.Base58.DecodeData(ProgramIdBase58);
+    private static byte[] PropertyProgramId => Encoders.Base58.DecodeData(PropertyProgramIdBase58);
 
     /// <summary>
     /// A minimal compiled Solana message: 3-byte header, account keys, blockhash,
@@ -44,7 +54,17 @@ public class MarketplaceEndpointTests
         IReadOnlyList<byte[]> keys,
         int programIdIndex,
         IReadOnlyList<int> ixKeyIndices,
-        byte[] data)
+        byte[] data) =>
+        BuildRawWire(numRequiredSignatures, keys,
+            [new WireInstruction(programIdIndex, ixKeyIndices, data)]);
+
+    /// <summary>One instruction of a compiled message: program, account key indices, data.</summary>
+    private sealed record WireInstruction(int ProgramIdIndex, IReadOnlyList<int> KeyIndices, byte[] Data);
+
+    private static byte[] BuildRawWire(
+        int numRequiredSignatures,
+        IReadOnlyList<byte[]> keys,
+        IReadOnlyList<WireInstruction> instructions)
     {
 
         using var ms = new MemoryStream();
@@ -61,15 +81,18 @@ public class MarketplaceEndpointTests
             ms.Write(keys[i], 0, 32);
         }
         ms.Write(new byte[32]); // recent blockhash
-        ms.WriteByte(1); // instruction count (compact-u16, single byte)
-        ms.WriteByte((byte)programIdIndex);
-        ms.WriteByte((byte)ixKeyIndices.Count);
-        foreach (var index in ixKeyIndices)
+        WriteCompactU16(ms, instructions.Count);
+        foreach (var ix in instructions)
         {
-            ms.WriteByte((byte)index);
+            ms.WriteByte((byte)ix.ProgramIdIndex);
+            ms.WriteByte((byte)ix.KeyIndices.Count);
+            foreach (var index in ix.KeyIndices)
+            {
+                ms.WriteByte((byte)index);
+            }
+            WriteCompactU16(ms, ix.Data.Length);
+            ms.Write(ix.Data, 0, ix.Data.Length);
         }
-        WriteCompactU16(ms, data.Length);
-        ms.Write(data, 0, data.Length);
         return ms.ToArray();
     }
 
@@ -338,5 +361,310 @@ public class MarketplaceEndpointTests
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+    }
+
+    [Test]
+    public async Task Claim_spv_case_message_is_signed()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], ClaimSpvCase);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Buy_relisted_shares_message_is_signed()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], BuyRelistedShares);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Send_property_shares_message_is_signed_and_the_signature_verifies()
+    {
+        // The sender (instruction account [0]) is the requesting wallet; the rent collector
+        // fronts the receiver's holding account creation as payer.
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [1, 0], SendPropertyShares);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        var verified = new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58));
+        Assert.That(verified, Is.True, "the returned signature must verify over the exact posted bytes");
+    }
+
+    [Test]
+    public async Task Claim_income_on_the_property_program_is_signed_and_the_signature_verifies()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], ClaimIncome);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        var verified = new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58));
+        Assert.That(verified, Is.True, "the returned signature must verify over the exact posted bytes");
+    }
+
+    [Test]
+    public async Task Close_income_checkpoint_on_the_property_program_is_signed()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], CloseIncomeCheckpoint);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Vote_on_agent_on_the_property_program_is_signed()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], VoteOnAgent);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Vote_on_proposal_on_the_property_program_is_signed()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], VoteOnProposal);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Vote_on_challenge_on_the_property_program_is_signed()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], VoteOnChallenge);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Claim_bundle_with_close_income_checkpoint_is_signed()
+    {
+        // The real claim flow: one claim_income per claimable mint, then one
+        // close_income_checkpoint, all on the property program in a single message.
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId };
+        byte[] Filler(byte[] disc) => disc.Concat(Enumerable.Repeat((byte)0x42, 8)).ToArray();
+        var wire = BuildRawWire(2, keys,
+        [
+            new WireInstruction(2, [1, 0], Filler(ClaimIncome)),
+            new WireInstruction(2, [1, 0], Filler(ClaimIncome)),
+            new WireInstruction(2, [1, 0], Filler(CloseIncomeCheckpoint)),
+        ]);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Empty_property_program_id_env_falls_back_to_the_devnet_program()
+    {
+        // Same "secret exists but is unset" shape as the marketplace program id fallback.
+        var rent = new Solnet.Wallet.Account();
+        await using var host = await MarketplaceHost.StartAsync(
+            rent.PrivateKey.KeyBytes, rentPropertyProgramId: string.Empty);
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], ClaimIncome);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Property_discriminator_targeting_the_marketplace_program_is_rejected()
+    {
+        // claim_income is only allowlisted on the property program.
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [1, 0], ClaimIncome);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("discriminator not allowed"));
+    }
+
+    [Test]
+    public async Task Marketplace_discriminator_targeting_the_property_program_is_rejected()
+    {
+        // buy_property_shares is only allowlisted on the marketplace program.
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], Buy);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("discriminator not allowed"));
+    }
+
+    [Test]
+    public async Task Property_program_with_a_non_allowlisted_discriminator_is_rejected()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var unknown = new byte[] { 9, 9, 9, 9, 9, 9, 9, 9 };
+        var wire = BuildWire(
+            2, [host.RentPubkey, investor.PublicKey.KeyBytes, PropertyProgramId], 2, [1, 0], unknown);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("discriminator not allowed"));
+    }
+
+    [Test]
+    public async Task Claim_income_whose_holder_is_not_the_requesting_wallet_is_rejected()
+    {
+        // The investor signs the message (index 1), but the instruction's holder slot
+        // points at someone else's key.
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var other = new Solnet.Wallet.Account().PublicKey.KeyBytes;
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, other, PropertyProgramId };
+        var wire = BuildWire(2, keys, 3, [2, 0], ClaimIncome);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("first account"));
+    }
+
+    [Test]
+    public async Task Send_property_shares_whose_sender_is_not_the_requesting_wallet_is_rejected()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var other = new Solnet.Wallet.Account().PublicKey.KeyBytes;
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, other, ProgramId };
+        var wire = BuildWire(2, keys, 3, [2, 0], SendPropertyShares);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("first account"));
+    }
+
+    [Test]
+    public async Task Vote_on_proposal_whose_voter_is_not_the_requesting_wallet_is_rejected()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var other = new Solnet.Wallet.Account().PublicKey.KeyBytes;
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, other, PropertyProgramId };
+        var wire = BuildWire(2, keys, 3, [2, 0], VoteOnProposal);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("first account"));
     }
 }

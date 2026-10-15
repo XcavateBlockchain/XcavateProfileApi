@@ -80,6 +80,21 @@ public interface IIndexerClient
     Task<IReadOnlyList<string>> GetCurrentHolderWalletsAsync(long listingId, CancellationToken ct);
 
     /// <summary>
+    /// The wallets currently HOLDING the asset's shares: the secondary-market
+    /// <c>shareHoldings</c> rows that are active and carry a positive amount, deduplicated.
+    /// This is the income-distribution fanout set — after claim the holding IS the
+    /// income-bearing position, so unlike <see cref="GetCurrentHolderWalletsAsync"/> the
+    /// sale-phase investor positions are not part of it.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetShareHolderWalletsAsync(long assetId, CancellationToken ct);
+
+    /// <summary>
+    /// The property asset's display name (marketplace <c>PropertyAsset.name</c>), or null when
+    /// the indexer has no row for the asset. Best-effort notification enrichment only.
+    /// </summary>
+    Task<string?> GetPropertyAssetNameAsync(long assetId, CancellationToken ct);
+
+    /// <summary>
     /// The wallet behind a letting-agent ENTRY PDA (a property-program <c>LettingAgent</c>
     /// account, seeded <c>["agent", wallet]</c>), or null when the indexer has no such row. The
     /// GraphQL <c>lettingAgents</c> connection filters by wallet or region only — never by entry
@@ -279,6 +294,18 @@ public class IndexerClient(
             ct);
 
         // Secondary market: live holdings with a balance (buyers have no investor position).
+        foreach (var wallet in await GetShareHolderWalletsAsync(listingId, ct))
+        {
+            wallets.Add(wallet);
+        }
+
+        return wallets.ToList();
+    }
+
+    public async Task<IReadOnlyList<string>> GetShareHolderWalletsAsync(long assetId, CancellationToken ct)
+    {
+        var wallets = new HashSet<string>(StringComparer.Ordinal);
+
         await PageHoldersAsync(
             """
             query($id: I64!, $first: Int!, $offset: Int!) {
@@ -287,13 +314,30 @@ public class IndexerClient(
               }
             }
             """,
-            "shareHoldings", listingId, wallets,
+            "shareHoldings", assetId, wallets,
             n => LongOf(n, "amount") > 0
                 ? n.GetProperty("owner").GetString()
                 : null,
             ct);
 
         return wallets.ToList();
+    }
+
+    public async Task<string?> GetPropertyAssetNameAsync(long assetId, CancellationToken ct)
+    {
+        var nodes = await QueryAsync(
+            """
+            query($id: I64!) {
+              propertyAssets(assetId: $id, first: 1, offset: 0) {
+                nodes { name }
+              }
+            }
+            """,
+            new { id = I64Var(assetId) }, "propertyAssets", ct);
+
+        return FirstNode(nodes) is { } asset
+            ? asset.GetProperty("name").GetString()
+            : null;
     }
 
     public async Task<string?> GetLettingAgentWalletAsync(string entryPda, CancellationToken ct)

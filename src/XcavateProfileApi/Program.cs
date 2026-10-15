@@ -149,8 +149,9 @@ builder.Services.AddScoped(sp => sp.GetRequiredService<
     Microsoft.Extensions.Options.IOptions<SignatureValidationOptions>>().Value);
 builder.Services.AddScoped<ISignatureValidator, SignatureValidator>();
 
-// Rent collector signing for the realXmarket marketplace (buy/claim fee payer). Stateless after
-// construction; reads RENT_COLLECTOR_PRIVATE_KEY from the environment.
+// Rent collector signing for the realXmarket marketplace and property programs (fee payer /
+// rent-fronting payer). Stateless after construction; reads RENT_COLLECTOR_PRIVATE_KEY from
+// the environment.
 builder.Services.AddSingleton<MarketplaceRentCollectorSigningService>(sp =>
     new MarketplaceRentCollectorSigningService(sp.GetRequiredService<IConfiguration>()));
 

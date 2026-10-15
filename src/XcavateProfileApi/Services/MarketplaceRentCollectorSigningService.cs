@@ -7,19 +7,30 @@ namespace XcavateProfileApi.Services;
 /// <summary>
 /// Validates a compiled Solana message and signs it with the rent collector key. The service is
 /// stateless after construction: it holds the decoded keypair bytes, the rent collector public
-/// key, the marketplace program id, and the allowed instruction discriminators.
+/// key, the marketplace and property program ids, and the per-program allowed instruction
+/// discriminators.
 /// </summary>
 public class MarketplaceRentCollectorSigningService
 {
+    // Anchor discriminators: sha256("global:<instruction_name>")[0..8].
+    // Marketplace program (dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T).
     private static readonly byte[] BuyDiscriminator = [4, 160, 53, 28, 202, 98, 234, 11];
     private static readonly byte[] ClaimSharesDiscriminator = [130, 131, 29, 237, 134, 20, 110, 245];
     private static readonly byte[] ClaimSpvCaseDiscriminator = [175, 185, 102, 63, 166, 39, 168, 56];
     private static readonly byte[] BuyRelistedSharesDiscriminator = [205, 204, 84, 12, 55, 204, 167, 234];
     private static readonly byte[] ReserveDiscriminator = [137, 47, 218, 50, 106, 149, 133, 110];
+    private static readonly byte[] SendPropertySharesDiscriminator = [214, 10, 132, 137, 120, 190, 89, 240];
+    // Property program (deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq).
+    private static readonly byte[] ClaimIncomeDiscriminator = [6, 24, 199, 191, 118, 141, 95, 123];
+    private static readonly byte[] CloseIncomeCheckpointDiscriminator = [178, 97, 236, 81, 222, 159, 104, 227];
+    private static readonly byte[] VoteOnAgentDiscriminator = [203, 127, 40, 102, 254, 243, 11, 244];
+    private static readonly byte[] VoteOnProposalDiscriminator = [188, 239, 13, 88, 119, 199, 251, 119];
+    private static readonly byte[] VoteOnChallengeDiscriminator = [19, 36, 128, 75, 123, 135, 79, 64];
 
     private readonly byte[] _keypair;
     private readonly byte[] _rentPubkey;
     private readonly byte[] _programId;
+    private readonly byte[] _propertyProgramId;
 
     /// <summary>Outcome: not configured (key missing), error (validation failed), or signed.</summary>
     public enum Outcome { NotConfigured, Error, Signed }
@@ -93,11 +104,13 @@ public class MarketplaceRentCollectorSigningService
                 return (Outcome.Error, "Fee payer is not the rent collector", null);
             }
 
-            // Program id must be present among the account keys.
+            // An allowlisted program id (marketplace or property) must be present among the
+            // account keys.
             bool programPresent = false;
             foreach (var key in accountKeys)
             {
-                if (key.AsSpan().SequenceEqual(_programId))
+                if (key.AsSpan().SequenceEqual(_programId)
+                    || key.AsSpan().SequenceEqual(_propertyProgramId))
                 {
                     programPresent = true;
                     break;
@@ -105,7 +118,7 @@ public class MarketplaceRentCollectorSigningService
             }
             if (!programPresent)
             {
-                return (Outcome.Error, "Marketplace program id not found in account keys", null);
+                return (Outcome.Error, "Marketplace or property program id not found in account keys", null);
             }
 
             // Investor must be among the first numRequiredSignatures keys, at index != 0.
@@ -129,8 +142,8 @@ public class MarketplaceRentCollectorSigningService
                 return (Outcome.Error, "Investor is not a required signer", null);
             }
 
-            // Validate every instruction: programIdIndex must resolve to the program id,
-            // and data[0..8] must be an allowed discriminator.
+            // Validate every instruction: programIdIndex must resolve to an allowlisted
+            // program id, and data[0..8] must be a discriminator allowed for that program.
             int ixCount;
             try
             {
@@ -151,9 +164,12 @@ public class MarketplaceRentCollectorSigningService
                 {
                     return (Outcome.Error, "Instruction programIdIndex out of range", null);
                 }
-                if (!accountKeys[programIdIndex].AsSpan().SequenceEqual(_programId))
+                bool isMarketplace = accountKeys[programIdIndex].AsSpan().SequenceEqual(_programId);
+                bool isProperty = accountKeys[programIdIndex].AsSpan().SequenceEqual(_propertyProgramId);
+                if (!isMarketplace && !isProperty)
                 {
-                    return (Outcome.Error, "Instruction does not target the marketplace program", null);
+                    return (Outcome.Error,
+                        "Instruction does not target the marketplace program or the property program", null);
                 }
 
                 if (offset >= message.Length)
@@ -165,6 +181,9 @@ public class MarketplaceRentCollectorSigningService
                 {
                     return (Outcome.Error, "Malformed message: truncated instruction", null);
                 }
+                // The instruction's first account key index - the holder/voter/sender position
+                // the newer allowlisted instructions pin to the requesting wallet.
+                int firstKeyIndex = keyCount > 0 ? message[offset] : -1;
                 offset += keyCount; // skip key indices
 
                 int dataLength;
@@ -187,9 +206,24 @@ public class MarketplaceRentCollectorSigningService
                 }
 
                 byte[] disc = message.AsSpan(offset, 8).ToArray();
-                if (!IsAllowedDiscriminator(disc))
+                bool allowed = isMarketplace
+                    ? IsAllowedMarketplaceDiscriminator(disc)
+                    : IsAllowedPropertyDiscriminator(disc);
+                if (!allowed)
                 {
                     return (Outcome.Error, "Instruction discriminator not allowed", null);
+                }
+
+                // For the instructions added with the property program (plus the marketplace
+                // send_property_shares), account [0] is the holder/voter/sender whose assets
+                // move or lock - pin it to the wallet that requested the signature.
+                if (RequiresRequestingWalletAsFirstAccount(disc)
+                    && (firstKeyIndex < 0
+                        || firstKeyIndex >= accountCount
+                        || !accountKeys[firstKeyIndex].AsSpan().SequenceEqual(investorBytes)))
+                {
+                    return (Outcome.Error,
+                        "Instruction's first account is not the requesting wallet", null);
                 }
 
                 offset += dataLength;
@@ -220,13 +254,37 @@ public class MarketplaceRentCollectorSigningService
         }
     }
 
-    private static bool IsAllowedDiscriminator(byte[] data)
+    private static bool IsAllowedMarketplaceDiscriminator(byte[] data)
     {
         return data.AsSpan(0, 8).SequenceEqual(BuyDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ClaimSharesDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ClaimSpvCaseDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(BuyRelistedSharesDiscriminator)
-            || data.AsSpan(0, 8).SequenceEqual(ReserveDiscriminator);
+            || data.AsSpan(0, 8).SequenceEqual(ReserveDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(SendPropertySharesDiscriminator);
+    }
+
+    private static bool IsAllowedPropertyDiscriminator(byte[] data)
+    {
+        return data.AsSpan(0, 8).SequenceEqual(ClaimIncomeDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(CloseIncomeCheckpointDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(VoteOnAgentDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(VoteOnProposalDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(VoteOnChallengeDiscriminator);
+    }
+
+    /// <summary>
+    /// The instructions whose on-chain account [0] (sender / holder / voter) must be the
+    /// wallet that requested the rent collector's signature.
+    /// </summary>
+    private static bool RequiresRequestingWalletAsFirstAccount(byte[] data)
+    {
+        return data.AsSpan(0, 8).SequenceEqual(SendPropertySharesDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(ClaimIncomeDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(CloseIncomeCheckpointDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(VoteOnAgentDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(VoteOnProposalDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(VoteOnChallengeDiscriminator);
     }
 
     /// <summary>Reads a Solana compact-u16 (variable-length LEB128-like) from <paramref name="data"/>.</summary>
@@ -252,6 +310,7 @@ public class MarketplaceRentCollectorSigningService
             _keypair = [];
             _rentPubkey = [];
             _programId = [];
+            _propertyProgramId = [];
             return;
         }
 
@@ -263,6 +322,7 @@ public class MarketplaceRentCollectorSigningService
             _keypair = [];
             _rentPubkey = [];
             _programId = [];
+            _propertyProgramId = [];
             return;
         }
 
@@ -276,6 +336,13 @@ public class MarketplaceRentCollectorSigningService
             ? "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T"
             : programIdEnv;
         _programId = Encoders.Base58.DecodeData(programIdStr);
+
+        string? propertyProgramIdEnv = config["RENT_COLLECTOR_PROPERTY_PROGRAM_ID"];
+        // Same empty-is-missing fallback, to the devnet property program id.
+        string propertyProgramIdStr = string.IsNullOrWhiteSpace(propertyProgramIdEnv)
+            ? "deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq"
+            : propertyProgramIdEnv;
+        _propertyProgramId = Encoders.Base58.DecodeData(propertyProgramIdStr);
     }
 
     private static byte[]? DecodeKeyPair(string value)

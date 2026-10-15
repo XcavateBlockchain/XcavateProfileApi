@@ -19,6 +19,13 @@ public sealed class TestIndexerClient : IIndexerClient
     public long? ShareAmount { get; set; } = 1_000;
     public IReadOnlyList<string>? HolderWallets { get; set; } = [];
     public string? LettingAgentWallet { get; set; }
+
+    /// <summary>The income webhook's fanout set (the asset's current share holders).</summary>
+    public IReadOnlyList<string>? ShareHolderWallets { get; set; } = [];
+
+    /// <summary>The shares webhook's push-copy enrichment (the property asset's name).</summary>
+    public string? PropertyAssetName { get; set; }
+
     public bool ThrowOnQuery { get; set; }
 
     /// <summary>
@@ -60,6 +67,19 @@ public sealed class TestIndexerClient : IIndexerClient
 
         return Task.FromResult(HolderWallets ?? (IReadOnlyList<string>)[]);
     }
+
+    public Task<IReadOnlyList<string>> GetShareHolderWalletsAsync(long assetId, CancellationToken ct)
+    {
+        if (ThrowOnQuery || ThrowOnHolders)
+        {
+            throw new IndexerQueryException("the indexer is down (simulated)");
+        }
+
+        return Task.FromResult(ShareHolderWallets ?? (IReadOnlyList<string>)[]);
+    }
+
+    public Task<string?> GetPropertyAssetNameAsync(long assetId, CancellationToken ct)
+        => Respond(PropertyAssetName);
 
     public Task<string?> GetLettingAgentWalletAsync(string entryPda, CancellationToken ct)
         => Respond(LettingAgentWallet);

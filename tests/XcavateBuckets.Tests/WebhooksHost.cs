@@ -3,23 +3,28 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateProfileApi.Controllers;
 using XcavateProfileApi.Data;
 using XcavateProfileApi.GraphQL;
 using XcavateProfileApi.Services.Indexer;
+using XcavateProfileApi.Services.Notifications;
 
 namespace XcavateBuckets.Tests;
 
 /// <summary>
-/// An in-process host running the real <see cref="WebhooksController"/> over the real bucket domain
-/// services and SQLite databases (bucket + profile stores) — the counterpart to
-/// <see cref="RestHost"/> and <see cref="GraphQLHost"/>. It covers the property-asset webhook,
-/// including its idempotent redelivery, without the docker stack the E2E suite needs. The webhook
-/// carries no signature, so no signing client or validator is wired here.
+/// An in-process host running the real <see cref="WebhooksController"/> (and the notification
+/// webhooks controller) over the real bucket domain services and SQLite databases (bucket +
+/// profile stores) — the counterpart to <see cref="RestHost"/> and <see cref="GraphQLHost"/>. It
+/// covers the property-asset webhook, including its idempotent redelivery, without the docker
+/// stack the E2E suite needs. The bucket webhook carries no signature, so no signing client or
+/// validator is wired here; the notification webhooks' shared secret is injected as
+/// configuration when a test asks for it.
 /// </summary>
 public sealed class WebhooksHost : IAsyncDisposable
 {
@@ -32,13 +37,15 @@ public sealed class WebhooksHost : IAsyncDisposable
         SqliteConnection connection,
         SqliteConnection profileConnection,
         HttpClient client,
-        TestIndexerClient indexer)
+        TestIndexerClient indexer,
+        NotificationQueue? queue)
     {
         _host = host;
         _connection = connection;
         _profileConnection = profileConnection;
         Client = client;
         Indexer = indexer;
+        Queue = queue;
     }
 
     /// <summary>A raw client — the webhook needs no credentials.</summary>
@@ -50,7 +57,15 @@ public sealed class WebhooksHost : IAsyncDisposable
     /// </summary>
     public TestIndexerClient Indexer { get; }
 
-    public static async Task<WebhooksHost> StartAsync()
+    /// <summary>
+    /// The push queue the notification webhooks enqueue into, when this host was started with
+    /// push configured (StartAsync's pushConfigured) — drain it to assert the fanout. Null on a
+    /// push-less host.
+    /// </summary>
+    public NotificationQueue? Queue { get; }
+
+    public static async Task<WebhooksHost> StartAsync(
+        string? webhookSecret = null, bool pushConfigured = true)
     {
         var connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
@@ -60,11 +75,24 @@ public sealed class WebhooksHost : IAsyncDisposable
         profileConnection.Open();
 
         var indexer = new TestIndexerClient();
+        var queue = pushConfigured
+            ? new NotificationQueue(NullLogger<NotificationQueue>.Instance)
+            : null;
 
         var builder = Host.CreateDefaultBuilder();
         builder.ConfigureWebHost(web =>
         {
             web.UseTestServer();
+            if (webhookSecret is not null)
+            {
+                // The notification webhooks' shared secret, injected as configuration the same
+                // way the INDEXER_WEBHOOK_SECRET env var delivers it in production.
+                web.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(
+                    new Dictionary<string, string?>
+                    {
+                        [NotificationWebhooksController.WebhookSecretConfigKey] = webhookSecret
+                    }));
+            }
             web.ConfigureServices(services =>
             {
                 // SuppressAsyncSuffixInActionNames mirrors Program.cs, so action names keep the
@@ -79,6 +107,14 @@ public sealed class WebhooksHost : IAsyncDisposable
                 // The voting webhooks resolve vote state through this stub instead of the live
                 // indexer GraphQL.
                 services.AddSingleton<IIndexerClient>(indexer);
+
+                // Program.cs registers the queue only with NOTIFICATIONS_API_KEY; the
+                // notification webhooks resolve it per request, so its absence is the
+                // push-not-configured path under test.
+                if (queue is not null)
+                {
+                    services.AddSingleton(queue);
+                }
 
                 // The domain wiring shared with the application host: BucketDbContext is the only
                 // thing AddBucketDomain expects the caller to supply (see its remarks).
@@ -101,7 +137,7 @@ public sealed class WebhooksHost : IAsyncDisposable
                 .Database.EnsureCreatedAsync();
         }
 
-        return new WebhooksHost(host, connection, profileConnection, host.GetTestClient(), indexer);
+        return new WebhooksHost(host, connection, profileConnection, host.GetTestClient(), indexer, queue);
     }
 
     /// <summary>Every namespace straight out of the database, bypassing the API.</summary>

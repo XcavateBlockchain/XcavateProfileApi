@@ -192,6 +192,32 @@ namespace XcavateProfileApi.Migrations
 
                     b.ToTable("WalletMigrations");
                 });
+
+            modelBuilder.Entity("XcavateProfileApi.Data.ProcessedWebhookEvent", b =>
+                {
+                    b.Property<string>("EventKey")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("TxSignature")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.HasKey("EventKey");
+
+                    b.HasIndex("TxSignature");
+
+                    b.ToTable("ProcessedWebhookEvents");
+                });
 #pragma warning restore 612, 618
         }
     }

@@ -7,13 +7,14 @@ using XcavateProfileApi.Services;
 namespace XcavateProfileApi.Controllers;
 
 /// <summary>
-/// Server-side signing for the realXmarket Solana marketplace program. The rent collector is
-/// the fee payer for certain marketplace transactions (buy/claim of property shares) but is
-/// never an on-chain instruction signer — so the investor's wallet cannot co-sign on its own
-/// machine. This endpoint holds the rent collector's key (in the server's environment) and
-/// returns its signature over a message the client has already assembled, after checking the
-/// message is one of the expected marketplace transactions and that the investor named by the
-/// X-SS58-Address header is a required signer of it.
+/// Server-side signing for the realXmarket Solana marketplace and property programs. The rent
+/// collector is the fee payer for certain transactions (buy/claim of property shares, share
+/// sends, governance votes, income claims) but is never an on-chain instruction signer owned
+/// by the investor - so the investor's wallet cannot co-sign on its own machine. This endpoint
+/// holds the rent collector's key (in the server's environment) and returns its signature over
+/// a message the client has already assembled, after checking the message is one of the
+/// expected transactions and that the investor named by the X-SS58-Address header is a
+/// required signer of it.
 /// </summary>
 [ApiController]
 [Route("api/marketplace")]

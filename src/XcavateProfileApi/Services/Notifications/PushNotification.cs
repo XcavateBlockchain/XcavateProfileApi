@@ -19,4 +19,16 @@ public sealed record PushNotification(
     /// announcements), so the mobile app deep-links to the property's vote rather than the chat.
     /// </summary>
     public const string VotingType = "voting";
+
+    /// <summary>
+    /// The type for the "rent received" push the income-distributed webhook fans out to a
+    /// property's holders. No bucket is attached — the app just opens.
+    /// </summary>
+    public const string IncomeDistributedType = "income_distributed";
+
+    /// <summary>
+    /// The type for the "you received shares" push the shares-transferred webhook sends to the
+    /// receiver of a direct share send. No bucket is attached — the app just opens.
+    /// </summary>
+    public const string SharesReceivedType = "shares_received";
 }

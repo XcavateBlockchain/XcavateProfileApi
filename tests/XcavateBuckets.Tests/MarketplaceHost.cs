@@ -52,7 +52,8 @@ public sealed class MarketplaceHost : IAsyncDisposable
     public static async Task<MarketplaceHost> StartAsync(
         byte[]? rentKeyPair = null,
         RentKeyFormat format = RentKeyFormat.Base58,
-        string rentProgramId = "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T")
+        string rentProgramId = "dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T",
+        string rentPropertyProgramId = "deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq")
     {
         var keypair = rentKeyPair ?? new Solnet.Wallet.Account().PrivateKey.KeyBytes;
         var rentPubkey = keypair.AsSpan(32, 32).ToArray();
@@ -69,7 +70,8 @@ public sealed class MarketplaceHost : IAsyncDisposable
         var configuration = new Dictionary<string, string?>
         {
             ["RENT_COLLECTOR_PRIVATE_KEY"] = rawKey,
-            ["RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID"] = rentProgramId
+            ["RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID"] = rentProgramId,
+            ["RENT_COLLECTOR_PROPERTY_PROGRAM_ID"] = rentPropertyProgramId
         };
 
         var builder = Host.CreateDefaultBuilder();
