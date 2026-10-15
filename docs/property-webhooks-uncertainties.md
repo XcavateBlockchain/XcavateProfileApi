@@ -176,6 +176,15 @@ paths, plus `HOLDER_CHANGED_WEBHOOK_URL` for the holder-membership route (#3), a
 service needs `INDEXER_GRAPHQL_URL` pointing at the indexer's GraphQL for
 the resolution reads.
 
+The notification pair (`income_distributed` / `shares_received`) takes one more piece on
+BOTH sides, because a forged POST there is push spam: this repo's `INDEXER_WEBHOOK_SECRET`
+GitHub secret (`deploy.yml` renders it into `.env`; `docker-compose.yml` passes it through
+to the API container), and the indexer-side `INCOME_DISTRIBUTED_WEBHOOK_URL` /
+`SHARES_RECEIVED_WEBHOOK_URL` values must carry the same value as their `?secret=` query
+parameter (e.g. `https://<this API's host>/webhooks/income_distributed_devnet?secret=<same
+value>`) — the indexer's delivery loop cannot set headers, so the URL is the credential.
+Unset on this service = the endpoints fail closed with 503 (see `.env.example`).
+
 ## 10. IndexerClient I64 wire format — BUG FOUND AND FIXED (affected every resolution read)
 
 The indexer's juniper `I64` scalar is **string-typed on the wire** (`"8"`, not `8`), in both

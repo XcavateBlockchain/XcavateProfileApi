@@ -94,6 +94,7 @@ jobs:
             RENT_COLLECTOR_PRIVATE_KEY=${{ secrets.RENT_COLLECTOR_PRIVATE_KEY }}
             RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID=${{ secrets.RENT_COLLECTOR_MARKETPLACE_PROGRAM_ID }}
             RENT_COLLECTOR_PROPERTY_PROGRAM_ID=${{ secrets.RENT_COLLECTOR_PROPERTY_PROGRAM_ID }}
+            INDEXER_WEBHOOK_SECRET=${{ secrets.INDEXER_WEBHOOK_SECRET }}
             EOF
             
             docker compose down
