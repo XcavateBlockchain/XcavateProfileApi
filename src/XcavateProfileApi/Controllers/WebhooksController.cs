@@ -180,7 +180,8 @@ public class WebhooksController : ControllerBase
         if (payload is null
             || !string.Equals(payload.Event, OffersNamespaceCreatedEventName, StringComparison.Ordinal)
             || (payload.ListingId is null && string.IsNullOrWhiteSpace(payload.Property))
-            || string.IsNullOrWhiteSpace(payload.Cluster))
+            || string.IsNullOrWhiteSpace(payload.Cluster)
+            || string.IsNullOrWhiteSpace(payload.TxSignature))
         {
             return BadRequest("The body is not a valid 'offers_namespace_created' webhook payload.");
         }
@@ -198,7 +199,7 @@ public class WebhooksController : ControllerBase
         }
 
         var assetId = OffersNamespaceService.ReadAssetId(ns.Properties)
-            ?? payload.AssetId;
+            ?? payload.AssetId?.ToString(CultureInfo.InvariantCulture);
 
         if (string.IsNullOrWhiteSpace(assetId))
         {

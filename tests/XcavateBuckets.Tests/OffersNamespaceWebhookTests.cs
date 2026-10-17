@@ -72,7 +72,7 @@ public class OffersNamespaceWebhookTests
             ["listing_id"] = listingId,
             ["listing"] = "ListingPDA222",
             ["property"] = AssetPda,
-            ["asset_id"] = assetId?.ToString(),
+            ["asset_id"] = assetId,
             ["cluster"] = "devnet",
             ["tx_signature"] = txSignature ?? "OfferTx2222222222222222222222222222222222222222222",
             ["slot"] = 488_100_000,
