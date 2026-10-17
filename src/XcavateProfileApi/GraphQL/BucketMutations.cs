@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Data;
@@ -307,7 +306,7 @@ public class BucketMutations
         var address = caller.RequireAddress();
         ValidateOffersNamespaceInput(input.Name, input.AssetId, input.Cluster, "name", validator);
 
-        return InTransaction(db, ct, () => FindOrCreateOffersNamespaceAsync(
+        return InTransaction(db, ct, () => OffersNamespaceService.FindOrCreateOffersNamespaceAsync(
             address, input.Name, input.AssetId, input.Cluster, db, namespaces, ct));
     }
 
@@ -354,7 +353,7 @@ public class BucketMutations
 
         return InTransaction(db, ct, async () =>
         {
-            var ns = await FindOrCreateOffersNamespaceAsync(
+            var ns = await OffersNamespaceService.FindOrCreateOffersNamespaceAsync(
                 buyer, input.PropertyName, input.AssetId, input.Cluster, db, namespaces, ct);
 
             var bucket = await buckets.CreateAsync(
@@ -364,7 +363,7 @@ public class BucketMutations
                 OfferBucketCategory,
                 new Dictionary<string, string>
                 {
-                    [AssetIdPropertyKey] = input.AssetId,
+                    [OffersNamespaceService.AssetIdPropertyKey] = input.AssetId,
                     ["shareListingId"] = input.ShareListingId,
                     ["buyer"] = buyer,
                     ["seller"] = input.Seller
@@ -423,44 +422,6 @@ public class BucketMutations
         });
     }
 
-    /// <summary>
-    /// The property's offers namespace: the existing one carrying the assetId, else a new one
-    /// under the caller. The properties map is a JSON document the entity model exposes as a
-    /// string, so the category/cluster columns narrow the candidates in the query and the assetId
-    /// match is checked on the parsed document.
-    /// </summary>
-    private static async Task<Namespace> FindOrCreateOffersNamespaceAsync(
-        string caller,
-        string propertyName,
-        string assetId,
-        string cluster,
-        BucketDbContext db,
-        NamespaceService namespaces,
-        CancellationToken ct)
-    {
-        var candidates = await db.Namespaces
-            .Where(n => n.Category == BucketService.OffersNamespaceCategory && n.Cluster == cluster)
-            .ToListAsync(ct);
-
-        foreach (var candidate in candidates)
-        {
-            if (ReadAssetId(candidate.Properties) == assetId)
-            {
-                return candidate;
-            }
-        }
-
-        return await namespaces.CreateAsync(
-            caller,
-            OffersNamespaceName(propertyName),
-            schemaUri: null,
-            properties: [new KeyValuePair<string, string>(AssetIdPropertyKey, assetId)],
-            ct,
-            new NamespaceAttributes(
-                Category: BucketService.OffersNamespaceCategory,
-                Cluster: cluster));
-    }
-
     private static void ValidateOffersNamespaceInput(
         string propertyName, string assetId, string cluster, string nameField, InputValidator validator)
     {
@@ -473,33 +434,6 @@ public class BucketMutations
             throw BucketException.InvalidInput("'assetId' must be a u64 decimal string.");
         }
         validator.Required(cluster, validator.Options.MaxClusterLen, "cluster");
-    }
-
-    /// <summary>"&lt;propertyName&gt; offers", appending the suffix only when it is not already there.</summary>
-    private static string OffersNamespaceName(string propertyName) =>
-        propertyName.EndsWith(OffersSuffix, StringComparison.OrdinalIgnoreCase)
-            ? propertyName
-            : propertyName + OffersSuffix;
-
-    /// <summary>The assetId in a namespace's JSON properties map, or null when absent/malformed.</summary>
-    private static string? ReadAssetId(string? propertiesJson)
-    {
-        if (string.IsNullOrWhiteSpace(propertiesJson))
-        {
-            return null;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(propertiesJson);
-            return document.RootElement.TryGetProperty(AssetIdPropertyKey, out var value)
-                ? value.GetString()
-                : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
     }
 
     /// <summary>A message input with the protocol-fixed tag the composed flow writes it under.</summary>
@@ -515,9 +449,7 @@ public class BucketMutations
 
     // The realXmarket secondary-market offers protocol. The namespace category constant itself
     // lives on BucketService, which enforces the open-create relaxation for it.
-    private const string OffersSuffix = " offers";
     private const string OfferBucketCategory = "realXmarket";
-    private const string AssetIdPropertyKey = "assetId";
     private const string KeySharingTag = "didcomm/key-sharing-v1";
     private const string OfferTag = "realXmarket/offer";
     private const int MaxOfferPropertyNameLen = 200;
