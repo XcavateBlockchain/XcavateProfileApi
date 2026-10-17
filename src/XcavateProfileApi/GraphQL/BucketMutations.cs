@@ -306,8 +306,12 @@ public class BucketMutations
         var address = caller.RequireAddress();
         ValidateOffersNamespaceInput(input.Name, input.AssetId, input.Cluster, "name", validator);
 
-        return InTransaction(db, ct, () => OffersNamespaceService.FindOrCreateOffersNamespaceAsync(
-            address, input.Name, input.AssetId, input.Cluster, db, namespaces, ct));
+        return InTransaction(db, ct, async () =>
+        {
+            var (ns, _) = await OffersNamespaceService.FindOrCreateOffersNamespaceAsync(
+                address, input.Name, input.AssetId, input.Cluster, db, namespaces, ct);
+            return ns;
+        });
     }
 
     /// <summary>
@@ -353,7 +357,7 @@ public class BucketMutations
 
         return InTransaction(db, ct, async () =>
         {
-            var ns = await OffersNamespaceService.FindOrCreateOffersNamespaceAsync(
+            var (ns, _) = await OffersNamespaceService.FindOrCreateOffersNamespaceAsync(
                 buyer, input.PropertyName, input.AssetId, input.Cluster, db, namespaces, ct);
 
             var bucket = await buckets.CreateAsync(

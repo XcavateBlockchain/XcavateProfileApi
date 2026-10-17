@@ -24,9 +24,9 @@ public sealed class OffersNamespaceCreatedPayload
     [JsonPropertyName("property")]
     public string? Property { get; set; }
 
-    /// <summary>The on-chain asset id (a u64 decimal string).</summary>
+    /// <summary>The on-chain asset id (a u64 JSON number).</summary>
     [JsonPropertyName("asset_id")]
-    public string? AssetId { get; set; }
+    public long? AssetId { get; set; }
 
     /// <summary>The Solana cluster this event belongs to, e.g. <c>devnet</c>.</summary>
     [JsonPropertyName("cluster")]
