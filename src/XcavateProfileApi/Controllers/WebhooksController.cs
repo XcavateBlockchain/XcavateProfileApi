@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -108,6 +109,7 @@ public class WebhooksController : ControllerBase
         var properties = new List<KeyValuePair<string, string>>
         {
             new("pubkey", payload.Pubkey),
+            new("asset_id", payload.AssetId?.ToString(CultureInfo.InvariantCulture) ?? string.Empty),
             new("share_mint", payload.ShareMint ?? string.Empty),
             new("tx_signature", payload.TxSignature ?? string.Empty),
             new("program", payload.Program ?? string.Empty)
@@ -1397,6 +1399,10 @@ public sealed class PropertyAssetRegisteredPayload
     /// <summary>The on-chain listing / property id.</summary>
     [JsonPropertyName("listing_id")]
     public long ListingId { get; set; }
+
+    /// <summary>The on-chain asset id (the PropertyAsset account's own id).</summary>
+    [JsonPropertyName("asset_id")]
+    public long? AssetId { get; set; }
 
     /// <summary>The asset's name, e.g. <c>42 Main Street</c>.</summary>
     [JsonPropertyName("name")]
