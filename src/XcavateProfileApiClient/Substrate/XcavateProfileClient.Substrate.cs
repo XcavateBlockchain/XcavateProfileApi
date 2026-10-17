@@ -129,4 +129,21 @@ public partial class XcavateProfileClient
         return UploadImageAsync(
             address, imageStream, filename, new SubstrateRequestSigner(account), cancellationToken);
     }
+
+    /// <summary>
+    /// Upload (or replace) the lawyer's terms document PDF, authenticated with the account's
+    /// sr25519 signature
+    /// </summary>
+    public Task<TermsDocumentResponse> UploadTermsDocumentAsync(
+        string ss58address,
+        string fileName,
+        Stream content,
+        Account account,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+
+        return UploadTermsDocumentAsync(
+            ss58address, fileName, content, new SubstrateRequestSigner(account), cancellationToken);
+    }
 }

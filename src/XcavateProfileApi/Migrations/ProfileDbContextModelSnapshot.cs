@@ -218,6 +218,31 @@ namespace XcavateProfileApi.Migrations
 
                     b.ToTable("ProcessedWebhookEvents");
                 });
+
+            modelBuilder.Entity("XcavateProfileApi.Models.LawyerTermsDocument", b =>
+                {
+                    b.Property<string>("Ss58Address")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Cid")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Ss58Address");
+
+                    b.ToTable("LawyerTermsDocuments");
+                });
 #pragma warning restore 612, 618
         }
     }

@@ -207,6 +207,46 @@ public partial class XcavateProfileClient : IDisposable
     }
 
     /// <summary>
+    /// Get the lawyer's current IPFS-pinned terms document. Null when the wallet has none.
+    /// </summary>
+    public Task<TermsDocumentResponse?> GetTermsDocumentAsync(
+        string ss58address, CancellationToken cancellationToken = default) =>
+        GetOrNullAsync<TermsDocumentResponse>(
+            ApiPath.Of("api", "profiles", ss58address, "terms-document"), cancellationToken);
+
+    /// <summary>
+    /// Upload (or replace) the lawyer's terms document PDF using any signature scheme. Returns
+    /// the pinned document's CID and gateway URL. Like the image upload, the signature covers an
+    /// empty payload — the file bytes are deliberately outside it.
+    /// </summary>
+    public async Task<TermsDocumentResponse> UploadTermsDocumentAsync(
+        string ss58address,
+        string fileName,
+        Stream content,
+        IRequestSigner signer,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        ArgumentNullException.ThrowIfNull(signer);
+
+        var fileContent = new StreamContent(content);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+
+        var multipart = new MultipartFormDataContent { { fileContent, "file", fileName } };
+
+        // The server hashes an empty body for multipart uploads, so the client must too.
+        using var response = await SendSignedAsync(
+            HttpMethod.Post,
+            ApiPath.Of("api", "profiles", ss58address, "terms-document"),
+            multipart,
+            EmptyPayloadBody.Instance,
+            signer,
+            cancellationToken);
+
+        return await ReadRequiredAsync<TermsDocumentResponse>(response, cancellationToken);
+    }
+
+    /// <summary>
     /// Get all registered Polkadot → Solana wallet migration pairs
     /// </summary>
     public async Task<List<WalletMigration>> GetWalletMigrationsAsync(

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using XcavateProfile.Client;
+using XcavateProfileApi.Models;
 
 namespace XcavateProfileApi.Data;
 
@@ -18,6 +19,8 @@ public class ProfileDbContext : DbContext
     public DbSet<WalletMigration> WalletMigrations { get; set; } = default!;
 
     public DbSet<ProcessedWebhookEvent> ProcessedWebhookEvents { get; set; } = default!;
+
+    public DbSet<LawyerTermsDocument> LawyerTermsDocuments { get; set; } = default!;
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
@@ -131,6 +134,18 @@ public class ProfileDbContext : DbContext
             entity.Property(e => e.TxSignature).IsRequired().HasMaxLength(128);
             entity.HasIndex(e => e.TxSignature);
             entity.Property(e => e.ProcessedAt).IsRequired();
+        });
+
+        // Configure LawyerTermsDocument entity. Keyed by the wallet address: one current terms
+        // document per lawyer — a re-upload overwrites the row rather than adding a history.
+        modelBuilder.Entity<LawyerTermsDocument>(entity =>
+        {
+            entity.HasKey(d => d.Ss58Address);
+            entity.Property(d => d.Ss58Address).IsRequired();
+            entity.Property(d => d.Cid).IsRequired();
+            entity.Property(d => d.FileName).IsRequired();
+            entity.Property(d => d.ContentType).IsRequired();
+            entity.Property(d => d.UpdatedAt).IsRequired();
         });
     }
 
