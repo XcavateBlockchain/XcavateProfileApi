@@ -14,6 +14,8 @@ public static class OffersNamespaceService
 {
     public const string AssetIdPropertyKey = "assetId";
 
+    private const string AssetIdSnakeCasePropertyKey = "asset_id";
+
     private const string OffersSuffix = " offers";
 
     /// <summary>
@@ -22,7 +24,8 @@ public static class OffersNamespaceService
     /// a string, so the category/cluster columns narrow the candidates in the query and the
     /// assetId match is checked on the parsed document.
     /// </summary>
-    public static async Task<Namespace> FindOrCreateOffersNamespaceAsync(
+    /// <returns>The namespace and a flag that is <c>true</c> when it already existed.</returns>
+    public static async Task<(Namespace Namespace, bool Existed)> FindOrCreateOffersNamespaceAsync(
         string caller,
         string propertyName,
         string assetId,
@@ -39,11 +42,11 @@ public static class OffersNamespaceService
         {
             if (ReadAssetId(candidate.Properties) == assetId)
             {
-                return candidate;
+                return (candidate, true);
             }
         }
 
-        return await namespaces.CreateAsync(
+        var created = await namespaces.CreateAsync(
             caller,
             OffersNamespaceName(propertyName),
             schemaUri: null,
@@ -52,6 +55,8 @@ public static class OffersNamespaceService
             new NamespaceAttributes(
                 Category: BucketService.OffersNamespaceCategory,
                 Cluster: cluster));
+
+        return (created, false);
     }
 
     /// <summary>"&lt;propertyName&gt; offers", appending the suffix only when it is not already there.</summary>
@@ -60,7 +65,9 @@ public static class OffersNamespaceService
             ? propertyName
             : propertyName + OffersSuffix;
 
-    /// <summary>The assetId in a namespace's JSON properties map, or null when absent/malformed.</summary>
+    /// <summary>The assetId in a namespace's JSON properties map, or null when absent/malformed.
+    /// Accepts either the camelCase key written by the offers namespace path or the snake_case
+    /// key stored on the property namespace by <c>init_property_asset_devnet</c>.</summary>
     public static string? ReadAssetId(string? propertiesJson)
     {
         if (string.IsNullOrWhiteSpace(propertiesJson))
@@ -71,9 +78,13 @@ public static class OffersNamespaceService
         try
         {
             using var document = JsonDocument.Parse(propertiesJson);
-            return document.RootElement.TryGetProperty(AssetIdPropertyKey, out var value)
-                ? value.GetString()
-                : null;
+            if (document.RootElement.TryGetProperty(AssetIdPropertyKey, out var value)
+                || document.RootElement.TryGetProperty(AssetIdSnakeCasePropertyKey, out value))
+            {
+                return value.GetString();
+            }
+
+            return null;
         }
         catch (JsonException)
         {

@@ -40,29 +40,38 @@ namespace XcavateProfileApi.Controllers;
 public class WebhooksController : ControllerBase
 {
     private readonly BucketDbContext _db;
+    private readonly ProfileDbContext _profileDb;
     private readonly ViewerKeyResolver _viewerKeys;
     private readonly NamespaceService _namespaces;
     private readonly BucketService _buckets;
     private readonly MembershipService _memberships;
     private readonly MessageService _messages;
     private readonly IIndexerClient _indexer;
+    private readonly IConfiguration _config;
+    private readonly ILogger<WebhooksController> _logger;
 
     public WebhooksController(
         BucketDbContext db,
+        ProfileDbContext profileDb,
         ViewerKeyResolver viewerKeys,
         NamespaceService namespaces,
         BucketService buckets,
         MembershipService memberships,
         MessageService messages,
-        IIndexerClient indexer)
+        IIndexerClient indexer,
+        IConfiguration config,
+        ILogger<WebhooksController> logger)
     {
         _db = db;
+        _profileDb = profileDb;
         _viewerKeys = viewerKeys;
         _namespaces = namespaces;
         _buckets = buckets;
         _memberships = memberships;
         _messages = messages;
         _indexer = indexer;
+        _config = config;
+        _logger = logger;
     }
 
     /// <summary>
@@ -138,6 +147,86 @@ public class WebhooksController : ControllerBase
         await transaction.CommitAsync(ct);
 
         return Ok(new { status = "created", namespaceId = created.NamespaceId });
+    }
+
+    /// <summary>
+    /// Receives the <c>offers_namespace_created</c> event (a property became eligible for
+    /// secondary-market offers through <c>claim_shares</c> or <c>relist_shares</c>) and creates
+    /// the property's offers namespace named "&lt;property&gt; offers". Idempotent per
+    /// (asset_id, cluster), so redeliveries and re-listings do not create duplicates.
+    /// </summary>
+    /// <remarks>
+    /// Gated by <c>INDEXER_WEBHOOK_SECRET</c> because it is a write endpoint called by the
+    /// indexer, not a wallet-signed GraphQL mutation. The property name and asset id are resolved
+    /// from the property namespace created by <c>init_property_asset_devnet</c>; a missing
+    /// property namespace answers 404 so the indexer retry loop redelivers. Idempotent via both
+    /// the namespace (asset_id, cluster) lookup and the <c>ProcessedWebhookEvents</c> dedupe row.
+    /// </remarks>
+    // POST: webhooks/offers_namespace_created_devnet
+    [HttpPost("offers_namespace_created_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> OffersNamespaceCreatedDevnet(
+        [FromBody] OffersNamespaceCreatedPayload payload, CancellationToken ct)
+    {
+        if (CheckWebhookSecret() is { } rejected)
+        {
+            return rejected;
+        }
+
+        if (payload is null
+            || !string.Equals(payload.Event, OffersNamespaceCreatedEventName, StringComparison.Ordinal)
+            || (payload.ListingId is null && string.IsNullOrWhiteSpace(payload.Property))
+            || string.IsNullOrWhiteSpace(payload.Cluster))
+        {
+            return BadRequest("The body is not a valid 'offers_namespace_created' webhook payload.");
+        }
+
+        var eventKey = OffersNamespaceCreatedEventKey(payload);
+        if (await _profileDb.ProcessedWebhookEvents.AnyAsync(e => e.EventKey == eventKey, ct))
+        {
+            return Ok(new { status = "duplicate", reason = "this event was already accepted" });
+        }
+
+        var ns = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator) || string.IsNullOrWhiteSpace(ns.Name))
+        {
+            return NotFound("No webhook-created property namespace matches this listing yet.");
+        }
+
+        var assetId = OffersNamespaceService.ReadAssetId(ns.Properties)
+            ?? payload.AssetId;
+
+        if (string.IsNullOrWhiteSpace(assetId))
+        {
+            return BadRequest("The property namespace has no asset_id and the payload provides none.");
+        }
+
+        var (offersNs, existed) = await OffersNamespaceService.FindOrCreateOffersNamespaceAsync(
+            ns.Creator,
+            ns.Name,
+            assetId,
+            payload.Cluster,
+            _db,
+            _namespaces,
+            ct);
+
+        _profileDb.ProcessedWebhookEvents.Add(new ProcessedWebhookEvent
+        {
+            EventKey = eventKey,
+            EventType = OffersNamespaceCreatedEventName,
+            TxSignature = payload.TxSignature ?? string.Empty,
+            ProcessedAt = DateTime.UtcNow
+        });
+
+        await _profileDb.SaveChangesAsync(ct);
+
+        return Ok(existed
+            ? new { status = "ignored", reason = "offers namespace already exists for this asset", namespaceId = offersNs.NamespaceId }
+            : new { status = "created", namespaceId = offersNs.NamespaceId });
     }
 
     // ---- Property lifecycle webhooks (the "Property namespace & buckets" flow) ----------------
@@ -1332,6 +1421,45 @@ public class WebhooksController : ControllerBase
         return name.Length <= MaxBucketNameLen ? name : name[..MaxBucketNameLen];
     }
 
+    /// <summary>
+    /// The shared-secret gate: null when the request may proceed, else the rejection result.
+    /// Same model as <see cref="NotificationWebhooksController"/> — the secret is read from
+    /// <c>INDEXER_WEBHOOK_SECRET</c>, compared in constant time, and accepted from the
+    /// <c>X-Webhook-Secret</c> header or the <c>secret</c> query parameter.
+    /// </summary>
+    private IActionResult? CheckWebhookSecret()
+    {
+        var secret = _config[WebhookSecretConfigKey];
+        if (string.IsNullOrWhiteSpace(secret))
+        {
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                $"The indexer webhook secret ({WebhookSecretConfigKey}) is not configured — "
+                + "the offers namespace webhook is disabled.");
+        }
+
+        var presented = Request.Headers[WebhookSecretHeader].FirstOrDefault()
+            ?? Request.Query[WebhookSecretQueryKey].FirstOrDefault();
+        if (string.IsNullOrEmpty(presented)
+            || presented.Length != secret.Length
+            || !CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(secret)))
+        {
+            return Unauthorized("Missing or wrong webhook secret.");
+        }
+
+        return null;
+    }
+
+    private static string OffersNamespaceCreatedEventKey(OffersNamespaceCreatedPayload payload)
+    {
+        var id = payload.ListingId?.ToString(CultureInfo.InvariantCulture)
+            ?? payload.Property
+            ?? payload.Listing
+            ?? string.Empty;
+        return $"{OffersNamespaceCreatedEventName}:{id}:{payload.TxSignature ?? string.Empty}";
+    }
+
     private const string EventName = "property_asset_registered";
     private const string ClaimStartedEventName = "property_claim_started";
     private const string LawyerElectedEventName = "spv_lawyer_elected";
@@ -1345,6 +1473,13 @@ public class WebhooksController : ControllerBase
     private const string ChallengeCreatedEventName = "challenge_created";
     private const string ChallengeFinalizedEventName = "challenge_finalized";
     private const string HolderChangedEventName = "property_holder_changed";
+    private const string OffersNamespaceCreatedEventName = "offers_namespace_created";
+
+    /// <summary>The env var holding the shared secret the offers namespace webhook requires.</summary>
+    private const string WebhookSecretConfigKey = "INDEXER_WEBHOOK_SECRET";
+
+    private const string WebhookSecretHeader = "X-Webhook-Secret";
+    private const string WebhookSecretQueryKey = "secret";
 
     /// <summary>The all-zero pubkey: what an unassigned <c>LawyerAssignment.lawyer</c> reads as.</summary>
     private const string SystemDefaultPubkey = "11111111111111111111111111111111";
