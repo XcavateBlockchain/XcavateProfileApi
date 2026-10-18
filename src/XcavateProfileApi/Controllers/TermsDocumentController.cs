@@ -176,6 +176,72 @@ public class TermsDocumentController : ControllerBase
         return Ok(ToResponse(document));
     }
 
+    /// <summary>
+    /// Deletes the wallet's terms document: the object is removed from storage and the row
+    /// from the database, so the public URL stops serving and the wallet returns to the
+    /// "no document" state. Requires a signed request from the owner or an admin. 404 when
+    /// the wallet has no document — deleting nothing is reported as such, not as success.
+    /// </summary>
+    [SignedRequest]
+    // DELETE: api/profiles/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W/terms-document
+    [HttpDelete]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> DeleteTermsDocumentAsync(
+        string ss58address, CancellationToken cancellationToken)
+    {
+        // Verify authentication headers
+        var address = Request.Headers["X-SS58-Address"].FirstOrDefault();
+        var signature = Request.Headers["X-Signature"].FirstOrDefault();
+        var timestamp = Request.Headers["X-Timestamp"].FirstOrDefault();
+
+        if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(signature) || string.IsNullOrEmpty(timestamp))
+        {
+            return Unauthorized("Missing authentication headers");
+        }
+
+        var result = await _signatureValidator.ValidateAsync(
+            address,
+            signature,
+            timestamp,
+            "DELETE",
+            $"{BasePath}/{ss58address}/terms-document",
+            new EmptyPayloadBody());
+
+        if (!result.IsValid)
+        {
+            return Unauthorized(result.Error);
+        }
+
+        // Check authorization: can only delete the terms document of the own wallet or is admin
+        if (address != ss58address && !_signatureValidator.IsAdmin(address))
+        {
+            return StatusCode(
+                StatusCodes.Status403Forbidden,
+                "You can only delete the terms document for your own wallet");
+        }
+
+        var document = await _context.LawyerTermsDocuments.FindAsync(ss58address);
+        if (document == null)
+        {
+            return NotFound();
+        }
+
+        // The key mirrors the upload's fixed per-wallet key. Deleting the object first means
+        // a storage failure leaves the row (and its URL) intact — the delete can simply be
+        // retried — whereas removing the row first would orphan the object and keep serving
+        // a URL the API no longer knows about.
+        var key = $"terms-documents/{ss58address}{PdfExtension}";
+        await _s3Service.DeleteObjectAsync(Bucket, key);
+
+        _context.LawyerTermsDocuments.Remove(document);
+        await _context.SaveChangesAsync(cancellationToken);
+
+        return NoContent();
+    }
+
     private static TermsDocumentResponse ToResponse(LawyerTermsDocument document) =>
         new()
         {

@@ -14,6 +14,7 @@ public class S3Config
 public interface IS3Service
 {
     Task<string> UploadImageAsync(string bucketName, string key, Stream content, string contentType);
+    Task DeleteObjectAsync(string bucketName, string key);
 }
 
 public class S3Service : IS3Service
@@ -76,6 +77,15 @@ public class S3Service : IS3Service
         await _client.PutObjectAsync(request);
 
         return BuildPublicObjectUrl(bucketName, key);
+    }
+
+    public async Task DeleteObjectAsync(string bucketName, string key)
+    {
+        await _client.DeleteObjectAsync(new DeleteObjectRequest
+        {
+            BucketName = bucketName,
+            Key = key
+        });
     }
 
     private string BuildPublicObjectUrl(string bucketName, string key)
