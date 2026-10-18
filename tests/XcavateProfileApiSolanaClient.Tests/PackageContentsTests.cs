@@ -125,6 +125,7 @@ public class PackageContentsTests
                 nameof(XcavateProfileClient.UpdateProfileAsync),
                 nameof(XcavateProfileClient.DeleteProfileAsync),
                 nameof(XcavateProfileClient.UploadImageAsync),
+                nameof(XcavateProfileClient.UploadTermsDocumentAsync),
                 nameof(XcavateProfileClient.RegisterWalletMigrationAsync),
                 nameof(XcavateProfileClient.CreateCompanyAsync),
                 nameof(XcavateProfileClient.UpdateCompanyAsync),
