@@ -10,7 +10,6 @@ using XcavateProfileApi.GraphQL.Auth;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Services;
 using XcavateProfileApi.Services.Indexer;
-using XcavateProfileApi.Services.Ipfs;
 using XcavateProfileApi.Services.Notifications;
 using XcavateProfileApi.SocketIo;
 using XcavateProfileApi.Swagger;
@@ -132,27 +131,6 @@ builder.Services.AddSingleton<IS3Service, S3Service>(sp =>
         SecretKey = config["S3_SECRET_KEY"] ?? string.Empty
     });
 });
-
-// IPFS pinning for the lawyer terms documents, through Pinata. Without a JWT the feature is
-// off — NullIpfsService makes the upload endpoint answer 503, like the other optional
-// integrations whose env keys are absent.
-var pinataJwt = builder.Configuration["PINATA_JWT"];
-if (string.IsNullOrWhiteSpace(pinataJwt))
-{
-    builder.Services.AddSingleton<IIpfsService>(new NullIpfsService());
-}
-else
-{
-    var ipfsGatewayUrl = builder.Configuration["IPFS_GATEWAY_URL"];
-    builder.Services.AddHttpClient(PinataIpfsService.HttpClientName,
-        http => http.Timeout = TimeSpan.FromSeconds(30));
-    builder.Services.AddSingleton<IIpfsService>(sp => new PinataIpfsService(
-        sp.GetRequiredService<IHttpClientFactory>().CreateClient(PinataIpfsService.HttpClientName),
-        pinataJwt,
-        string.IsNullOrWhiteSpace(ipfsGatewayUrl)
-            ? PinataIpfsService.DefaultGatewayUrl
-            : ipfsGatewayUrl));
-}
 
 // Configure admin addresses from environment
 builder.Services.AddSingleton<List<string>>(sp =>

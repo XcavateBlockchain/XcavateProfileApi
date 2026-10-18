@@ -1,8 +1,8 @@
 namespace XcavateProfileApi.Models;
 
 /// <summary>
-/// The one "Terms document" a lawyer wallet has pinned to IPFS, keyed by the wallet address.
-/// A new upload replaces the row — only the current CID is kept.
+/// The one "Terms document" a lawyer wallet has stored in S3, keyed by the wallet address.
+/// A new upload replaces the row — only the current URL is kept.
 /// </summary>
 /// <remarks>
 /// Keyed by the wallet address alone rather than tied to <c>Profile</c>: a lawyer can publish
@@ -13,8 +13,8 @@ public class LawyerTermsDocument
     /// <summary>The lawyer's wallet address — the primary key, one document per wallet.</summary>
     public required string Ss58Address { get; set; }
 
-    /// <summary>The IPFS content identifier the current document is pinned under.</summary>
-    public required string Cid { get; set; }
+    /// <summary>The public URL the current document is served from.</summary>
+    public required string Url { get; set; }
 
     /// <summary>The file name the document was uploaded with.</summary>
     public required string FileName { get; set; }

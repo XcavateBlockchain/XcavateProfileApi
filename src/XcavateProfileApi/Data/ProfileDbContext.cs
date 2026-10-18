@@ -142,7 +142,7 @@ public class ProfileDbContext : DbContext
         {
             entity.HasKey(d => d.Ss58Address);
             entity.Property(d => d.Ss58Address).IsRequired();
-            entity.Property(d => d.Cid).IsRequired();
+            entity.Property(d => d.Url).IsRequired();
             entity.Property(d => d.FileName).IsRequired();
             entity.Property(d => d.ContentType).IsRequired();
             entity.Property(d => d.UpdatedAt).IsRequired();

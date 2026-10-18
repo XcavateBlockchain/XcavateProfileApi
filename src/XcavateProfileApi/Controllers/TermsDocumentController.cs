@@ -3,16 +3,16 @@ using XcavateProfileApi.Data;
 using XcavateProfileApi.Middleware;
 using XcavateProfileApi.Models;
 using XcavateProfileApi.Services;
-using XcavateProfileApi.Services.Ipfs;
 using XcavateProfileApi.Swagger;
 using XcavateProfileApiClient;
 
 namespace XcavateProfileApi.Controllers;
 
 /// <summary>
-/// The lawyer "Terms document": one PDF per wallet address, pinned to IPFS. Uploading again
-/// replaces the document — only the current CID is kept. Reading is public, so the terms a
-/// lawyer agreed to can be fetched by anyone from the wallet address alone.
+/// The lawyer "Terms document": one PDF per wallet address, stored in the same S3 bucket as the
+/// profile pictures. Uploading again replaces the document — only the current URL is kept.
+/// Reading is public, so the terms a lawyer agreed to can be fetched by anyone from the wallet
+/// address alone.
 /// </summary>
 [ApiController]
 [Route("api/profiles/{ss58address}/terms-document")]
@@ -23,6 +23,9 @@ public class TermsDocumentController : ControllerBase
     /// <summary>25 MB of PDF, plus a megabyte for multipart encoding overhead.</summary>
     private const int RequestSizeLimit = 26 * 1024 * 1024;
 
+    /// <summary>The bucket the terms documents are stored in — the same one as profile pictures.</summary>
+    private const string Bucket = "xcavate-profile";
+
     private const string PdfExtension = ".pdf";
     private const string PdfContentType = "application/pdf";
 
@@ -30,20 +33,20 @@ public class TermsDocumentController : ControllerBase
 
     private readonly ProfileDbContext _context;
     private readonly ISignatureValidator _signatureValidator;
-    private readonly IIpfsService _ipfsService;
+    private readonly IS3Service _s3Service;
 
     public TermsDocumentController(
         ProfileDbContext context,
         ISignatureValidator signatureValidator,
-        IIpfsService ipfsService)
+        IS3Service s3Service)
     {
         _context = context;
         _signatureValidator = signatureValidator;
-        _ipfsService = ipfsService;
+        _s3Service = s3Service;
     }
 
     /// <summary>
-    /// Gets the wallet's current terms document: CID, gateway URL, file name and when it was
+    /// Gets the wallet's current terms document: its public URL, file name and when it was
     /// last replaced. Public read — no signature. 404 when the wallet has never uploaded one.
     /// </summary>
     // GET: api/profiles/5GrwvaEF5zKbXCEe9qGjZL23Y641mot2Ff6hS3s8jF3g3k3W/terms-document
@@ -64,8 +67,9 @@ public class TermsDocumentController : ControllerBase
     /// <summary>
     /// Uploads (or replaces) the wallet's terms document (multipart PDF, up to 25 MB). Requires a
     /// signed request from the owner or an admin; like the image upload, the signature covers an
-    /// empty payload — the file bytes are deliberately outside it. The file is pinned to IPFS and
-    /// its CID stored keyed by the wallet address, replacing any previous document.
+    /// empty payload — the file bytes are deliberately outside it. The file is stored in S3 under
+    /// a fixed per-wallet key and its public URL stored keyed by the wallet address, replacing any
+    /// previous document.
     /// </summary>
     /// <remarks>
     /// NOTE: any reverse proxy in front of the API (e.g. nginx client_max_body_size) must allow
@@ -83,8 +87,6 @@ public class TermsDocumentController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status502BadGateway)]
-    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<ActionResult<TermsDocumentResponse>> UploadTermsDocumentAsync(
         string ss58address, IFormFile file, CancellationToken cancellationToken)
     {
@@ -127,7 +129,7 @@ public class TermsDocumentController : ControllerBase
             return BadRequest("No file provided");
         }
 
-        // The gateway serves pinned files publicly, so the stored content type must never come
+        // The bucket serves objects publicly, so the stored content type must never come
         // from the client unchecked — PDF only, by extension AND declared content type.
         var fileName = Path.GetFileName(file.FileName);
         if (!string.Equals(Path.GetExtension(fileName), PdfExtension, StringComparison.OrdinalIgnoreCase)
@@ -136,21 +138,13 @@ public class TermsDocumentController : ControllerBase
             return BadRequest(UnsupportedTypeMessage);
         }
 
-        string cid;
-        try
+        // The key is the wallet address alone, so a re-upload rewrites the existing object
+        // instead of creating a new one — the desired "change document" semantics.
+        var key = $"terms-documents/{ss58address}.pdf";
+        string url;
+        await using (var stream = file.OpenReadStream())
         {
-            await using var stream = file.OpenReadStream();
-            cid = await _ipfsService.PinFileAsync(stream, fileName, PdfContentType, cancellationToken);
-        }
-        catch (IpfsNotConfiguredException exception)
-        {
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, exception.Message);
-        }
-        catch (HttpRequestException exception)
-        {
-            return StatusCode(
-                StatusCodes.Status502BadGateway,
-                $"The IPFS pinning service rejected the upload: {exception.Message}");
+            url = await _s3Service.UploadImageAsync(Bucket, key, stream, PdfContentType);
         }
 
         var now = new DateTimeOffset(Timestamps.UtcNow(), TimeSpan.Zero);
@@ -162,7 +156,7 @@ public class TermsDocumentController : ControllerBase
             document = new LawyerTermsDocument
             {
                 Ss58Address = ss58address,
-                Cid = cid,
+                Url = url,
                 FileName = fileName,
                 ContentType = PdfContentType,
                 UpdatedAt = now
@@ -171,7 +165,7 @@ public class TermsDocumentController : ControllerBase
         }
         else
         {
-            document.Cid = cid;
+            document.Url = url;
             document.FileName = fileName;
             document.ContentType = PdfContentType;
             document.UpdatedAt = now;
@@ -182,11 +176,10 @@ public class TermsDocumentController : ControllerBase
         return Ok(ToResponse(document));
     }
 
-    private TermsDocumentResponse ToResponse(LawyerTermsDocument document) =>
+    private static TermsDocumentResponse ToResponse(LawyerTermsDocument document) =>
         new()
         {
-            Cid = document.Cid,
-            Url = _ipfsService.BuildGatewayUrl(document.Cid),
+            Url = document.Url,
             FileName = document.FileName,
             UpdatedAt = document.UpdatedAt
         };

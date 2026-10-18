@@ -207,7 +207,7 @@ public partial class XcavateProfileClient : IDisposable
     }
 
     /// <summary>
-    /// Get the lawyer's current IPFS-pinned terms document. Null when the wallet has none.
+    /// Get the lawyer's current terms document. Null when the wallet has none.
     /// </summary>
     public Task<TermsDocumentResponse?> GetTermsDocumentAsync(
         string ss58address, CancellationToken cancellationToken = default) =>
@@ -216,7 +216,7 @@ public partial class XcavateProfileClient : IDisposable
 
     /// <summary>
     /// Upload (or replace) the lawyer's terms document PDF using any signature scheme. Returns
-    /// the pinned document's CID and gateway URL. Like the image upload, the signature covers an
+    /// the document's public URL. Like the image upload, the signature covers an
     /// empty payload — the file bytes are deliberately outside it.
     /// </summary>
     public async Task<TermsDocumentResponse> UploadTermsDocumentAsync(

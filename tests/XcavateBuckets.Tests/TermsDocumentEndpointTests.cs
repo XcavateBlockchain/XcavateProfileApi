@@ -1,12 +1,11 @@
 using System.Net;
 using System.Net.Http.Headers;
-using XcavateProfileApi.Services.Ipfs;
 
 namespace XcavateBuckets.Tests;
 
 /// <summary>
-/// The lawyer terms-document endpoints — a signed multipart PDF upload pinned to IPFS, the CID
-/// stored one-per-wallet, and a public read — driven through the shipped SDK against the real
+/// The lawyer terms-document endpoints — a signed multipart PDF upload stored in S3 under a
+/// fixed per-wallet key, and a public read — driven through the shipped SDK against the real
 /// controller, validator and database.
 /// </summary>
 [TestFixture]
@@ -15,7 +14,7 @@ public class TermsDocumentEndpointTests
     private static MemoryStream Pdf() => new("%PDF-1.4 not really a pdf"u8.ToArray());
 
     [Test]
-    public async Task Upload_pdf_returns_cid_and_persists_row()
+    public async Task Upload_pdf_persists_row_and_returns_url()
     {
         await using var host = await RestHost.StartAsync();
         using var client = host.NewSdkClient();
@@ -27,23 +26,23 @@ public class TermsDocumentEndpointTests
 
         var stored = await host.StoredTermsDocumentAsync(lawyer.Value);
 
+        var expectedUrl = $"https://objects.test/xcavate-profile/terms-documents/{lawyer.Value}.pdf";
         Assert.Multiple(() =>
         {
-            Assert.That(uploaded.Cid, Is.EqualTo("bafytestcid1"));
-            Assert.That(
-                uploaded.Url, Is.EqualTo("https://gateway.test/ipfs/bafytestcid1"),
-                "the URL is the gateway URL for the returned CID");
+            Assert.That(uploaded.Url, Is.EqualTo(expectedUrl));
             Assert.That(uploaded.FileName, Is.EqualTo("terms.pdf"));
             Assert.That(uploaded.UpdatedAt, Is.GreaterThan(DateTimeOffset.MinValue));
 
             Assert.That(stored?.Ss58Address, Is.EqualTo(lawyer.Value));
-            Assert.That(stored?.Cid, Is.EqualTo(uploaded.Cid));
+            Assert.That(stored?.Url, Is.EqualTo(uploaded.Url));
             Assert.That(stored?.FileName, Is.EqualTo("terms.pdf"));
             Assert.That(stored?.ContentType, Is.EqualTo("application/pdf"));
 
-            Assert.That(host.IpfsStub.Pins, Has.Count.EqualTo(1));
-            Assert.That(host.IpfsStub.Pins[0].FileName, Is.EqualTo("terms.pdf"));
-            Assert.That(host.IpfsStub.Pins[0].ContentType, Is.EqualTo("application/pdf"));
+            Assert.That(host.S3.Uploads, Has.Count.EqualTo(1));
+            Assert.That(host.S3.Uploads[0].Bucket, Is.EqualTo("xcavate-profile"));
+            Assert.That(
+                host.S3.Uploads[0].Key, Is.EqualTo($"terms-documents/{lawyer.Value}.pdf"));
+            Assert.That(host.S3.Uploads[0].ContentType, Is.EqualTo("application/pdf"));
         });
     }
 
@@ -77,7 +76,6 @@ public class TermsDocumentEndpointTests
         Assert.Multiple(() =>
         {
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(read?.Cid, Is.EqualTo(uploaded.Cid));
             Assert.That(read?.Url, Is.EqualTo(uploaded.Url));
             Assert.That(read?.FileName, Is.EqualTo(uploaded.FileName));
             Assert.That(read?.UpdatedAt, Is.EqualTo(uploaded.UpdatedAt));
@@ -109,11 +107,19 @@ public class TermsDocumentEndpointTests
             Assert.That(
                 rowCount, Is.EqualTo(1),
                 "a re-upload replaces the row rather than adding a second one");
-            Assert.That(uploadedSecond.Cid, Is.Not.EqualTo(uploadedFirst.Cid));
-            Assert.That(stored?.Cid, Is.EqualTo(uploadedSecond.Cid));
+            Assert.That(
+                host.S3.Uploads, Has.Count.EqualTo(2),
+                "both uploads reach the store — the second rewrites the same object");
+            Assert.That(
+                host.S3.Uploads[1].Key, Is.EqualTo(host.S3.Uploads[0].Key),
+                "the key is fixed per wallet, so the re-upload overwrites the object");
+            Assert.That(stored?.Url, Is.EqualTo(uploadedSecond.Url));
             Assert.That(stored?.FileName, Is.EqualTo("terms-v2.pdf"));
-            Assert.That(read?.Cid, Is.EqualTo(uploadedSecond.Cid));
+            Assert.That(
+                stored?.UpdatedAt, Is.GreaterThanOrEqualTo(uploadedFirst.UpdatedAt),
+                "the row reflects the latest upload");
             Assert.That(read?.Url, Is.EqualTo(uploadedSecond.Url));
+            Assert.That(read?.UpdatedAt, Is.EqualTo(uploadedSecond.UpdatedAt));
         });
     }
 
@@ -135,7 +141,7 @@ public class TermsDocumentEndpointTests
         Assert.Multiple(() =>
         {
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized));
-            Assert.That(host.IpfsStub.Pins, Is.Empty, "nothing may reach IPFS unsigned");
+            Assert.That(host.S3.Uploads, Is.Empty, "nothing may reach the store unsigned");
             Assert.That(host.StoredTermsDocumentAsync(lawyer.Value).Result, Is.Null);
         });
     }
@@ -156,7 +162,7 @@ public class TermsDocumentEndpointTests
         Assert.Multiple(() =>
         {
             Assert.That(error!.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
-            Assert.That(host.IpfsStub.Pins, Is.Empty, "a refused file must never reach IPFS");
+            Assert.That(host.S3.Uploads, Is.Empty, "a refused file must never reach the store");
         });
     }
 
@@ -178,50 +184,8 @@ public class TermsDocumentEndpointTests
         Assert.Multiple(() =>
         {
             Assert.That(error!.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden));
-            Assert.That(host.IpfsStub.Pins, Is.Empty);
+            Assert.That(host.S3.Uploads, Is.Empty);
             Assert.That(host.StoredTermsDocumentAsync(lawyer.Value).Result, Is.Null);
-        });
-    }
-
-    [Test]
-    public async Task Upload_returns_503_when_ipfs_not_configured()
-    {
-        await using var host = await RestHost.StartAsync(new NullIpfsService());
-        using var client = host.NewSdkClient();
-
-        var lawyer = TestWallets.Substrate(0xA8);
-
-        using var pdf = Pdf();
-
-        var error = Assert.ThrowsAsync<HttpRequestException>(
-            () => client.UploadTermsDocumentAsync(lawyer.Value, "terms.pdf", pdf, lawyer));
-
-        Assert.That(error!.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
-    }
-
-    [Test]
-    public async Task Upload_returns_502_when_pinata_fails()
-    {
-        var ipfs = new StubIpfsService
-        {
-            PinError = new HttpRequestException("Pinata pinFileToIPFS failed: 401 Unauthorized")
-        };
-        await using var host = await RestHost.StartAsync(ipfs);
-        using var client = host.NewSdkClient();
-
-        var lawyer = TestWallets.Substrate(0xA9);
-
-        using var pdf = Pdf();
-
-        var error = Assert.ThrowsAsync<HttpRequestException>(
-            () => client.UploadTermsDocumentAsync(lawyer.Value, "terms.pdf", pdf, lawyer));
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(error!.StatusCode, Is.EqualTo(HttpStatusCode.BadGateway));
-            Assert.That(
-                host.StoredTermsDocumentAsync(lawyer.Value).Result, Is.Null,
-                "a failed pin must not leave a stored CID behind");
         });
     }
 }
