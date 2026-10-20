@@ -20,6 +20,8 @@ public class MarketplaceRentCollectorSigningService
     private static readonly byte[] BuyRelistedSharesDiscriminator = [205, 204, 84, 12, 55, 204, 167, 234];
     private static readonly byte[] ReserveDiscriminator = [137, 47, 218, 50, 106, 149, 133, 110];
     private static readonly byte[] SendPropertySharesDiscriminator = [214, 10, 132, 137, 120, 190, 89, 240];
+    private static readonly byte[] RelistSharesDiscriminator = [233, 196, 4, 160, 236, 180, 219, 12];
+    private static readonly byte[] DelistSharesDiscriminator = [75, 11, 92, 6, 15, 186, 201, 253];
     // Property program (deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq).
     private static readonly byte[] ClaimIncomeDiscriminator = [6, 24, 199, 191, 118, 141, 95, 123];
     private static readonly byte[] CloseIncomeCheckpointDiscriminator = [178, 97, 236, 81, 222, 159, 104, 227];
@@ -215,8 +217,9 @@ public class MarketplaceRentCollectorSigningService
                 }
 
                 // For the instructions added with the property program (plus the marketplace
-                // send_property_shares), account [0] is the holder/voter/sender whose assets
-                // move or lock - pin it to the wallet that requested the signature.
+                // send_property_shares / relist_shares / delist_shares), account [0] is the
+                // holder/voter/sender/seller whose assets move or lock - pin it to the wallet
+                // that requested the signature.
                 if (RequiresRequestingWalletAsFirstAccount(disc)
                     && (firstKeyIndex < 0
                         || firstKeyIndex >= accountCount
@@ -261,7 +264,9 @@ public class MarketplaceRentCollectorSigningService
             || data.AsSpan(0, 8).SequenceEqual(ClaimSpvCaseDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(BuyRelistedSharesDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ReserveDiscriminator)
-            || data.AsSpan(0, 8).SequenceEqual(SendPropertySharesDiscriminator);
+            || data.AsSpan(0, 8).SequenceEqual(SendPropertySharesDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(RelistSharesDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(DelistSharesDiscriminator);
     }
 
     private static bool IsAllowedPropertyDiscriminator(byte[] data)
@@ -274,12 +279,14 @@ public class MarketplaceRentCollectorSigningService
     }
 
     /// <summary>
-    /// The instructions whose on-chain account [0] (sender / holder / voter) must be the
+    /// The instructions whose on-chain account [0] (sender / holder / voter / seller) must be the
     /// wallet that requested the rent collector's signature.
     /// </summary>
     private static bool RequiresRequestingWalletAsFirstAccount(byte[] data)
     {
         return data.AsSpan(0, 8).SequenceEqual(SendPropertySharesDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(RelistSharesDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(DelistSharesDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ClaimIncomeDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(CloseIncomeCheckpointDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(VoteOnAgentDiscriminator)

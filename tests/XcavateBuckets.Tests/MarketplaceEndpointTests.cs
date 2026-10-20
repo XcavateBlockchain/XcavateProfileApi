@@ -26,6 +26,8 @@ public class MarketplaceEndpointTests
     private static readonly byte[] BuyRelistedShares = [205, 204, 84, 12, 55, 204, 167, 234];
     private static readonly byte[] Reserve = [137, 47, 218, 50, 106, 149, 133, 110];
     private static readonly byte[] SendPropertyShares = [214, 10, 132, 137, 120, 190, 89, 240];
+    private static readonly byte[] RelistShares = [233, 196, 4, 160, 236, 180, 219, 12];
+    private static readonly byte[] DelistShares = [75, 11, 92, 6, 15, 186, 201, 253];
     private static readonly byte[] ClaimIncome = [6, 24, 199, 191, 118, 141, 95, 123];
     private static readonly byte[] CloseIncomeCheckpoint = [178, 97, 236, 81, 222, 159, 104, 227];
     private static readonly byte[] VoteOnAgent = [203, 127, 40, 102, 254, 243, 11, 244];
@@ -659,6 +661,88 @@ public class MarketplaceEndpointTests
         var other = new Solnet.Wallet.Account().PublicKey.KeyBytes;
         var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, other, PropertyProgramId };
         var wire = BuildWire(2, keys, 3, [2, 0], VoteOnProposal);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("first account"));
+    }
+
+    [Test]
+    public async Task Relist_shares_message_is_signed_and_the_signature_verifies()
+    {
+        // The seller (instruction account [0]) is the requesting wallet; the rent collector
+        // fronts the new ShareListing account's rent as payer (account [1]).
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [1, 0], RelistShares);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        var verified = new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58));
+        Assert.That(verified, Is.True, "the returned signature must verify over the exact posted bytes");
+    }
+
+    [Test]
+    public async Task Delist_and_relist_bundle_is_signed()
+    {
+        // The reprice flow: delist_shares + relist_shares in ONE message, so the listing
+        // never sits unlisted between the two. Both pin the seller (account [0]) to the
+        // requesting wallet.
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId };
+        byte[] Filler(byte[] disc) => disc.Concat(Enumerable.Repeat((byte)0x42, 8)).ToArray();
+        var wire = BuildRawWire(2, keys,
+        [
+            new WireInstruction(2, [1, 0], Filler(DelistShares)),
+            new WireInstruction(2, [1, 0], Filler(RelistShares)),
+        ]);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Relist_shares_whose_seller_is_not_the_requesting_wallet_is_rejected()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var other = new Solnet.Wallet.Account().PublicKey.KeyBytes;
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, other, ProgramId };
+        var wire = BuildWire(2, keys, 3, [2, 0], RelistShares);
+
+        using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.That(json, Does.Contain("first account"));
+    }
+
+    [Test]
+    public async Task Delist_shares_whose_seller_is_not_the_requesting_wallet_is_rejected()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var investor = new Solnet.Wallet.Account();
+        var other = new Solnet.Wallet.Account().PublicKey.KeyBytes;
+        var keys = new List<byte[]> { host.RentPubkey, investor.PublicKey.KeyBytes, other, ProgramId };
+        var wire = BuildWire(2, keys, 3, [2, 0], DelistShares);
 
         using var request = Post(Body(wire), investor.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
