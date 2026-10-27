@@ -17,6 +17,7 @@ public class MarketplaceRentCollectorSigningService
     private static readonly byte[] BuyDiscriminator = [4, 160, 53, 28, 202, 98, 234, 11];
     private static readonly byte[] ClaimSharesDiscriminator = [130, 131, 29, 237, 134, 20, 110, 245];
     private static readonly byte[] ClaimSpvCaseDiscriminator = [175, 185, 102, 63, 166, 39, 168, 56];
+    private static readonly byte[] RegisterLawyerDiscriminator = [165, 135, 154, 240, 244, 159, 91, 255];
     private static readonly byte[] BuyRelistedSharesDiscriminator = [205, 204, 84, 12, 55, 204, 167, 234];
     private static readonly byte[] ReserveDiscriminator = [137, 47, 218, 50, 106, 149, 133, 110];
     private static readonly byte[] SendPropertySharesDiscriminator = [214, 10, 132, 137, 120, 190, 89, 240];
@@ -262,6 +263,7 @@ public class MarketplaceRentCollectorSigningService
         return data.AsSpan(0, 8).SequenceEqual(BuyDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ClaimSharesDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ClaimSpvCaseDiscriminator)
+            || data.AsSpan(0, 8).SequenceEqual(RegisterLawyerDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(BuyRelistedSharesDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(ReserveDiscriminator)
             || data.AsSpan(0, 8).SequenceEqual(SendPropertySharesDiscriminator)

@@ -23,6 +23,7 @@ public class MarketplaceEndpointTests
     private static readonly byte[] Buy = [4, 160, 53, 28, 202, 98, 234, 11];
     private static readonly byte[] ClaimShares = [130, 131, 29, 237, 134, 20, 110, 245];
     private static readonly byte[] ClaimSpvCase = [175, 185, 102, 63, 166, 39, 168, 56];
+    private static readonly byte[] RegisterLawyer = [165, 135, 154, 240, 244, 159, 91, 255];
     private static readonly byte[] BuyRelistedShares = [205, 204, 84, 12, 55, 204, 167, 234];
     private static readonly byte[] Reserve = [137, 47, 218, 50, 106, 149, 133, 110];
     private static readonly byte[] SendPropertyShares = [214, 10, 132, 137, 120, 190, 89, 240];
@@ -373,6 +374,24 @@ public class MarketplaceEndpointTests
         var wire = BuildWire(2, [host.RentPubkey, investor.PublicKey.KeyBytes, ProgramId], 2, [0, 1], ClaimSpvCase);
 
         using var request = Post(Body(wire), investor.PublicKey.Key);
+        using var response = await host.Client.SendAsync(request);
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var signatureBase58 = doc.RootElement.GetProperty("signature").GetString()!;
+
+        Assert.That(new PublicKey(host.RentPubkey).Verify(wire, Encoders.Base58.DecodeData(signatureBase58)), Is.True);
+    }
+
+    [Test]
+    public async Task Register_lawyer_message_is_signed_and_the_signature_verifies()
+    {
+        await using var host = await MarketplaceHost.StartAsync();
+        var lawyer = new Solnet.Wallet.Account();
+        var wire = BuildWire(2, [host.RentPubkey, lawyer.PublicKey.KeyBytes, ProgramId], 2, [1, 0], RegisterLawyer);
+
+        using var request = Post(Body(wire), lawyer.PublicKey.Key);
         using var response = await host.Client.SendAsync(request);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
