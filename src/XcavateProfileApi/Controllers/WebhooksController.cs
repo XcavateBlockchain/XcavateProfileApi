@@ -47,6 +47,7 @@ public class WebhooksController : ControllerBase
     private readonly MembershipService _memberships;
     private readonly MessageService _messages;
     private readonly IIndexerClient _indexer;
+    private readonly IS3Service _s3;
     private readonly IConfiguration _config;
     private readonly ILogger<WebhooksController> _logger;
 
@@ -59,6 +60,7 @@ public class WebhooksController : ControllerBase
         MembershipService memberships,
         MessageService messages,
         IIndexerClient indexer,
+        IS3Service s3,
         IConfiguration config,
         ILogger<WebhooksController> logger)
     {
@@ -70,6 +72,7 @@ public class WebhooksController : ControllerBase
         _memberships = memberships;
         _messages = messages;
         _indexer = indexer;
+        _s3 = s3;
         _config = config;
         _logger = logger;
     }
@@ -879,12 +882,10 @@ public class WebhooksController : ControllerBase
     // event types are unordered); 400 when the body is not a valid payload for the event.
 
     /// <summary>
-    /// Receives the <c>spv_case_claimed</c> event (a lawyer stood for the listing's SPV case —
-    /// the candidacy investors vote on, surfaced in the apps as the "terms" vote) and posts a
-    /// <c>voting/terms</c> open message carrying the round plus the election's expiry resolved
-    /// from the indexer. The indexer fires the event per candidacy; the deterministic body
-    /// (property + round only) makes later candidacies of the same round duplicate-guarded, so
-    /// one round still produces exactly one announcement.
+    /// Receives the <c>spv_case_claimed</c> event, creates the candidacy's encrypted lawyer-terms
+    /// bucket, and retains the one-per-round <c>voting/terms</c> announcement in the property's
+    /// legal-process bucket. Each candidacy gets its own bucket, key ceremony, admin prompt, and
+    /// the claiming lawyer's current terms PDF.
     /// </summary>
     // POST: webhooks/spv_case_claimed_devnet
     [HttpPost("spv_case_claimed_devnet")]
@@ -892,15 +893,40 @@ public class WebhooksController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> SpvCaseClaimedDevnet(
         [FromBody] SpvCaseClaimedPayload payload, CancellationToken ct)
     {
+        var secretFailure = CheckWebhookSecret();
+        if (secretFailure is not null)
+        {
+            return secretFailure;
+        }
+
         if (payload is null
             || !string.Equals(payload.Event, SpvCaseClaimedEventName, StringComparison.Ordinal)
             || payload.PropertyId is null
-            || payload.Round is null)
+            || payload.Round is null
+            || string.IsNullOrWhiteSpace(payload.Lawyer)
+            || payload.Lawyer.Length > 128
+            || string.IsNullOrWhiteSpace(payload.Candidacy)
+            || payload.Candidacy.Length > 128)
         {
             return BadRequest("The body is not a valid 'spv_case_claimed' webhook payload.");
+        }
+
+        var admin = _config[BucketAdminAddressConfigKey]?.Trim();
+        if (string.IsNullOrWhiteSpace(admin))
+        {
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                $"The bucket admin address ({BucketAdminAddressConfigKey}) is not configured.");
+        }
+
+        var ns = await FindNamespaceAsync(payload.PropertyId, payload.Property, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        {
+            return NotFound("No webhook-created namespace matches this property yet.");
         }
 
         var resolve = await ResolveAsync(
@@ -911,7 +937,13 @@ public class WebhooksController : ControllerBase
         }
         var election = resolve.Value!;
 
-        return await PostVotingMessageAsync(
+        var setup = await EnsureLawyerTermsBucketAsync(ns, payload, admin, ct);
+        if (setup.Failure is not null)
+        {
+            return setup.Failure;
+        }
+
+        var votingResult = await PostVotingMessageAsync(
             payload.PropertyId, payload.Property,
             tag: TermsVotingTag,
             reference: $"voting/terms/{payload.PropertyId}/round/{payload.Round}/open",
@@ -925,6 +957,196 @@ public class WebhooksController : ControllerBase
                 ["status"] = "open"
             },
             ct);
+
+        return WithLawyerTermsSetup(
+            votingResult, setup.BucketId!.Value, setup.Created, setup.HolderCount);
+    }
+
+    private async Task<(IActionResult? Failure, long? BucketId, bool Created, int? HolderCount)>
+        EnsureLawyerTermsBucketAsync(
+            Namespace ns, SpvCaseClaimedPayload payload, string admin, CancellationToken ct)
+    {
+        var name = LawyerTermsBucketName(ns, payload.Candidacy!);
+        var existing = await _db.Buckets.FirstOrDefaultAsync(
+            bucket => bucket.NamespaceId == ns.NamespaceId
+                && bucket.Category == LawyerTermsBucketCategory
+                && bucket.Name == name,
+            ct);
+        if (existing is not null)
+        {
+            return (null, existing.BucketId, false, null);
+        }
+
+        var resolve = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetShareHolderWalletsAsync(payload.PropertyId!.Value, c),
+            what: "claimed property token holders");
+        if (resolve.Failed)
+        {
+            return (resolve.Failure, null, false, null);
+        }
+
+        var holders = resolve.Value!
+            .Where(wallet => !string.IsNullOrWhiteSpace(wallet))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(wallet => wallet, StringComparer.Ordinal)
+            .ToList();
+        var document = await _profileDb.LawyerTermsDocuments.AsNoTracking()
+            .FirstOrDefaultAsync(row => row.Ss58Address == payload.Lawyer, ct);
+        if (document is null)
+        {
+            return (NotFound("The claiming lawyer has no terms PDF yet."), null, false, null);
+        }
+
+        byte[] pdf;
+        try
+        {
+            pdf = await _s3.DownloadObjectAsync(
+                TermsDocumentController.Bucket,
+                TermsDocumentController.ObjectKey(payload.Lawyer!),
+                ct);
+        }
+        catch (Amazon.S3.AmazonS3Exception ex)
+        {
+            return (StatusCode(
+                StatusCodes.Status502BadGateway,
+                $"Could not download the lawyer's terms PDF: {ex.Message}"), null, false, null);
+        }
+
+        var viewers = new List<KeyValuePair<string, string>>();
+        foreach (var wallet in holders.Append(payload.Lawyer!).Distinct(StringComparer.Ordinal))
+        {
+            var key = await ResolveViewerKeyAsync(wallet, ct);
+            if (key is null)
+            {
+                return (NotFound($"No profile X25519 key for required participant '{wallet}'."),
+                    null, false, null);
+            }
+            viewers.Add(new(wallet, key));
+        }
+
+        string snapshotUrl;
+        try
+        {
+            using var content = new MemoryStream(pdf, writable: false);
+            snapshotUrl = await _s3.UploadImageAsync(
+                TermsDocumentController.Bucket,
+                TermsDocumentController.SnapshotObjectKey(payload.Candidacy!),
+                content,
+                document.ContentType);
+        }
+        catch (Amazon.S3.AmazonS3Exception ex)
+        {
+            return (StatusCode(
+                StatusCodes.Status502BadGateway,
+                $"Could not snapshot the lawyer's terms PDF: {ex.Message}"), null, false, null);
+        }
+
+        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(admin, viewers);
+        var properties = new List<KeyValuePair<string, string>>
+        {
+            new("kind", "spv_lawyer_terms"),
+            new("listing_id", payload.PropertyId!.Value.ToString(CultureInfo.InvariantCulture)),
+            new("round", payload.Round!.Value.ToString(CultureInfo.InvariantCulture)),
+            new("lawyer", payload.Lawyer!),
+            new("candidacy", payload.Candidacy!),
+            new("listing", payload.Listing ?? string.Empty),
+            new("property", payload.Property ?? string.Empty),
+            new("tx_signature", payload.TxSignature ?? string.Empty),
+            new("program", payload.Program ?? string.Empty)
+        };
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        var bucket = await _buckets.CreateAsync(
+            ns.Creator!,
+            ns.NamespaceId,
+            name,
+            LawyerTermsBucketCategory,
+            properties,
+            ct);
+        await _memberships.AddAdminAsync(ns.Creator!, ns.NamespaceId, bucket.BucketId, admin, ct);
+        await _memberships.AddContributorAsync(admin, ns.NamespaceId, bucket.BucketId, admin, ct);
+        foreach (var viewer in viewers)
+        {
+            await _memberships.AddContributorAsync(
+                admin, ns.NamespaceId, bucket.BucketId, viewer.Key, ct);
+            await _memberships.AddViewerAsync(
+                admin, ns.NamespaceId, bucket.BucketId, viewer.Value, ct);
+        }
+
+        await _buckets.ResumeWritingAsync(
+            admin, ns.NamespaceId, bucket.BucketId, keySharing.PublicKeyHex, ct);
+        await _messages.WriteAsync(
+            admin,
+            ns.NamespaceId,
+            bucket.BucketId,
+            new MessageWriteRequest(
+                keySharing.Reference,
+                LawyerTermsBucketProtocol.KeySharingTag,
+                keySharing.Body,
+                "Lawyer terms bucket encryption key",
+                LawyerTermsBucketProtocol.KeySharingContentType,
+                keySharing.ContentHash,
+                null),
+            ct);
+        await _messages.WriteAsync(
+            admin,
+            ns.NamespaceId,
+            bucket.BucketId,
+            new MessageWriteRequest(
+                $"lawyer-terms/{payload.Candidacy}/vote-prompt",
+                LawyerTermsBucketProtocol.VotePromptTag,
+                LawyerTermsBucketProtocol.VotePrompt,
+                "Vote on the lawyer's terms",
+                "text/plain",
+                LawyerTermsBucketProtocol.ContentHash(LawyerTermsBucketProtocol.VotePrompt),
+                null),
+            ct);
+        await _messages.WriteAsync(
+            admin,
+            ns.NamespaceId,
+            bucket.BucketId,
+            new MessageWriteRequest(
+                snapshotUrl,
+                LawyerTermsBucketProtocol.DocumentTag,
+                null,
+                document.FileName,
+                document.ContentType,
+                LawyerTermsBucketProtocol.ContentHash(pdf),
+                null),
+            ct);
+        await transaction.CommitAsync(ct);
+
+        return (null, bucket.BucketId, true, holders.Count);
+    }
+
+    private static IActionResult WithLawyerTermsSetup(
+        IActionResult result, long bucketId, bool created, int? holderCount)
+    {
+        if (result is not OkObjectResult ok)
+        {
+            return result;
+        }
+
+        var body = JsonSerializer.SerializeToNode(ok.Value)!.AsObject();
+        body["lawyerTermsBucketId"] = bucketId;
+        body["lawyerTermsBucketCreated"] = created;
+        if (holderCount is not null)
+        {
+            body["lawyerTermsHolderCount"] = holderCount;
+        }
+        return new OkObjectResult(body);
+    }
+
+    private static string LawyerTermsBucketName(Namespace ns, string candidacy)
+    {
+        var baseName = string.IsNullOrWhiteSpace(ns.Name) ? $"namespace {ns.NamespaceId}" : ns.Name!;
+        var suffix = $" - SPV lawyer terms {candidacy}";
+        if (baseName.Length + suffix.Length > MaxBucketNameLen)
+        {
+            baseName = baseName[..(MaxBucketNameLen - suffix.Length)];
+        }
+        return baseName + suffix;
     }
 
     /// <summary>
@@ -1436,7 +1658,7 @@ public class WebhooksController : ControllerBase
             return StatusCode(
                 StatusCodes.Status503ServiceUnavailable,
                 $"The indexer webhook secret ({WebhookSecretConfigKey}) is not configured — "
-                + "the offers namespace webhook is disabled.");
+                + "this webhook is disabled.");
         }
 
         var presented = Request.Headers[WebhookSecretHeader].FirstOrDefault()
@@ -1479,6 +1701,8 @@ public class WebhooksController : ControllerBase
     /// <summary>The env var holding the shared secret the offers namespace webhook requires.</summary>
     private const string WebhookSecretConfigKey = "INDEXER_WEBHOOK_SECRET";
 
+    private const string BucketAdminAddressConfigKey = "BUCKET_ADMIN_ADDRESS";
+
     private const string WebhookSecretHeader = "X-Webhook-Secret";
     private const string WebhookSecretQueryKey = "secret";
 
@@ -1487,6 +1711,8 @@ public class WebhooksController : ControllerBase
 
     /// <summary>The bucket category marking a property's legal-process bucket.</summary>
     private const string LegalBucketCategory = "legal-process";
+
+    private const string LawyerTermsBucketCategory = "spv-lawyer-terms";
 
     /// <summary>The tags the voting announcements are posted under (open per kind, one result tag).</summary>
     private const string TermsVotingTag = "voting/terms";

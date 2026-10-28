@@ -38,7 +38,8 @@ public sealed class WebhooksHost : IAsyncDisposable
         SqliteConnection profileConnection,
         HttpClient client,
         TestIndexerClient indexer,
-        NotificationQueue? queue)
+        NotificationQueue? queue,
+        StubS3Service s3)
     {
         _host = host;
         _connection = connection;
@@ -46,10 +47,13 @@ public sealed class WebhooksHost : IAsyncDisposable
         Client = client;
         Indexer = indexer;
         Queue = queue;
+        S3 = s3;
     }
 
     /// <summary>A raw client — the webhook needs no credentials.</summary>
     public HttpClient Client { get; }
+
+    public StubS3Service S3 { get; }
 
     /// <summary>
     /// The stub GraphQL client behind the voting webhooks' state resolution: set its properties to
@@ -64,8 +68,12 @@ public sealed class WebhooksHost : IAsyncDisposable
     /// </summary>
     public NotificationQueue? Queue { get; }
 
+    public const string DefaultBucketAdminAddress = "BucketAdmin111";
+
     public static async Task<WebhooksHost> StartAsync(
-        string? webhookSecret = null, bool pushConfigured = true)
+        string? webhookSecret = null,
+        bool pushConfigured = true,
+        string? bucketAdminAddress = DefaultBucketAdminAddress)
     {
         var connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
@@ -75,6 +83,7 @@ public sealed class WebhooksHost : IAsyncDisposable
         profileConnection.Open();
 
         var indexer = new TestIndexerClient();
+        var s3 = new StubS3Service();
         var queue = pushConfigured
             ? new NotificationQueue(NullLogger<NotificationQueue>.Instance)
             : null;
@@ -83,16 +92,19 @@ public sealed class WebhooksHost : IAsyncDisposable
         builder.ConfigureWebHost(web =>
         {
             web.UseTestServer();
-            if (webhookSecret is not null)
+            web.ConfigureAppConfiguration((_, config) =>
             {
-                // The notification webhooks' shared secret, injected as configuration the same
-                // way the INDEXER_WEBHOOK_SECRET env var delivers it in production.
-                web.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(
-                    new Dictionary<string, string?>
-                    {
-                        [NotificationWebhooksController.WebhookSecretConfigKey] = webhookSecret
-                    }));
-            }
+                var values = new Dictionary<string, string?>();
+                if (webhookSecret is not null)
+                {
+                    values[NotificationWebhooksController.WebhookSecretConfigKey] = webhookSecret;
+                }
+                if (bucketAdminAddress is not null)
+                {
+                    values["BUCKET_ADMIN_ADDRESS"] = bucketAdminAddress;
+                }
+                config.AddInMemoryCollection(values);
+            });
             web.ConfigureServices(services =>
             {
                 // SuppressAsyncSuffixInActionNames mirrors Program.cs, so action names keep the
@@ -107,6 +119,7 @@ public sealed class WebhooksHost : IAsyncDisposable
                 // The voting webhooks resolve vote state through this stub instead of the live
                 // indexer GraphQL.
                 services.AddSingleton<IIndexerClient>(indexer);
+                services.AddSingleton<XcavateProfileApi.Services.IS3Service>(s3);
 
                 // Program.cs registers the queue only with NOTIFICATIONS_API_KEY; the
                 // notification webhooks resolve it per request, so its absence is the
@@ -137,7 +150,8 @@ public sealed class WebhooksHost : IAsyncDisposable
                 .Database.EnsureCreatedAsync();
         }
 
-        return new WebhooksHost(host, connection, profileConnection, host.GetTestClient(), indexer, queue);
+        return new WebhooksHost(
+            host, connection, profileConnection, host.GetTestClient(), indexer, queue, s3);
     }
 
     /// <summary>Every namespace straight out of the database, bypassing the API.</summary>
@@ -174,6 +188,49 @@ public sealed class WebhooksHost : IAsyncDisposable
         var context = scope.ServiceProvider.GetRequiredService<ProfileDbContext>();
 
         return await action(context);
+    }
+
+    public async Task SeedViewerKeyAsync(string wallet, string key)
+    {
+        await WithProfileDbAsync(async db =>
+        {
+            var profile = await db.Profiles.FindAsync(wallet);
+            if (profile is null)
+            {
+                db.Profiles.Add(new XcavateProfile.Client.Profile
+                {
+                    Ss58Address = wallet,
+                    X25519Key = key
+                });
+            }
+            else
+            {
+                profile.X25519Key = key;
+            }
+            await db.SaveChangesAsync();
+            return true;
+        });
+    }
+
+    public async Task SeedTermsDocumentAsync(string wallet, byte[]? pdf = null)
+    {
+        pdf ??= "%PDF-1.4 lawyer terms"u8.ToArray();
+        using var content = new MemoryStream(pdf, writable: false);
+        var key = $"terms-documents/{wallet}.pdf";
+        var url = await S3.UploadImageAsync("xcavate-profile", key, content, "application/pdf");
+        await WithProfileDbAsync(async db =>
+        {
+            db.LawyerTermsDocuments.Add(new XcavateProfileApi.Models.LawyerTermsDocument
+            {
+                Ss58Address = wallet,
+                Url = url,
+                FileName = "terms.pdf",
+                ContentType = "application/pdf",
+                UpdatedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+            return true;
+        });
     }
 
     public async ValueTask DisposeAsync()

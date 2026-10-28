@@ -159,10 +159,13 @@ public sealed class StubS3Service : IS3Service
 {
     private readonly List<Upload> _uploads = [];
     private readonly List<(string Bucket, string Key)> _deletions = [];
+    private readonly Dictionary<(string Bucket, string Key), byte[]> _objects = [];
 
     public IReadOnlyList<Upload> Uploads => _uploads;
 
     public IReadOnlyList<(string Bucket, string Key)> Deletions => _deletions;
+
+    public Exception? DownloadError { get; set; }
 
     public async Task<string> UploadImageAsync(
         string bucketName, string key, Stream content, string contentType)
@@ -171,6 +174,7 @@ public sealed class StubS3Service : IS3Service
         await content.CopyToAsync(buffer);
 
         _uploads.Add(new Upload(bucketName, key, contentType, buffer.Length));
+        _objects[(bucketName, key)] = buffer.ToArray();
 
         return $"https://objects.test/{bucketName}/{key}";
     }
@@ -178,8 +182,14 @@ public sealed class StubS3Service : IS3Service
     public Task DeleteObjectAsync(string bucketName, string key)
     {
         _deletions.Add((bucketName, key));
+        _objects.Remove((bucketName, key));
         return Task.CompletedTask;
     }
+
+    public Task<byte[]> DownloadObjectAsync(string bucketName, string key, CancellationToken ct) =>
+        DownloadError is not null
+            ? Task.FromException<byte[]>(DownloadError)
+            : Task.FromResult(_objects[(bucketName, key)]);
 
     public readonly record struct Upload(string Bucket, string Key, string ContentType, long Length);
 }

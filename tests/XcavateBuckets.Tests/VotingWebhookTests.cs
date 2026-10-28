@@ -28,11 +28,16 @@ public class VotingWebhookTests
     private const string DocumentsHash = "9v4Wz5kGQrjqbBhDLzLzT9ckLd5dvNozhKCzBSs2YNez";
     private const string ProposalPda = "ProposalPDA111";
     private const string ChallengePda = "ChallengePDA111";
+    private const string WebhookSecret = "voting-test-secret";
 
     /// <summary>POSTs the raw JSON and returns the status plus the parsed body (default when empty).</summary>
     private static async Task<(HttpStatusCode Status, JsonElement Body)> PostAsync(
         HttpClient client, string path, string json)
     {
+        if (path == "/webhooks/spv_case_claimed_devnet")
+        {
+            path += $"?secret={Uri.EscapeDataString(WebhookSecret)}";
+        }
         using var response = await client.PostAsync(
             path, new StringContent(json, Encoding.UTF8, "application/json"));
         var text = await response.Content.ReadAsStringAsync();
@@ -92,6 +97,8 @@ public class VotingWebhookTests
 
         var (status, body) = await PostAsync(host.Client, "/webhooks/property_claim_started_devnet", claim);
         Assert.That(status, Is.EqualTo(HttpStatusCode.OK), "the claim webhook seed must succeed");
+        await host.SeedViewerKeyAsync("LawyerWallet111", TestDb.Key32);
+        await host.SeedTermsDocumentAsync("LawyerWallet111");
 
         return body.GetProperty("bucketId").GetInt64();
     }
@@ -109,7 +116,7 @@ public class VotingWebhookTests
             ["lawyer"] = "LawyerWallet111",
             ["listing"] = "ListingPDA111",
             ["property"] = AssetPda,
-            ["candidacy"] = "CandidacyPDA111",
+            ["candidacy"] = $"CandidacyPDA{round}111",
             ["slot"] = 487_700_100,
             ["tx_signature"] = "ClaimCaseTx11111111111111111111111111111111111111",
             ["block_time"] = "2026-10-01T10:00:00+00:00",
@@ -264,7 +271,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Spv_case_claimed_posts_the_enriched_open_message_and_unlocks_the_bucket()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.SpvElection = SpvElection();
 
@@ -272,7 +279,7 @@ public class VotingWebhookTests
             host.Client, "/webhooks/spv_case_claimed_devnet", SpvCaseClaimedJson());
 
         var messages = await MessagesAsync(host, bucketId);
-        var bucket = (await host.BucketsAsync()).Single();
+        var bucket = (await host.BucketsAsync()).Single(candidate => candidate.BucketId == bucketId);
         var contributors = await ContributorIdsAsync(host, bucketId);
 
         Assert.Multiple(() =>
@@ -310,7 +317,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Spv_case_claimed_redelivery_is_ignored_not_duplicated()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.SpvElection = SpvElection();
 
@@ -334,7 +341,7 @@ public class VotingWebhookTests
     [Test]
     public async Task A_new_election_round_posts_again()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
 
         host.Indexer.SpvElection = SpvElection();
@@ -360,7 +367,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Spv_lawyer_elected_posts_ratified_when_the_seat_is_filled()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.SpvElection = SpvElection(round: 1, spvLawyer: "LawyerWallet111");
 
@@ -387,7 +394,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Spv_lawyer_elected_posts_rejected_when_the_round_failed_open()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // The all-zero pubkey: nobody was seated.
         host.Indexer.SpvElection = SpvElection();
@@ -409,7 +416,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Agent_election_opened_posts_the_round_with_the_letting_expiry()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.PropertyLetting =
             new PropertyLettingInfo("AgentWallet111", Expiry, 1, 6000, 0);
@@ -442,7 +449,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Proposal_created_posts_the_open_message()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.OpenProposal = new ProposalInfo(7, Expiry, 4000, 6000);
 
@@ -471,7 +478,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Proposal_created_skips_an_auto_approved_spend()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // No proposal row: the chain auto-approved the spend inside the same transaction.
         host.Indexer.OpenProposal = null;
@@ -492,7 +499,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Proposal_finalized_derives_passed_from_the_frozen_tallies()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // 700 yes / 200 no / 100 abstain on a 1000-share asset: full turnout, yes over no.
         host.Indexer.FinalizedProposal =
@@ -522,7 +529,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Proposal_finalized_derives_failed_on_a_quorum_or_majority_miss()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // Only 400 of 1000 shares turned out, and no beats yes: failed on both counts.
         host.Indexer.FinalizedProposal =
@@ -545,7 +552,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Challenge_created_posts_the_open_message()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.OpenChallenge = new ChallengeInfo(3, Expiry, 3000);
 
@@ -574,7 +581,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Challenge_finalized_derives_the_outcome_without_a_threshold()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // Full turnout of 1000, yes over no: passed (challenges have no high-tier threshold).
         host.Indexer.FinalizedChallenge =
@@ -601,7 +608,7 @@ public class VotingWebhookTests
     [Test]
     public async Task A_vote_state_that_cannot_be_resolved_is_a_retryable_502()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
 
         // 1. The indexer simply has no row yet.
@@ -629,7 +636,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Voting_webhooks_404_while_the_namespace_or_bucket_is_missing()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         host.Indexer.SpvElection = SpvElection();
 
         var (noNamespace, _) = await PostAsync(
@@ -637,6 +644,8 @@ public class VotingWebhookTests
         Assert.That(noNamespace, Is.EqualTo(HttpStatusCode.NotFound));
 
         await SeedNamespaceAsync(host.Client);
+        await host.SeedViewerKeyAsync("LawyerWallet111", TestDb.Key32);
+        await host.SeedTermsDocumentAsync("LawyerWallet111");
         var (noBucket, _) = await PostAsync(
             host.Client, "/webhooks/spv_case_claimed_devnet", SpvCaseClaimedJson());
         Assert.That(noBucket, Is.EqualTo(HttpStatusCode.NotFound));
@@ -645,7 +654,7 @@ public class VotingWebhookTests
     [Test]
     public async Task Voting_webhooks_400_on_a_wrong_event_name_or_missing_subject()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedLegalBucketAsync(host);
         host.Indexer.SpvElection = SpvElection();
 
@@ -670,7 +679,7 @@ public class VotingWebhookTests
     [Test]
     public async Task The_deal_executed_sweep_does_not_evict_the_system_poster_permanently()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
 
         // Pre-settlement: an SPV-case claim posts, installing the system contributor.

@@ -21,7 +21,7 @@ backoff; a non-2xx answer means "retry forever" (30 s doubling, 1 h cap).
 | `deal_executed` | `execute_deal` | `DEAL_EXECUTED_WEBHOOK_URL` | `POST /webhooks/deal_executed_devnet` | **implemented** (removes lawyers) |
 | `letting_agent_appointed` | property `finalize_agent_election` | `LETTING_AGENT_APPOINTED_WEBHOOK_URL` | `POST /webhooks/letting_agent_appointed_devnet` | **implemented** (agent write — #4) |
 | `property_shares_transferred` | `buy_relisted_shares` / `accept_offer` / `send_property_shares` | `SHARES_TRANSFERRED_WEBHOOK_URL` | `POST /webhooks/shares_transferred_devnet` | **implemented** (viewer swap via profile X25519 keys — see #5) |
-| `spv_case_claimed` | marketplace `claim_spv_case` | `SPV_CASE_CLAIMED_WEBHOOK_URL` | `POST /webhooks/spv_case_claimed_devnet` | **implemented** (posts a `voting/terms` message — see #9) |
+| `spv_case_claimed` | marketplace `claim_spv_case` | `SPV_CASE_CLAIMED_WEBHOOK_URL` | `POST /webhooks/spv_case_claimed_devnet` | **implemented** (encrypted per-lawyer terms bucket + PDF — #10; `voting/terms` announcement — #9) |
 | `agent_election_opened` | property program opens a letting-agent election | *(indexer env var)* | `POST /webhooks/agent_election_opened_devnet` | **implemented** (posts a `voting/election` message — see #9) |
 | `proposal_created` | property program creates an agent spending proposal | *(indexer env var)* | `POST /webhooks/proposal_created_devnet` | **implemented** (posts a `voting/proposal` message — see #9) |
 | `proposal_finalized` | property program finalizes a spending proposal | *(indexer env var)* | `POST /webhooks/proposal_finalized_devnet` | **implemented** (posts a `voting/result` message — see #9) |
@@ -222,11 +222,10 @@ and `agent_election_opened`, `proposal_created`/`proposal_finalized`,
   happen server-side. The domain has no "write while locked" bypass, and unlocking grants nothing
   the lifecycle does not already intend (contributors are meant to write; viewers stay read-only
   either way), so each handler calls `ResumeWritingAsync` as the namespace creator before its
-  first post. The encryption key it sets is **32 zero bytes, an explicit placeholder**: bucket
-  content is not end-to-end-encrypted under it. Voting announcements are plaintext by design
-  (the server holds no bucket X25519 key); if the legal-document flow later wants real E2E, the
-  key ceremony must itself be server-mediated (a future webhook rotating the key as the PDA
-  admin) — see #2/#3.
+  first post. The encryption key it sets is **32 zero bytes, an explicit placeholder**: this legacy
+  voting bucket is not end-to-end-encrypted under it, and its announcements are plaintext by design.
+  The separate per-candidacy lawyer-terms buckets now perform the server-mediated real X25519 key
+  ceremony in #10; they do not rotate this legal bucket's key.
 - **Tags need no pre-creation.** `MessageService.WriteAsync` registers an unknown tag on the fly
   (recording the writer as its creator), so the `voting/terms`, `voting/election`,
   `voting/proposal`, `voting/challenge` and `voting/result` tags appear with the first message.
@@ -279,3 +278,41 @@ and `agent_election_opened`, `proposal_created`/`proposal_finalized`,
   bucket's membership after settlement is just the operator PDA plus the system identity, so
   election/proposal/challenge pushes currently reach no human wallet — holder push fan-out needs
   the holder-enumeration work in #3 like everything else.
+
+## 10. Lawyer-terms buckets — IMPLEMENTED
+
+`spv_case_claimed` now also creates one `spv-lawyer-terms` bucket per candidacy in the property
+namespace, named after the property and candidacy. This is separate from the legal-process bucket:
+the one-per-round plaintext `voting/terms` announcement above remains unchanged there, while each
+lawyer's own bucket carries their terms discussion and document.
+
+- **Webhook authentication.** The route requires `INDEXER_WEBHOOK_SECRET` exactly like the offers
+  route: missing configuration answers 503, and a missing/wrong secret answers 401 before any
+  lookup or bucket write. Configure the Indexer's `SPV_CASE_CLAIMED_WEBHOOK_URL` with the same
+  `?secret=` query parameter.
+- **Operator admin.** `BUCKET_ADMIN_ADDRESS` is required (503 when blank) and is installed as both
+  bucket admin and contributor, so the two requested messages are authored by that address. The
+  deployment workflow renders it from `HETZNER_BUCKET_ADMIN_ADDRESS`, and Compose passes it through
+  to the API. No admin viewer key is required unless the admin is itself a claimed-token holder.
+- **Participants.** Current positive `shareHoldings` wallets (not mere reservations) and the
+  claiming lawyer are contributors, with their profile/migrated X25519 keys as viewers. A missing
+  required key answers 404 before any bucket is written; duplicate wallets and keys stay idempotent.
+- **Real key ceremony.** Each new bucket gets a fresh X25519 keypair. Its public key unlocks the
+  bucket, and the first message is `didcomm/key-sharing-v1` in general JWE form
+  (`ECDH-ES+A256KW`/`A256GCM`). The private JWK is encrypted separately for every holder/lawyer
+  viewer key, so anonymous GraphQL/Socket.IO reads expose only ciphertext; each participant unwraps
+  it with their own private key. This does not rotate the legacy legal bucket's zero-key placeholder.
+- **Ordered admin messages.** After key sharing, the admin authors the exact plaintext prompt
+  `All property token holders should now vote on whether to accept the Lawyer's terms.` under
+  `lawyer/terms-vote`, then the PDF under `lawyer/terms-document`.
+- **PDF delivery.** Bucket messages cannot inline the 25 MB terms PDF, so the current bytes are
+  downloaded, hashed, and snapshotted to `terms-documents/by-candidacy/{candidacy}.pdf`. The message
+  references that per-candidacy URL with `application/pdf`, the original filename, null
+  `IpfsContent`, and SHA-256 of those exact bytes. Later re-uploads of the lawyer's current document
+  cannot change the snapshot voters received. Missing documents answer 404, and object-storage
+  failures answer 502, before any bucket is written.
+- **Retry semantics.** Bucket lookup by namespace/category/deterministic name makes redelivery
+  reuse the bucket, key, and three messages. If the legacy legal bucket is not ready, the terms
+  bucket can commit before the voting call answers 404; the next delivery reuses it and finishes
+  only the voting announcement. Different lawyers in one round get distinct buckets without
+  duplicating that round's legacy announcement.

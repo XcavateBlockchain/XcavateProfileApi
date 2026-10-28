@@ -25,6 +25,8 @@ public class TermsDocumentEndpointTests
         var uploaded = await client.UploadTermsDocumentAsync(lawyer.Value, "terms.pdf", pdf, lawyer);
 
         var stored = await host.StoredTermsDocumentAsync(lawyer.Value);
+        var downloaded = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", $"terms-documents/{lawyer.Value}.pdf", CancellationToken.None);
 
         var expectedUrl = $"https://objects.test/xcavate-profile/terms-documents/{lawyer.Value}.pdf";
         Assert.Multiple(() =>
@@ -43,6 +45,7 @@ public class TermsDocumentEndpointTests
             Assert.That(
                 host.S3.Uploads[0].Key, Is.EqualTo($"terms-documents/{lawyer.Value}.pdf"));
             Assert.That(host.S3.Uploads[0].ContentType, Is.EqualTo("application/pdf"));
+            Assert.That(downloaded, Is.EqualTo("%PDF-1.4 not really a pdf"u8.ToArray()));
         });
     }
 

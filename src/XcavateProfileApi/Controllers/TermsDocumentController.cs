@@ -24,7 +24,12 @@ public class TermsDocumentController : ControllerBase
     private const int RequestSizeLimit = 26 * 1024 * 1024;
 
     /// <summary>The bucket the terms documents are stored in — the same one as profile pictures.</summary>
-    private const string Bucket = "xcavate-profile";
+    internal const string Bucket = "xcavate-profile";
+
+    internal static string ObjectKey(string ss58address) => $"terms-documents/{ss58address}.pdf";
+
+    internal static string SnapshotObjectKey(string candidacy) =>
+        $"terms-documents/by-candidacy/{candidacy}.pdf";
 
     private const string PdfExtension = ".pdf";
     private const string PdfContentType = "application/pdf";
@@ -140,7 +145,7 @@ public class TermsDocumentController : ControllerBase
 
         // The key is the wallet address alone, so a re-upload rewrites the existing object
         // instead of creating a new one — the desired "change document" semantics.
-        var key = $"terms-documents/{ss58address}.pdf";
+        var key = ObjectKey(ss58address);
         string url;
         await using (var stream = file.OpenReadStream())
         {

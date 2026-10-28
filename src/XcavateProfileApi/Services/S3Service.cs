@@ -15,12 +15,21 @@ public interface IS3Service
 {
     Task<string> UploadImageAsync(string bucketName, string key, Stream content, string contentType);
     Task DeleteObjectAsync(string bucketName, string key);
+    Task<byte[]> DownloadObjectAsync(string bucketName, string key, CancellationToken ct);
 }
 
 public class S3Service : IS3Service
 {
     private readonly AmazonS3Client _client;
     private readonly Uri _endpoint;
+
+    public async Task<byte[]> DownloadObjectAsync(string bucketName, string key, CancellationToken ct)
+    {
+        using var response = await _client.GetObjectAsync(bucketName, key, ct);
+        using var content = new MemoryStream();
+        await response.ResponseStream.CopyToAsync(content, ct);
+        return content.ToArray();
+    }
 
     public S3Service(S3Config config)
     {
