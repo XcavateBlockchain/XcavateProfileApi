@@ -23,11 +23,13 @@ public class PropertyLifecycleWebhookTests
     private const long ListingId = 12;
     private const string AssetPda = "AssetPDA111";
     private const long AssetSlot = 487_500_123;
+    private const string WebhookSecret = "property-lifecycle-test-secret";
 
     /// <summary>POSTs the raw JSON and returns the status plus the parsed body (default when empty).</summary>
     private static async Task<(HttpStatusCode Status, JsonElement Body)> PostAsync(
         HttpClient client, string path, string json)
     {
+        path += $"?secret={Uri.EscapeDataString(WebhookSecret)}";
         using var response = await client.PostAsync(
             path, new StringContent(json, Encoding.UTF8, "application/json"));
         var text = await response.Content.ReadAsStringAsync();
@@ -100,7 +102,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Claim_started_creates_the_legal_bucket_with_the_operator_admin()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host.Client);
 
         var (status, body) = await PostAsync(
@@ -134,7 +136,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Claim_started_redelivery_is_ignored_not_duplicated()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host.Client);
 
         var (firstStatus, _) = await PostAsync(
@@ -156,7 +158,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Claim_started_404s_while_the_namespace_is_missing_so_the_indexer_retries()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
 
         var (status, _) = await PostAsync(
             host.Client, "/webhooks/property_claim_started_devnet", ClaimStartedJson());
@@ -173,7 +175,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Claim_started_rejects_a_wrong_event_name()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
 
         var json = new JsonObject { ["event"] = "something_else", ["listing_id"] = ListingId }
             .ToJsonString();
@@ -187,7 +189,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Deal_executed_removes_the_lawyers_but_keeps_the_operator_admin()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
 
         // Two lawyers with write+manage access, as the election webhook (once implemented) or a
@@ -250,7 +252,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Deal_executed_404s_while_the_bucket_is_missing_so_the_indexer_retries()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host.Client);
 
         var json = new JsonObject
@@ -295,7 +297,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Lawyer_elected_ratified_grants_the_lawyer_write_and_the_holders_read()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // The indexer's listing row shows the seat filled: its spvLawyer IS the winner's wallet.
         host.Indexer.SpvElection = new SpvElectionInfo(1, 1_790_000_000, 1, "LawyerWallet111");
@@ -327,7 +329,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Lawyer_elected_rejected_adds_nobody()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // The all-zero pubkey: the round failed open, nobody was seated.
         host.Indexer.SpvElection =
@@ -359,7 +361,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Lawyer_elected_redelivery_repeats_no_grant()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.SpvElection = new SpvElectionInfo(1, 1_790_000_000, 1, "LawyerWallet111");
         var holderKey = "0x" + new string('d', 64);
@@ -392,7 +394,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Lawyer_elected_502s_mid_grant_when_the_holder_sync_fails_and_the_redelivery_completes_it()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.SpvElection = new SpvElectionInfo(1, 1_790_000_000, 1, "LawyerWallet111");
         var holderKey = "0x" + new string('d', 64);
@@ -459,7 +461,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Agent_appointed_adds_the_agent_as_a_contributor_and_finds_the_namespace_by_pda()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // The entry PDA resolves to the agent's wallet through the indexer's lettingAgents mirror.
         host.Indexer.LettingAgentWallet = "AgentWallet111";
@@ -495,7 +497,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Agent_appointed_502s_when_the_agent_wallet_cannot_be_resolved()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
 
         // The indexer answered but has no row for the entry PDA.
@@ -522,7 +524,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Agent_appointed_without_a_winner_entry_is_ignored()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         host.Indexer.LettingAgentWallet = "AgentWallet111";
 
@@ -543,7 +545,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Shares_transferred_adds_the_buyer_viewer_and_removes_the_seller()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         var buyerKey = "0x" + new string('a', 64);
         var sellerKey = "0x" + new string('b', 64);
@@ -570,7 +572,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Shares_transferred_skips_a_side_whose_wallet_has_no_profile_key()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         var sellerKey = "0x" + new string('b', 64);
         await SeedProfileAsync(host, "SellerWallet111", sellerKey);
@@ -595,7 +597,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Shares_transferred_redelivery_is_idempotent()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         var buyerKey = "0x" + new string('a', 64);
         await SeedProfileAsync(host, "BuyerWallet111", buyerKey);
@@ -616,7 +618,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Shares_transferred_resolves_a_migrated_wallet_through_wallet_migrations()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         // The seller's profile still sits under its legacy SS58 address; the on-chain wallet is
         // the Solana one, linked by a WalletMigrations row.
@@ -650,7 +652,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Shares_transferred_self_transfer_changes_nothing()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         var key = "0x" + new string('a', 64);
         await SeedProfileAsync(host, "SameWallet111", key);
@@ -699,7 +701,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Holder_changed_adds_the_investor_as_a_viewer()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         var key = "0x" + new string('c', 64);
         await SeedProfileAsync(host, "InvestorWallet111", key);
@@ -722,7 +724,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Holder_changed_removes_the_investor_viewer()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
         var key = "0x" + new string('c', 64);
         await SeedProfileAsync(host, "InvestorWallet111", key);
@@ -745,7 +747,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Holder_changed_defers_while_the_bucket_is_missing_not_a_retry_storm()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host.Client);
 
         // The whole sale phase happens before the bucket exists: the event is ACKNOWLEDGED as
@@ -767,7 +769,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Holder_changed_skips_a_wallet_without_a_profile_key()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         var bucketId = await SeedLegalBucketAsync(host);
 
         var (status, body) = await PostAsync(
@@ -787,7 +789,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Claim_started_reconciles_the_current_holders_into_the_bucket()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host.Client);
         // Two current holders at claim time: one with a registered key, one without.
         var keyedWallet = "HolderWallet111";
@@ -814,7 +816,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Claim_started_502s_and_rolls_the_bucket_back_when_the_indexer_is_down()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host.Client);
         host.Indexer.ThrowOnQuery = true;
 
@@ -885,7 +887,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Shares_transferred_rejects_an_unknown_kind()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedLegalBucketAsync(host);
 
         var json = new JsonObject
@@ -905,7 +907,7 @@ public class PropertyLifecycleWebhookTests
     [Test]
     public async Task Lifecycle_webhooks_404_while_the_namespace_is_missing()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
 
         var elected = new JsonObject
         {

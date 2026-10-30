@@ -34,10 +34,7 @@ public class VotingWebhookTests
     private static async Task<(HttpStatusCode Status, JsonElement Body)> PostAsync(
         HttpClient client, string path, string json)
     {
-        if (path == "/webhooks/spv_case_claimed_devnet")
-        {
-            path += $"?secret={Uri.EscapeDataString(WebhookSecret)}";
-        }
+        path += $"?secret={Uri.EscapeDataString(WebhookSecret)}";
         using var response = await client.PostAsync(
             path, new StringContent(json, Encoding.UTF8, "application/json"));
         var text = await response.Content.ReadAsStringAsync();

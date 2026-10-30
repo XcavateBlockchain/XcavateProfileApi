@@ -19,9 +19,11 @@ namespace XcavateProfileApi.Controllers;
 /// <summary>
 /// Webhooks the indexer calls to notify the API of on-chain events. These are server-to-server
 /// endpoints: the indexer posts a plain JSON document, so — unlike the profile and company
-/// endpoints — they carry no wallet signature. Delivery is at-least-once, so every handler is
-/// idempotent and answers 2xx whether it acted or deliberately ignored a redelivery, so the
-/// indexer never retries a webhook the API already handled.
+/// endpoints — they carry no wallet signature. Every handler instead requires the shared
+/// <c>INDEXER_WEBHOOK_SECRET</c> from the route's query string or the <c>X-Webhook-Secret</c>
+/// header, and fails closed when that configuration is absent. Delivery is at-least-once, so
+/// every handler is idempotent and answers 2xx whether it acted or deliberately ignored a
+/// redelivery, so the indexer never retries a webhook the API already handled.
 ///
 /// The set implements the "Property namespace &amp; buckets" lifecycle: the asset webhook creates
 /// the property's namespace, the claim-started webhook creates its legal-process bucket, the
@@ -37,6 +39,9 @@ namespace XcavateProfileApi.Controllers;
 /// </summary>
 [ApiController]
 [Route("webhooks")]
+[IndexerWebhookSecret]
+[ProducesResponseType(StatusCodes.Status401Unauthorized)]
+[ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
 public class WebhooksController : ControllerBase
 {
     private readonly BucketDbContext _db;
@@ -175,11 +180,6 @@ public class WebhooksController : ControllerBase
     public async Task<IActionResult> OffersNamespaceCreatedDevnet(
         [FromBody] OffersNamespaceCreatedPayload payload, CancellationToken ct)
     {
-        if (CheckWebhookSecret() is { } rejected)
-        {
-            return rejected;
-        }
-
         if (payload is null
             || !string.Equals(payload.Event, OffersNamespaceCreatedEventName, StringComparison.Ordinal)
             || (payload.ListingId is null && string.IsNullOrWhiteSpace(payload.Property))
@@ -897,12 +897,6 @@ public class WebhooksController : ControllerBase
     public async Task<IActionResult> SpvCaseClaimedDevnet(
         [FromBody] SpvCaseClaimedPayload payload, CancellationToken ct)
     {
-        var secretFailure = CheckWebhookSecret();
-        if (secretFailure is not null)
-        {
-            return secretFailure;
-        }
-
         if (payload is null
             || !string.Equals(payload.Event, SpvCaseClaimedEventName, StringComparison.Ordinal)
             || payload.PropertyId is null
@@ -1644,36 +1638,6 @@ public class WebhooksController : ControllerBase
         return name.Length <= MaxBucketNameLen ? name : name[..MaxBucketNameLen];
     }
 
-    /// <summary>
-    /// The shared-secret gate: null when the request may proceed, else the rejection result.
-    /// Same model as <see cref="NotificationWebhooksController"/> — the secret is read from
-    /// <c>INDEXER_WEBHOOK_SECRET</c>, compared in constant time, and accepted from the
-    /// <c>X-Webhook-Secret</c> header or the <c>secret</c> query parameter.
-    /// </summary>
-    private IActionResult? CheckWebhookSecret()
-    {
-        var secret = _config[WebhookSecretConfigKey];
-        if (string.IsNullOrWhiteSpace(secret))
-        {
-            return StatusCode(
-                StatusCodes.Status503ServiceUnavailable,
-                $"The indexer webhook secret ({WebhookSecretConfigKey}) is not configured — "
-                + "this webhook is disabled.");
-        }
-
-        var presented = Request.Headers[WebhookSecretHeader].FirstOrDefault()
-            ?? Request.Query[WebhookSecretQueryKey].FirstOrDefault();
-        if (string.IsNullOrEmpty(presented)
-            || presented.Length != secret.Length
-            || !CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(secret)))
-        {
-            return Unauthorized("Missing or wrong webhook secret.");
-        }
-
-        return null;
-    }
-
     private static string OffersNamespaceCreatedEventKey(OffersNamespaceCreatedPayload payload)
     {
         var id = payload.ListingId?.ToString(CultureInfo.InvariantCulture)
@@ -1698,13 +1662,7 @@ public class WebhooksController : ControllerBase
     private const string HolderChangedEventName = "property_holder_changed";
     private const string OffersNamespaceCreatedEventName = "offers_namespace_created";
 
-    /// <summary>The env var holding the shared secret the offers namespace webhook requires.</summary>
-    private const string WebhookSecretConfigKey = "INDEXER_WEBHOOK_SECRET";
-
     private const string BucketAdminAddressConfigKey = "BUCKET_ADMIN_ADDRESS";
-
-    private const string WebhookSecretHeader = "X-Webhook-Secret";
-    private const string WebhookSecretQueryKey = "secret";
 
     /// <summary>The all-zero pubkey: what an unassigned <c>LawyerAssignment.lawyer</c> reads as.</summary>
     private const string SystemDefaultPubkey = "11111111111111111111111111111111";

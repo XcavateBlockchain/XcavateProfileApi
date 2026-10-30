@@ -82,7 +82,8 @@ public class OffersNamespaceWebhookTests
 
     private static async Task SeedPropertyNamespaceAsync(HttpClient client)
     {
-        var (status, _) = await PostAsync(client, "/webhooks/init_property_asset_devnet", AssetRegisteredJson());
+        var (status, _) = await PostAsync(
+            client, "/webhooks/init_property_asset_devnet", AssetRegisteredJson(), secret: WebhookSecret);
         Assert.That(status, Is.EqualTo(HttpStatusCode.OK), "the asset webhook seed must succeed");
     }
 
@@ -211,7 +212,6 @@ public class OffersNamespaceWebhookTests
     public async Task Returns_503_when_the_shared_secret_is_not_configured()
     {
         await using var host = await WebhooksHost.StartAsync();
-        await SeedPropertyNamespaceAsync(host.Client);
 
         var (status, _) = await PostAsync(
             host.Client,

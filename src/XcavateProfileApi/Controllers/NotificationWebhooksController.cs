@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,11 +15,10 @@ namespace XcavateProfileApi.Controllers;
 /// another wallet) pushes "you received shares" to the receiver.
 /// </summary>
 /// <remarks>
-/// Unlike the bucket webhooks in <see cref="WebhooksController"/> these endpoints CHANGE nothing
-/// a client can read — the fanout is a best-effort push — so they are the ones a forged POST
-/// could abuse for push spam. They are gated by a shared secret (the
-/// <c>INDEXER_WEBHOOK_SECRET</c> env var): the indexer's delivery loop POSTs a bare JSON body and
-/// cannot set headers, so the secret travels in the route URL's query string
+/// These endpoints CHANGE nothing a client can read — the fanout is a best-effort push — so a
+/// forged POST could abuse them for push spam. Like every indexer webhook, they are gated by the
+/// shared <c>INDEXER_WEBHOOK_SECRET</c> env var: the indexer's delivery loop POSTs a bare JSON
+/// body and cannot set headers, so the secret travels in the route URL's query string
 /// (<c>?secret=…</c> — the channel the indexer's URL convention already blesses) or, for direct
 /// callers, in the <c>X-Webhook-Secret</c> header. Unset secret = the endpoints fail CLOSED
 /// (503), so a push-spam hole is never open by default; the indexer's outbox keeps retrying,
@@ -36,22 +33,20 @@ namespace XcavateProfileApi.Controllers;
 /// </remarks>
 [ApiController]
 [Route("webhooks")]
+[IndexerWebhookSecret]
 public class NotificationWebhooksController : ControllerBase
 {
     private readonly ProfileDbContext _db;
     private readonly IIndexerClient _indexer;
-    private readonly IConfiguration _config;
     private readonly ILogger<NotificationWebhooksController> _logger;
 
     public NotificationWebhooksController(
         ProfileDbContext db,
         IIndexerClient indexer,
-        IConfiguration config,
         ILogger<NotificationWebhooksController> logger)
     {
         _db = db;
         _indexer = indexer;
-        _config = config;
         _logger = logger;
     }
 
@@ -82,11 +77,6 @@ public class NotificationWebhooksController : ControllerBase
     public async Task<IActionResult> IncomeDistributedDevnet(
         [FromBody] IncomeDistributedPayload payload, CancellationToken ct)
     {
-        if (CheckWebhookSecret() is { } rejected)
-        {
-            return rejected;
-        }
-
         if (payload is null
             || !string.Equals(payload.Event, IncomeDistributedEventName, StringComparison.Ordinal)
             || payload.AssetId is null
@@ -188,11 +178,6 @@ public class NotificationWebhooksController : ControllerBase
     public async Task<IActionResult> SharesReceivedDevnet(
         [FromBody] SharesReceivedPayload payload, CancellationToken ct)
     {
-        if (CheckWebhookSecret() is { } rejected)
-        {
-            return rejected;
-        }
-
         if (payload is null
             || !string.Equals(payload.Event, SharesTransferredEventName, StringComparison.Ordinal)
             || payload.AssetId is null
@@ -253,36 +238,6 @@ public class NotificationWebhooksController : ControllerBase
             BucketId: string.Empty));
 
         return Ok(new { status = "processed", pushed = true });
-    }
-
-    /// <summary>
-    /// The shared-secret gate: null when the request may proceed, else the rejection result.
-    /// The secret is read per request from <c>INDEXER_WEBHOOK_SECRET</c>; compared in constant
-    /// time, and accepted from the <c>X-Webhook-Secret</c> header or the <c>secret</c> query
-    /// parameter (the only channel the indexer's header-less delivery loop can carry it on).
-    /// </summary>
-    private IActionResult? CheckWebhookSecret()
-    {
-        var secret = _config[WebhookSecretConfigKey];
-        if (string.IsNullOrWhiteSpace(secret))
-        {
-            return StatusCode(
-                StatusCodes.Status503ServiceUnavailable,
-                $"The indexer webhook secret ({WebhookSecretConfigKey}) is not configured — "
-                + "the notification webhooks are disabled.");
-        }
-
-        var presented = Request.Headers[WebhookSecretHeader].FirstOrDefault()
-            ?? Request.Query[WebhookSecretQueryKey].FirstOrDefault();
-        if (string.IsNullOrEmpty(presented)
-            || presented.Length != secret.Length
-            || !CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(secret)))
-        {
-            return Unauthorized("Missing or wrong webhook secret.");
-        }
-
-        return null;
     }
 
     /// <summary>
@@ -412,10 +367,7 @@ public class NotificationWebhooksController : ControllerBase
     private const string SharesTransferredEventName = "shares_transferred";
 
     /// <summary>The env var holding the shared secret both notification webhooks require.</summary>
-    public const string WebhookSecretConfigKey = "INDEXER_WEBHOOK_SECRET";
-
-    private const string WebhookSecretHeader = "X-Webhook-Secret";
-    private const string WebhookSecretQueryKey = "secret";
+    public const string WebhookSecretConfigKey = IndexerWebhookSecretAttribute.ConfigKey;
 
     private const string RentReceivedTitle = "Rent received";
     private const string RentReceivedBody = "Your property paid out rent — open the app to claim it";

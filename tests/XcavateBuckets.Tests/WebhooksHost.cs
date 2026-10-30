@@ -22,9 +22,8 @@ namespace XcavateBuckets.Tests;
 /// webhooks controller) over the real bucket domain services and SQLite databases (bucket +
 /// profile stores) — the counterpart to <see cref="RestHost"/> and <see cref="GraphQLHost"/>. It
 /// covers the property-asset webhook, including its idempotent redelivery, without the docker
-/// stack the E2E suite needs. The bucket webhook carries no signature, so no signing client or
-/// validator is wired here; the notification webhooks' shared secret is injected as
-/// configuration when a test asks for it.
+/// stack the E2E suite needs. The shared webhook secret is injected as configuration when a test
+/// asks for it; test helpers present it through the same query parameter the indexer uses.
 /// </summary>
 public sealed class WebhooksHost : IAsyncDisposable
 {
@@ -50,7 +49,7 @@ public sealed class WebhooksHost : IAsyncDisposable
         S3 = s3;
     }
 
-    /// <summary>A raw client — the webhook needs no credentials.</summary>
+    /// <summary>A client without default credentials; test helpers supply the webhook secret.</summary>
     public HttpClient Client { get; }
 
     public StubS3Service S3 { get; }
@@ -94,11 +93,10 @@ public sealed class WebhooksHost : IAsyncDisposable
             web.UseTestServer();
             web.ConfigureAppConfiguration((_, config) =>
             {
-                var values = new Dictionary<string, string?>();
-                if (webhookSecret is not null)
+                var values = new Dictionary<string, string?>
                 {
-                    values[NotificationWebhooksController.WebhookSecretConfigKey] = webhookSecret;
-                }
+                    [NotificationWebhooksController.WebhookSecretConfigKey] = webhookSecret
+                };
                 if (bucketAdminAddress is not null)
                 {
                     values["BUCKET_ADMIN_ADDRESS"] = bucketAdminAddress;

@@ -16,6 +16,7 @@ namespace XcavateBuckets.Tests;
 public class PropertyAssetWebhookTests
 {
     private const string Path = "/webhooks/init_property_asset_devnet";
+    private const string WebhookSecret = "property-asset-test-secret";
 
     /// <summary>Builds a payload shaped exactly like the indexer's <c>property_asset_registered</c>.</summary>
     private static string Payload(
@@ -44,8 +45,9 @@ public class PropertyAssetWebhookTests
     private static async Task<(HttpStatusCode Status, JsonElement Body)> PostAsync(
         HttpClient client, string json)
     {
+        var route = $"{Path}?secret={Uri.EscapeDataString(WebhookSecret)}";
         using var response = await client.PostAsync(
-            Path, new StringContent(json, Encoding.UTF8, "application/json"));
+            route, new StringContent(json, Encoding.UTF8, "application/json"));
         var text = await response.Content.ReadAsStringAsync();
 
         JsonElement body;
@@ -67,7 +69,7 @@ public class PropertyAssetWebhookTests
     [Test]
     public async Task Webhook_creates_a_namespace_for_a_new_property_asset()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         using var client = host.Client;
 
         var (status, body) = await PostAsync(client, Payload(pubkey: "AssetPDA111", slot: 487_500_123));
@@ -94,7 +96,7 @@ public class PropertyAssetWebhookTests
     [Test]
     public async Task Webhook_ignores_a_redelivered_property_asset()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         using var client = host.Client;
 
         const string pubkey = "AssetPDA222";
@@ -122,7 +124,7 @@ public class PropertyAssetWebhookTests
     [Test]
     public async Task Webhook_creates_a_namespace_for_each_distinct_asset()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         using var client = host.Client;
 
         await PostAsync(client, Payload(pubkey: "AssetPDAAAA", slot: 1));
@@ -147,7 +149,7 @@ public class PropertyAssetWebhookTests
     [Test]
     public async Task Webhook_rejects_a_payload_that_is_not_property_asset_registered()
     {
-        await using var host = await WebhooksHost.StartAsync();
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         using var client = host.Client;
 
         var json = new JsonObject

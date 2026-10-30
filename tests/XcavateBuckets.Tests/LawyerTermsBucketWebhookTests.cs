@@ -83,7 +83,7 @@ public class LawyerTermsBucketWebhookTests
             ["program"] = "marketplace"
         }.ToJsonString();
         using var response = await host.Client.PostAsync(
-            "/webhooks/init_property_asset_devnet",
+            $"/webhooks/init_property_asset_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
             new StringContent(json, Encoding.UTF8, "application/json"));
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
     }
@@ -102,7 +102,7 @@ public class LawyerTermsBucketWebhookTests
             ["program"] = "marketplace"
         }.ToJsonString();
         using var response = await host.Client.PostAsync(
-            "/webhooks/property_claim_started_devnet",
+            $"/webhooks/property_claim_started_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
             new StringContent(json, Encoding.UTF8, "application/json"));
         var body = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -498,9 +498,6 @@ public class LawyerTermsBucketWebhookTests
     public async Task Missing_webhook_secret_configuration_returns_503_without_side_effects()
     {
         await using var host = await WebhooksHost.StartAsync();
-        await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
-        await SeedPrerequisitesAsync(host);
 
         var (status, _) = await PostClaimAsync(host);
 

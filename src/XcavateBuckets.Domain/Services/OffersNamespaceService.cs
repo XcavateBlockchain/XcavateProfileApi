@@ -7,8 +7,8 @@ namespace XcavateBuckets.Domain.Services;
 
 /// <summary>
 /// Idempotent creation of the property's secondary-market offers namespace. Shared between
-/// the signed GraphQL mutation and the unsigned indexer webhook so both paths create the
-/// same namespace shape and agree on the same idempotency key.
+/// the wallet-signed GraphQL mutation and the shared-secret indexer webhook so both paths create
+/// the same namespace shape and agree on the same idempotency key.
 /// </summary>
 public static class OffersNamespaceService
 {

@@ -29,13 +29,15 @@ backoff; a non-2xx answer means "retry forever" (30 s doubling, 1 h cap).
 | `challenge_finalized` | property program finalizes a challenge | *(indexer env var)* | `POST /webhooks/challenge_finalized_devnet` | **implemented** (posts a `voting/result` message — see #9) |
 | `property_holder_changed` | marketplace `reserve_shares` / `buy_property_shares` (added) and `unreserve_shares` / `release_reservation` / `close_cancelled_position` / `withdraw_*` (removed) | `HOLDER_CHANGED_WEBHOOK_URL` | `POST /webhooks/property_holder_changed_devnet` | **implemented** (viewer add/remove + creation-time reconcile — see #3) |
 
+Every webhook above requires the shared `INDEXER_WEBHOOK_SECRET`, sent as the route URL's
+`?secret=` query parameter or the `X-Webhook-Secret` header. A missing or wrong secret returns
+401; leaving the server configuration unset disables every webhook with 503.
+
 A third group — the notification webhooks — fans out into push notifications instead of bucket
-state (`src/XcavateProfileApi/Controllers/NotificationWebhooksController.cs`). Unlike the groups
-above they are gated by a shared secret (`INDEXER_WEBHOOK_SECRET`, sent as the route URL's
-`?secret=` query parameter or the `X-Webhook-Secret` header; unset = the endpoints fail closed
-with 503), because a forged POST here is push spam, not an idempotent bucket mutation. They
-dedupe on the event's natural key in `ProcessedWebhookEvents` (recorded before the 2xx), and
-push only to wallets that map to a registered profile (direct, or via `WalletMigrations`).
+state (`src/XcavateProfileApi/Controllers/NotificationWebhooksController.cs`). These endpoints
+use the same authentication policy. They dedupe on the event's natural key in
+`ProcessedWebhookEvents` (recorded before the 2xx), and push only to wallets that map to a
+registered profile (direct, or via `WalletMigrations`).
 
 | Indexer event type | Trigger (on-chain) | Env var (indexer) | Endpoint here | Status |
 |---|---|---|---|---|
@@ -159,31 +161,36 @@ retry forever at the 1 h backoff cap — visible in `webhook_events.last_error`.
 `UPDATE webhook_events SET delivered_at = now() WHERE event_id = '...';` (see the indexer
 RUNBOOK's webhook section), or set the missing route and let the backlog drain.
 
-## 8. Deployment wiring still to do
+## 8. Deployment wiring and authenticated rollout
 
-The indexer reads the five new `*_WEBHOOK_URL` variables at startup (restart required). Set them
-to `https://<this API's host>/webhooks/<endpoint>_devnet`, add the pass-through lines in the
-indexer's `docker-compose.yml` / `deploy.yml` (already added on the indexer branch), and create
-the matching GitHub secrets (`PROPERTY_CLAIM_STARTED_WEBHOOK_URL`, `SPV_LAWYER_ELECTED_WEBHOOK_URL`,
-`DEAL_EXECUTED_WEBHOOK_URL`, `LETTING_AGENT_APPOINTED_WEBHOOK_URL`, `SHARES_TRANSFERRED_WEBHOOK_URL`).
-Unset = that event type accumulates undelivered in `webhook_events` and drains when configured.
-The voting endpoints (#9) take the same treatment: the indexer routes
-`SPV_CASE_CLAIMED_WEBHOOK_URL` (new, ADR-37) plus the existing
-`SPV_LAWYER_ELECTED_WEBHOOK_URL`, `AGENT_ELECTION_OPENED_WEBHOOK_URL`,
+Every indexer `*_WEBHOOK_URL` value must have this shape:
+
+`https://<this API's host>/webhooks/<endpoint>_devnet?secret=<INDEXER_WEBHOOK_SECRET>`
+
+Use a hex or base64url secret, or URL-encode the query value if it contains other characters. The
+indexer's delivery loop cannot set headers, so the URL is the credential. This applies to every
+route: `INIT_PROPERTY_ASSET_WEBHOOK_URL`, `PROPERTY_CLAIM_STARTED_WEBHOOK_URL`,
+`SPV_LAWYER_ELECTED_WEBHOOK_URL`, `DEAL_EXECUTED_WEBHOOK_URL`,
+`LETTING_AGENT_APPOINTED_WEBHOOK_URL`, `SHARES_TRANSFERRED_WEBHOOK_URL`,
+`SPV_CASE_CLAIMED_WEBHOOK_URL`, `AGENT_ELECTION_OPENED_WEBHOOK_URL`,
 `PROPOSAL_CREATED_WEBHOOK_URL`, `PROPOSAL_FINALIZED_WEBHOOK_URL`,
-`CHALLENGE_CREATED_WEBHOOK_URL`, `CHALLENGE_FINALIZED_WEBHOOK_URL` to these `*_devnet`
-paths, plus `HOLDER_CHANGED_WEBHOOK_URL` for the holder-membership route (#3), and this
-service needs `INDEXER_GRAPHQL_URL` pointing at the indexer's GraphQL for
-the resolution reads.
+`CHALLENGE_CREATED_WEBHOOK_URL`, `CHALLENGE_FINALIZED_WEBHOOK_URL`,
+`HOLDER_CHANGED_WEBHOOK_URL`, `INCOME_DISTRIBUTED_WEBHOOK_URL`,
+`SHARES_RECEIVED_WEBHOOK_URL`, and `OFFERS_NAMESPACE_CREATED_WEBHOOK_URL`.
+Unset = that event type accumulates undelivered in `webhook_events` and drains when configured.
+This service also needs `INDEXER_GRAPHQL_URL` pointing at the indexer's GraphQL for resolution
+reads.
 
-The notification pair (`income_distributed` / `shares_received`) takes one more piece on
-BOTH sides, because a forged POST there is push spam: this repo's `INDEXER_WEBHOOK_SECRET`
-GitHub secret (`deploy.yml` renders it into `.env`; `docker-compose.yml` passes it through
-to the API container), and the indexer-side `INCOME_DISTRIBUTED_WEBHOOK_URL` /
-`SHARES_RECEIVED_WEBHOOK_URL` values must carry the same value as their `?secret=` query
-parameter (e.g. `https://<this API's host>/webhooks/income_distributed_devnet?secret=<same
-value>`) — the indexer's delivery loop cannot set headers, so the URL is the credential.
-Unset on this service = the endpoints fail closed with 503 (see `.env.example`).
+Roll out a newly enforced shared secret **indexer-first**:
+
+1. Set the same `INDEXER_WEBHOOK_SECRET` in this service's GitHub secrets (`deploy.yml` renders
+   it into `.env`; `docker-compose.yml` passes it to the API container).
+2. Add the secret query parameter to every indexer webhook URL and deploy/restart the indexer.
+   The older API ignores the extra query parameter on routes that were previously unprotected,
+   so this step does not interrupt delivery.
+3. Deploy this API's uniform-authentication change and monitor the indexer outbox for 401/503.
+
+Leaving the secret unset on this service disables every webhook with 503 (see `.env.example`).
 
 ## 10. IndexerClient I64 wire format — BUG FOUND AND FIXED (affected every resolution read)
 
