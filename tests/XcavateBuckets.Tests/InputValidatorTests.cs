@@ -65,6 +65,33 @@ public class InputValidatorTests
         }
     }
 
+    [TestCase(Hex32, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", TestName = "X25519_hex_is_canonical_base64url")]
+    [TestCase("0000000000000000000000000000000000000000000000000000000000000000",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", TestName = "X25519_unprefixed_hex_is_canonical_base64url")]
+    [TestCase("u4FbLrw9hDL8bTbGBoXwgIgAgJ_71i4K3ZX6KW8oMDo",
+        "u4FbLrw9hDL8bTbGBoXwgIgAgJ_71i4K3ZX6KW8oMDo", TestName = "X25519_base64url_is_preserved")]
+    public void X25519_accepts_legacy_hex_and_base64url(string value, string expected)
+    {
+        Assert.That(NewValidator().X25519Value(value, "viewer"), Is.EqualTo(expected));
+    }
+
+    [TestCase("not-a-key", TestName = "X25519_rejects_malformed_input")]
+    [TestCase("AAEC", TestName = "X25519_rejects_wrong_decoded_length")]
+    public void X25519_rejects_invalid_keys(string value)
+    {
+        var ex = Assert.Throws<BucketException>(
+            () => NewValidator().X25519Value(value, "viewer"))!;
+        Assert.That(ex.Code, Is.EqualTo(BucketErrorCode.InvalidInput));
+    }
+
+    [Test]
+    public void X25519_rejects_oversized_encoded_input_before_decoding()
+    {
+        var ex = Assert.Throws<BucketException>(
+            () => NewValidator().X25519Value(new string('A', 1_000_000), "viewer"))!;
+        Assert.That(ex.Message, Does.Contain("encoded length"));
+    }
+
     [Test]
     public void PropertiesJson_returns_null_when_there_are_no_properties()
     {

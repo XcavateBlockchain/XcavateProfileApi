@@ -322,7 +322,7 @@ public class PropertyLifecycleWebhookTests
             Assert.That(body.GetProperty("holdersSkippedNoKey").GetInt32(), Is.EqualTo(1));
             Assert.That(contributors, Does.Contain("LawyerWallet111"), "the lawyer gets WRITE");
             Assert.That(contributors, Does.Contain("system:voting"), "the announcement's poster");
-            Assert.That(viewers, Is.EqualTo(new[] { holderKey }), "the keyed holder gets READ");
+            Assert.That(viewers, Is.EqualTo(new[] { TestDb.Base64UrlKey(holderKey) }), "the keyed holder gets READ");
         });
     }
 
@@ -386,7 +386,7 @@ public class PropertyLifecycleWebhookTests
             Assert.That(second.GetProperty("holdersAdded").GetInt32(), Is.EqualTo(0));
             Assert.That(contributors.Count(c => c == "LawyerWallet111"), Is.EqualTo(1),
                 "…and the grants stay singular");
-            Assert.That(viewers, Is.EqualTo(new[] { holderKey }));
+            Assert.That(viewers, Is.EqualTo(new[] { TestDb.Base64UrlKey(holderKey) }));
             Assert.That(messageCount, Is.EqualTo(1));
         });
     }
@@ -435,7 +435,7 @@ public class PropertyLifecycleWebhookTests
             Assert.That(retry.GetProperty("lawyerContributorAdded").GetBoolean(), Is.True);
             Assert.That(contributors, Does.Contain("LawyerWallet111"),
                 "…while the grants complete");
-            Assert.That(viewers, Is.EqualTo(new[] { holderKey }));
+            Assert.That(viewers, Is.EqualTo(new[] { TestDb.Base64UrlKey(holderKey) }));
             Assert.That(messageCount, Is.EqualTo(1), "the announcement is not re-posted");
         });
     }
@@ -564,7 +564,7 @@ public class PropertyLifecycleWebhookTests
             Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("processed"));
             Assert.That(body.GetProperty("buyerViewerAdded").GetBoolean(), Is.True);
             Assert.That(body.GetProperty("sellerViewerRemoved").GetBoolean(), Is.True);
-            Assert.That(viewers, Is.EqualTo(new[] { buyerKey }),
+            Assert.That(viewers, Is.EqualTo(new[] { TestDb.Base64UrlKey(buyerKey) }),
                 "the seller is out and the buyer is in");
         });
     }
@@ -611,7 +611,7 @@ public class PropertyLifecycleWebhookTests
         Assert.Multiple(() =>
         {
             Assert.That(secondStatus, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(viewers, Is.EqualTo(new[] { buyerKey }), "no duplicate viewer row");
+            Assert.That(viewers, Is.EqualTo(new[] { TestDb.Base64UrlKey(buyerKey) }), "no duplicate viewer row");
         });
     }
 
@@ -717,7 +717,7 @@ public class PropertyLifecycleWebhookTests
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("processed"));
             Assert.That(body.GetProperty("action").GetString(), Is.EqualTo("added"));
-            Assert.That(viewers, Is.EqualTo(new[] { key }));
+            Assert.That(viewers, Is.EqualTo(new[] { TestDb.Base64UrlKey(key) }));
         });
     }
 
@@ -809,7 +809,7 @@ public class PropertyLifecycleWebhookTests
             Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("created"));
             Assert.That(body.GetProperty("holdersAdded").GetInt32(), Is.EqualTo(1));
             Assert.That(body.GetProperty("holdersSkippedNoKey").GetInt32(), Is.EqualTo(1));
-            Assert.That(viewers, Is.EqualTo(new[] { keyedKey }));
+            Assert.That(viewers, Is.EqualTo(new[] { TestDb.Base64UrlKey(keyedKey) }));
         });
     }
 

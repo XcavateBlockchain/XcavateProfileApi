@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.WebUtilities;
+using XcavateBuckets.Domain;
 using Org.BouncyCastle.Crypto.Agreement.Kdf;
 using Org.BouncyCastle.Crypto.Digests;
 using Org.BouncyCastle.Crypto.Engines;
@@ -12,7 +13,7 @@ using Org.BouncyCastle.Math.EC.Rfc7748;
 namespace XcavateProfileApi.Services;
 
 public sealed record LawyerTermsKeySharing(
-    string PublicKeyHex,
+    string PublicKey,
     string Reference,
     string Body,
     string ContentHash);
@@ -55,14 +56,14 @@ public static class LawyerTermsBucketProtocol
             ["keys"] = new JsonArray(secret)
         }.ToJsonString();
         var publicKeys = participants
-            .Select(participant => Convert.ToHexString(DecodeHex32(participant.Value)))
+            .Select(participant => X25519KeyCodec.Normalize(participant.Value, "recipient"))
             .Distinct(StringComparer.Ordinal)
-            .Select(Convert.FromHexString)
+            .Select(key => X25519KeyCodec.Decode32(key, "recipient"))
             .ToList();
         var body = EncryptForRecipients(plaintext, publicKeys);
 
         return new LawyerTermsKeySharing(
-            "0x" + Convert.ToHexString(publicKey),
+            WebEncoders.Base64UrlEncode(publicKey),
             $"key-sharing:{id}",
             body,
             ContentHash(body));
@@ -124,18 +125,6 @@ public static class LawyerTermsBucketProtocol
             ["tag"] = WebEncoders.Base64UrlEncode(tag),
             ["recipients"] = recipientArray
         }.ToJsonString();
-    }
-
-    private static byte[] DecodeHex32(string value)
-    {
-        var bytes = Convert.FromHexString(value.StartsWith("0x", StringComparison.Ordinal)
-            ? value.AsSpan(2)
-            : value.AsSpan());
-        if (bytes.Length != 32)
-        {
-            throw new ArgumentException("An X25519 public key must contain 32 bytes.", nameof(value));
-        }
-        return bytes;
     }
 
     private static byte[] DeriveKek(byte[] shared)

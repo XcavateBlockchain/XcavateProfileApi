@@ -12,7 +12,7 @@ public class BucketViewer
 
     public Bucket Bucket { get; set; } = null!;
 
-    /// <summary>32-byte hex X25519 public key (the pallet's ViewerId).</summary>
+    /// <summary>Canonical base64url X25519 public key (the pallet's ViewerId).</summary>
     public string ViewerId { get; set; } = string.Empty;
 
     public DateTime AddedAt { get; set; }

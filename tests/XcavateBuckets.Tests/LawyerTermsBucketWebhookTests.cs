@@ -178,9 +178,9 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(state.Bucket.Category, Is.EqualTo("spv-lawyer-terms"));
             Assert.That(state.Bucket.Creator, Is.EqualTo(AssetPda));
             Assert.That(state.Bucket.IsWritable, Is.True);
-            Assert.That(state.Bucket.EncryptionKey, Does.StartWith("0x"));
-            Assert.That(Convert.FromHexString(state.Bucket.EncryptionKey!.AsSpan(2)), Has.Length.EqualTo(32));
-            Assert.That(Convert.FromHexString(state.Bucket.EncryptionKey.AsSpan(2)).Any(value => value != 0),
+            Assert.That(state.Bucket.EncryptionKey, Has.Length.EqualTo(43));
+            Assert.That(WebEncoders.Base64UrlDecode(state.Bucket.EncryptionKey!), Has.Length.EqualTo(32));
+            Assert.That(WebEncoders.Base64UrlDecode(state.Bucket.EncryptionKey!).Any(value => value != 0),
                 Is.True);
             using (var properties = JsonDocument.Parse(state.Bucket.Properties!))
             {
@@ -199,7 +199,7 @@ public class LawyerTermsBucketWebhookTests
             }));
             Assert.That(state.Viewers, Is.EquivalentTo(new[]
             {
-                TestDb.OtherKey32, TestDb.ViewerKey32, TestDb.Key32
+                TestDb.OtherKey32Base64Url, TestDb.ViewerKey32Base64Url, TestDb.Key32Base64Url
             }));
 
             Assert.That(state.Messages, Has.Count.EqualTo(3));
@@ -509,6 +509,34 @@ public class LawyerTermsBucketWebhookTests
     }
 
     [Test]
+    public async Task Base64url_profile_keys_are_preserved_as_viewer_memberships()
+    {
+        const string lawyerKey = "u4FbLrw9hDL8bTbGBoXwgIgAgJ_71i4K3ZX6KW8oMDo";
+        const string holderKey = "wGf64t6XctVDZW1Nbb3n_A6NFHgjsUCCKZplxaZ921A";
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        await host.SeedViewerKeyAsync(Lawyer, lawyerKey);
+        await host.SeedViewerKeyAsync(HolderOne, holderKey);
+
+        var (status, body) = await PostClaimAsync(host);
+        Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+        var bucketId = body.GetProperty("lawyerTermsBucketId").GetInt64();
+        var viewers = await host.WithDbAsync(async db => await db.BucketViewers
+            .Where(row => row.BucketId == bucketId)
+            .Select(row => row.ViewerId)
+            .ToListAsync());
+
+        Assert.That(viewers, Is.EquivalentTo(new[]
+        {
+            lawyerKey,
+            holderKey,
+            TestDb.ViewerKey32Base64Url
+        }));
+    }
+
+    [Test]
     public async Task Duplicate_wallets_and_viewer_keys_create_only_one_membership_per_subject()
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
@@ -534,7 +562,7 @@ public class LawyerTermsBucketWebhookTests
             {
                 WebhooksHost.DefaultBucketAdminAddress, HolderOne, Lawyer
             }));
-            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32 }));
+            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32Base64Url }));
         });
     }
 }

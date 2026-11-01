@@ -151,7 +151,7 @@ public class GeneratedClientTests
         var readBucket = read.Data!.Bucket!;
         Assert.Multiple(() =>
         {
-            Assert.That(readBucket.EncryptionKey, Is.EqualTo(TestDb.Key32));
+            Assert.That(readBucket.EncryptionKey, Is.EqualTo(TestDb.Key32Base64Url));
             Assert.That(readBucket.Namespace, Is.Not.Null);
             Assert.That(readBucket.Namespace!.Name, Is.EqualTo("deeds"));
             Assert.That(readBucket.Messages, Has.Count.EqualTo(1));

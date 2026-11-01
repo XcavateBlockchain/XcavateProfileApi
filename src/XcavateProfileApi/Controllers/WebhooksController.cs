@@ -489,6 +489,7 @@ public class WebhooksController : ControllerBase
                 .Where(v => v.BucketId == bucket.BucketId)
                 .Select(v => v.ViewerId)
                 .ToListAsync(ct))
+            .Select(key => X25519KeyCodec.TryNormalize(key, out var canonical) ? canonical! : key)
             .ToHashSet(StringComparer.Ordinal);
 
         var holdersAdded = 0;
@@ -1069,7 +1070,7 @@ public class WebhooksController : ControllerBase
         }
 
         await _buckets.ResumeWritingAsync(
-            admin, ns.NamespaceId, bucket.BucketId, keySharing.PublicKeyHex, ct);
+            admin, ns.NamespaceId, bucket.BucketId, keySharing.PublicKey, ct);
         await _messages.WriteAsync(
             admin,
             ns.NamespaceId,
@@ -1622,10 +1623,9 @@ public class WebhooksController : ControllerBase
     /// <summary>
     /// The bucket viewer id (a 32-byte X25519 key) for a wallet, or null when the wallet has no
     /// usable one. Delegates to the shared <see cref="ViewerKeyResolver"/>: the profile keyed
-    /// directly by the wallet first, then the <c>WalletMigrations</c> fallback, and a stored key
-    /// that is not well-formed 32-byte hex never reaches
-    /// <c>MembershipService.AddViewerAsync</c> — it would be an <c>InvalidInput</c> failure there
-    /// and, worse, an endless retry of a permanently-unactionable event.
+    /// directly by the wallet first, then the <c>WalletMigrations</c> fallback. Base64url keys are
+    /// preserved, legacy hex keys are normalized to base64url, and malformed or wrong-length keys
+    /// resolve to null rather than causing an endless <c>InvalidInput</c> retry loop.
     /// </summary>
     private Task<string?> ResolveViewerKeyAsync(string wallet, CancellationToken ct) =>
         _viewerKeys.ResolveAsync(wallet, ct);
@@ -1695,7 +1695,7 @@ public class WebhooksController : ControllerBase
     /// be server-mediated anyway, because the bucket's only admin is the PropertyAsset PDA.
     /// </summary>
     private const string PlaceholderEncryptionKey =
-        "0x0000000000000000000000000000000000000000000000000000000000000000";
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     /// <summary>The domain's bucket-name bound (InputValidator.MaxNameLen).</summary>
     private const int MaxBucketNameLen = 256;

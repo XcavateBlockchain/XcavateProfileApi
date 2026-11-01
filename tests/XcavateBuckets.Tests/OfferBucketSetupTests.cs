@@ -140,7 +140,7 @@ public class OfferBucketSetupTests
             Assert.That(state.Bucket.Name, Is.EqualTo("Offer: Villa Sol #7"));
             Assert.That(state.Bucket.Category, Is.EqualTo("realXmarket"));
             Assert.That(state.Bucket.IsWritable, Is.True, "ResumeWriting unlocked it");
-            Assert.That(state.Bucket.EncryptionKey, Is.EqualTo(Key32));
+            Assert.That(state.Bucket.EncryptionKey, Is.EqualTo(TestDb.Key32Base64Url));
             using (var properties = JsonDocument.Parse(state.Bucket.Properties!))
             {
                 var root = properties.RootElement;
@@ -152,7 +152,7 @@ public class OfferBucketSetupTests
 
             Assert.That(state.Admins, Is.EquivalentTo(new[] { buyer.Value, seller }));
             Assert.That(state.Contributors, Is.EquivalentTo(new[] { buyer.Value, seller }));
-            Assert.That(state.Viewers, Is.EquivalentTo(new[] { ViewerKey32, OtherKey32 }),
+            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.ViewerKey32Base64Url, TestDb.OtherKey32Base64Url }),
                 "both parties' profile X25519 keys are viewers");
 
             Assert.That(state.Messages, Has.Count.EqualTo(2));

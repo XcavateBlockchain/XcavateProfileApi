@@ -127,7 +127,7 @@ public class BucketService(
         bool allowLocked,
         CancellationToken ct)
     {
-        validator.Hex32Value(newEncryptionKey, "newEncryptionKey");
+        var canonicalKey = validator.X25519Value(newEncryptionKey, "newEncryptionKey");
 
         await auth.EnsureIsAdminAsync(bucketId, caller, ct);
         var bucket = await auth.GetBucketAsync(namespaceId, bucketId, ct);
@@ -138,7 +138,7 @@ public class BucketService(
         }
 
         bucket.IsWritable = true;
-        bucket.EncryptionKey = newEncryptionKey;
+        bucket.EncryptionKey = canonicalKey;
         bucket.UpdatedAt = clock.GetUtcNow().UtcDateTime;
         await db.SaveChangesAsync(ct);
 

@@ -22,9 +22,11 @@ public class AuthorizationService(BucketDbContext db)
         db.BucketContributors
             .AnyAsync(c => c.BucketId == bucketId && c.SubjectId == subject, ct);
 
-    public Task<bool> IsViewerAsync(long bucketId, string viewerId, CancellationToken ct) =>
-        db.BucketViewers
-            .AnyAsync(v => v.BucketId == bucketId && v.ViewerId == viewerId, ct);
+    public async Task<bool> IsViewerAsync(long bucketId, string viewerId, CancellationToken ct) =>
+        (await db.BucketViewers
+            .Where(v => v.BucketId == bucketId)
+            .ToListAsync(ct))
+        .Any(v => X25519KeyCodec.KeysEqual(v.ViewerId, viewerId));
 
     public async Task EnsureIsManagerAsync(long namespaceId, string subject, CancellationToken ct)
     {

@@ -30,7 +30,7 @@ public class LawyerTermsBucketProtocolTests
                 new KeyValuePair<string, string>("HolderA", holder.PublicKeyHex)
             ]);
 
-        var publicKey = Convert.FromHexString(result.PublicKeyHex.AsSpan(2));
+        var publicKey = WebEncoders.Base64UrlDecode(result.PublicKey);
         using var jwe = JsonDocument.Parse(result.Body);
         var root = jwe.RootElement;
         var plaintext = DecryptForRecipient(result.Body, holder.PrivateKey);
@@ -47,7 +47,7 @@ public class LawyerTermsBucketProtocolTests
 
         Assert.Multiple(() =>
         {
-            Assert.That(result.PublicKeyHex, Does.StartWith("0x"));
+            Assert.That(result.PublicKey, Has.Length.EqualTo(43));
             Assert.That(publicKey, Has.Length.EqualTo(32));
             Assert.That(publicKey.Any(value => value != 0), Is.True);
             Assert.That(id, Is.Not.Null.And.Not.Empty);
@@ -87,7 +87,7 @@ public class LawyerTermsBucketProtocolTests
         var first = LawyerTermsBucketProtocol.CreateKeySharing("BucketAdmin111", recipients);
         var second = LawyerTermsBucketProtocol.CreateKeySharing("BucketAdmin111", recipients);
 
-        Assert.That(second.PublicKeyHex, Is.Not.EqualTo(first.PublicKeyHex));
+        Assert.That(second.PublicKey, Is.Not.EqualTo(first.PublicKey));
         Assert.That(second.Body, Is.Not.EqualTo(first.Body));
     }
 

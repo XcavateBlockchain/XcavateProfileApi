@@ -81,8 +81,8 @@ adminship stays with the operator PDA; the developer lawyer is out of scope here
 ## 3. Token-holder read access — IMPLEMENTED (holder events + creation-time reconcile + election re-sync)
 
 "Add property token holders (read) to bucket" maps to the bucket **Viewer** role — a viewer id
-is a 32-byte X25519 encryption key (`InputValidator.Hex32Value`), not a wallet. Both halves are
-now solved:
+is a 32-byte X25519 encryption key in canonical base64url (`InputValidator.X25519Value`), not a
+wallet. Legacy hex inputs are accepted and normalized. Both halves are now solved:
 
 - **Wallet → key:** through the profiles (`Profile.X25519Key`, direct wallet key with the
   `WalletMigrations` SS58 fallback — `ResolveViewerKeyAsync`).
@@ -302,10 +302,11 @@ lawyer's own bucket carries their terms discussion and document.
   deployment workflow renders it from `HETZNER_BUCKET_ADMIN_ADDRESS`, and Compose passes it through
   to the API. No admin viewer key is required unless the admin is itself a claimed-token holder.
 - **Participants.** Current positive `shareHoldings` wallets (not mere reservations) and the
-  claiming lawyer are contributors, with their profile/migrated X25519 keys as viewers. A missing
-  required key answers 404 before any bucket is written; duplicate wallets and keys stay idempotent.
-- **Real key ceremony.** Each new bucket gets a fresh X25519 keypair. Its public key unlocks the
-  bucket, and the first message is `didcomm/key-sharing-v1` in general JWE form
+  claiming lawyer are contributors, with their profile/migrated X25519 keys stored as canonical
+  base64url viewers (legacy hex is normalized). A missing required key answers 404 before any
+  bucket is written; duplicate wallets and keys stay idempotent by decoded key bytes.
+- **Real key ceremony.** Each new bucket gets a fresh X25519 keypair. Its base64url public key
+  unlocks the bucket, and the first message is `didcomm/key-sharing-v1` in general JWE form
   (`ECDH-ES+A256KW`/`A256GCM`). The private JWK is encrypted separately for every holder/lawyer
   viewer key, so anonymous GraphQL/Socket.IO reads expose only ciphertext; each participant unwraps
   it with their own private key. This does not rotate the legacy legal bucket's zero-key placeholder.
