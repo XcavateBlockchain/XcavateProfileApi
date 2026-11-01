@@ -976,6 +976,14 @@ public class WebhooksController : ControllerBase
             CancellationToken ct)
     {
         var name = LawyerTermsBucketName(ns, payload.Candidacy!);
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        if (_db.Database.IsNpgsql())
+        {
+            var lockKey = $"{ns.NamespaceId}:{payload.Candidacy}";
+            await _db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtext({0}))", new[] { (object)lockKey }, ct);
+        }
+
         var existing = await _db.Buckets.FirstOrDefaultAsync(
             bucket => bucket.NamespaceId == ns.NamespaceId
                 && bucket.Category == LawyerTermsBucketCategory
@@ -983,6 +991,8 @@ public class WebhooksController : ControllerBase
             ct);
         if (existing is not null)
         {
+            await RepairExistingLawyerTermsBucketAsync(existing, payload, admin, ct);
+            await transaction.CommitAsync(ct);
             return (null, existing.BucketId, false, null);
         }
 
@@ -1035,15 +1045,24 @@ public class WebhooksController : ControllerBase
         }
         viewers.Add(new(admin, adminViewerKey));
 
+        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(admin, viewers);
+        var promptPayload = LawyerTermsBucketProtocol.EncryptMessage(
+            LawyerTermsBucketProtocol.VotePrompt,
+            keySharing.SecretJwk);
+        var pdfPayload = LawyerTermsBucketProtocol.EncryptMessage(
+            pdf,
+            keySharing.SecretJwk,
+            new Dictionary<string, string> { ["filename"] = document.FileName });
+
         string snapshotUrl;
         try
         {
-            using var content = new MemoryStream(pdf, writable: false);
+            using var content = new MemoryStream(Encoding.UTF8.GetBytes(pdfPayload), writable: false);
             snapshotUrl = await _s3.UploadImageAsync(
                 TermsDocumentController.Bucket,
                 TermsDocumentController.SnapshotObjectKey(payload.Candidacy!),
                 content,
-                document.ContentType);
+                LawyerTermsBucketProtocol.KeySharingContentType);
         }
         catch (Amazon.S3.AmazonS3Exception ex)
         {
@@ -1052,7 +1071,6 @@ public class WebhooksController : ControllerBase
                 $"Could not snapshot the lawyer's terms PDF: {ex.Message}"), null, false, null);
         }
 
-        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(admin, viewers);
         var properties = new List<KeyValuePair<string, string>>
         {
             new("kind", "spv_lawyer_terms"),
@@ -1066,7 +1084,6 @@ public class WebhooksController : ControllerBase
             new("program", payload.Program ?? string.Empty)
         };
 
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         var bucket = await _buckets.CreateAsync(
             ns.Creator!,
             ns.NamespaceId,
@@ -1106,10 +1123,10 @@ public class WebhooksController : ControllerBase
             new MessageWriteRequest(
                 $"lawyer-terms/{payload.Candidacy}/vote-prompt",
                 LawyerTermsBucketProtocol.VotePromptTag,
-                LawyerTermsBucketProtocol.VotePrompt,
+                promptPayload,
                 "Vote on the lawyer's terms",
-                "text/plain",
-                LawyerTermsBucketProtocol.ContentHash(LawyerTermsBucketProtocol.VotePrompt),
+                "text/plain;charset=utf-8",
+                LawyerTermsBucketProtocol.ContentHash(promptPayload),
                 null),
             ct);
         await _messages.WriteAsync(
@@ -1122,12 +1139,101 @@ public class WebhooksController : ControllerBase
                 null,
                 document.FileName,
                 document.ContentType,
-                LawyerTermsBucketProtocol.ContentHash(pdf),
+                LawyerTermsBucketProtocol.ContentHash(pdfPayload),
                 null),
             ct);
         await transaction.CommitAsync(ct);
 
         return (null, bucket.BucketId, true, holders.Count);
+    }
+
+    private async Task RepairExistingLawyerTermsBucketAsync(
+        Bucket bucket, SpvCaseClaimedPayload payload, string admin, CancellationToken ct)
+    {
+        var prompt = await _db.Messages.FirstOrDefaultAsync(
+            message => message.BucketId == bucket.BucketId
+                && message.Tag == LawyerTermsBucketProtocol.VotePromptTag,
+            ct);
+        if (prompt is null || IsCompactMessage(prompt.IpfsContent))
+        {
+            return;
+        }
+
+        var keySharingMessage = await _db.Messages
+            .OrderByDescending(message => message.MessageId)
+            .FirstOrDefaultAsync(
+                message => message.BucketId == bucket.BucketId
+                    && message.Tag == LawyerTermsBucketProtocol.KeySharingTag,
+                ct);
+        if (keySharingMessage?.IpfsContent is null)
+        {
+            return;
+        }
+
+        var adminPrivateJwk = BucketAdminKeyProvider.GetPrivateJwk(_config);
+        var secretJwk = LawyerTermsBucketProtocol.DecryptKeySharing(
+            keySharingMessage.IpfsContent, adminPrivateJwk);
+        var promptPayload = LawyerTermsBucketProtocol.EncryptMessage(
+            LawyerTermsBucketProtocol.VotePrompt, secretJwk);
+        var document = await _db.Messages.SingleAsync(
+            message => message.BucketId == bucket.BucketId
+                && message.Tag == LawyerTermsBucketProtocol.DocumentTag,
+            ct);
+        var pdf = await _s3.DownloadObjectAsync(
+            TermsDocumentController.Bucket,
+            TermsDocumentController.SnapshotObjectKey(payload.Candidacy!),
+            ct);
+        string pdfPayload;
+        var snapshotText = Encoding.UTF8.GetString(pdf);
+        if (IsCompactMessage(snapshotText))
+        {
+            _ = LawyerTermsBucketProtocol.DecryptMessage(snapshotText, secretJwk);
+            pdfPayload = snapshotText;
+        }
+        else
+        {
+            pdfPayload = LawyerTermsBucketProtocol.EncryptMessage(
+                pdf,
+                secretJwk,
+                new Dictionary<string, string> { ["filename"] = document.Description ?? "terms.pdf" });
+        }
+        using var content = new MemoryStream(Encoding.UTF8.GetBytes(pdfPayload), writable: false);
+        var snapshotUrl = await _s3.UploadImageAsync(
+            TermsDocumentController.Bucket,
+            TermsDocumentController.SnapshotObjectKey(payload.Candidacy!),
+            content,
+            LawyerTermsBucketProtocol.KeySharingContentType);
+
+        prompt.IpfsContent = promptPayload;
+        prompt.ContentType = "text/plain;charset=utf-8";
+        prompt.ContentHash = LawyerTermsBucketProtocol.ContentHash(promptPayload);
+        document.Reference = snapshotUrl;
+        document.ContentHash = LawyerTermsBucketProtocol.ContentHash(pdfPayload);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    private static bool IsCompactMessage(string? payload)
+    {
+        if (payload is null)
+        {
+            return false;
+        }
+        var parts = payload.Split('.');
+        if (parts.Length != 5)
+        {
+            return false;
+        }
+        try
+        {
+            using var header = JsonDocument.Parse(
+                Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(parts[0]));
+            return header.RootElement.GetProperty("typ").GetString()
+                == "didcomm/encrypted-message-v1";
+        }
+        catch (Exception ex) when (ex is JsonException or FormatException)
+        {
+            return false;
+        }
     }
 
     private static IActionResult WithLawyerTermsSetup(

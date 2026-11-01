@@ -301,8 +301,8 @@ lawyer's own bucket carries their terms discussion and document.
   bucket admin and contributor, so the two requested messages are authored by that address.
   `BUCKET_ADMIN_X25519_KEY` is also required (503 when missing or invalid): the API reads only its
   `publicJwk.x`, installs it as the admin's viewer, and wraps the bucket key for the admin as well
-  as every holder/lawyer. Store the keypair JSON on ONE line; the private JWK is never read into
-  application logic or logged. Both values are rendered from same-named GitHub environment secrets
+  as every holder/lawyer. Store the keypair JSON on ONE line; the private JWK is used only for
+  legacy key recovery and is never logged. Both values are rendered from same-named GitHub environment secrets
   and passed through Compose.
 - **Participants.** Current positive `shareHoldings` wallets (not mere reservations) and the
   claiming lawyer are contributors, with their profile/migrated X25519 keys stored as canonical
@@ -313,17 +313,24 @@ lawyer's own bucket carries their terms discussion and document.
   (`ECDH-ES+A256KW`/`A256GCM`). The private JWK is encrypted separately for every holder/lawyer
   viewer key, so anonymous GraphQL/Socket.IO reads expose only ciphertext; each participant unwraps
   it with their own private key. This does not rotate the legacy legal bucket's zero-key placeholder.
-- **Ordered admin messages.** After key sharing, the admin authors the exact plaintext prompt
-  `All property token holders should now vote on whether to accept the Lawyer's terms.` under
-  `lawyer/terms-vote`, then the PDF under `lawyer/terms-document`.
-- **PDF delivery.** Bucket messages cannot inline the 25 MB terms PDF, so the current bytes are
-  downloaded, hashed, and snapshotted to `terms-documents/by-candidacy/{candidacy}.pdf`. The message
-  references that per-candidacy URL with `application/pdf`, the original filename, null
-  `IpfsContent`, and SHA-256 of those exact bytes. Later re-uploads of the lawyer's current document
-  cannot change the snapshot voters received. Missing documents answer 404, and object-storage
-  failures answer 502, before any bucket is written.
+- **Ordered admin messages.** After key sharing, the admin authors the exact prompt
+  `All property token holders should now vote on whether to accept the Lawyer's terms.` as compact
+  JWE (`typ=didcomm/encrypted-message-v1`) under `lawyer/terms-vote`, with metadata
+  `text/plain;charset=utf-8` so the dashboard uses its normal chat-decryption path, then the PDF
+  under `lawyer/terms-document`. The same bucket secret protects both messages. Existing plaintext
+  buckets are repaired on redelivery by recovering their bucket secret with the admin private JWK
+  and rewriting the prompt and snapshot in place.
+- **PDF delivery.** Bucket messages cannot inline the 25 MB terms PDF, so its bytes are encrypted
+  as compact JWE and snapshotted to `terms-documents/by-candidacy/{candidacy}.pdf`. The message
+  references that encrypted per-candidacy object with `application/pdf`, the original filename in
+  the protected header, null `IpfsContent` (the client fetches the object), and SHA-256 of the
+  encrypted payload. Later re-uploads of the lawyer's current document cannot change the snapshot
+  voters received. Missing documents answer 404, and object-storage failures answer 502, before any
+  bucket is written.
 - **Retry semantics.** Bucket lookup by namespace/category/deterministic name makes redelivery
-  reuse the bucket, key, and three messages. If the legacy legal bucket is not ready, the terms
-  bucket can commit before the voting call answers 404; the next delivery reuses it and finishes
-  only the voting announcement. Different lawyers in one round get distinct buckets without
+  reuse the bucket, key, and three messages. A per-candidacy PostgreSQL advisory lock serializes
+  lookup, key generation, snapshot upload, and message commit, so concurrent first deliveries cannot
+  overwrite each other's bucket key or ciphertext. If the legacy legal bucket is not ready, the
+  terms bucket can commit before the voting call answers 404; the next delivery reuses it and
+  finishes only the voting announcement. Different lawyers in one round get distinct buckets without
   duplicating that round's legacy announcement.

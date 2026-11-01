@@ -83,6 +83,39 @@ public class LawyerTermsBucketProtocolTests
     }
 
     [Test]
+    public void Compact_message_decrypts_with_the_bucket_secret()
+    {
+        var holder = NewKeyPair();
+        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(
+            "BucketAdmin111", [new KeyValuePair<string, string>("HolderA", holder.PublicKeyHex)]);
+        var plaintext = "All property token holders should now vote on whether to accept the Lawyer's terms.";
+        var encrypted = LawyerTermsBucketProtocol.EncryptMessage(
+            plaintext,
+            keySharing.SecretJwk,
+            new Dictionary<string, string> { ["filename"] = "terms.pdf" });
+        var bucketPrivateKey = WebEncoders.Base64UrlDecode(
+            keySharing.SecretJwk["d"]!.GetValue<string>());
+        var expectedKid = keySharing.SecretJwk["kid"]!.GetValue<string>();
+
+        var decrypted = DecryptCompactMessage(encrypted, bucketPrivateKey, expectedKid);
+        using var header = JsonDocument.Parse(WebEncoders.Base64UrlDecode(
+            encrypted.Split('.')[0]));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Encoding.UTF8.GetString(decrypted), Is.EqualTo(plaintext));
+            Assert.That(encrypted, Does.Not.Contain(plaintext));
+            Assert.That(header.RootElement.GetProperty("alg").GetString(),
+                Is.EqualTo("ECDH-ES+A256KW"));
+            Assert.That(header.RootElement.GetProperty("enc").GetString(), Is.EqualTo("A256GCM"));
+            Assert.That(header.RootElement.GetProperty("typ").GetString(),
+                Is.EqualTo("didcomm/encrypted-message-v1"));
+            Assert.That(header.RootElement.GetProperty("kid").GetString(), Is.EqualTo(expectedKid));
+            Assert.That(header.RootElement.GetProperty("filename").GetString(), Is.EqualTo("terms.pdf"));
+        });
+    }
+
+    [Test]
     public void CreateKeySharing_generates_a_fresh_bucket_key_each_time()
     {
         var lawyer = NewKeyPair();
@@ -196,6 +229,43 @@ public class LawyerTermsBucketProtocolTests
         }
 
         throw new CryptographicException("No recipient entry can be unwrapped by this key.");
+    }
+
+    internal static byte[] DecryptCompactMessage(
+        string compactJwe, byte[] recipientPrivateKey, string? expectedKid = null)
+    {
+        var parts = compactJwe.Split('.');
+        Assert.That(parts, Has.Length.EqualTo(5));
+        var protectedValue = parts[0];
+        using var header = JsonDocument.Parse(WebEncoders.Base64UrlDecode(protectedValue));
+        Assert.Multiple(() =>
+        {
+            Assert.That(header.RootElement.GetProperty("alg").GetString(),
+                Is.EqualTo("ECDH-ES+A256KW"));
+            Assert.That(header.RootElement.GetProperty("enc").GetString(), Is.EqualTo("A256GCM"));
+            Assert.That(header.RootElement.GetProperty("typ").GetString(),
+                Is.EqualTo("didcomm/encrypted-message-v1"));
+            if (expectedKid is not null)
+            {
+                Assert.That(header.RootElement.GetProperty("kid").GetString(), Is.EqualTo(expectedKid));
+            }
+        });
+
+        var ephemeralPublic = WebEncoders.Base64UrlDecode(
+            header.RootElement.GetProperty("epk").GetProperty("x").GetString()!);
+        var shared = new byte[32];
+        X25519.ScalarMult(recipientPrivateKey, 0, ephemeralPublic, 0, shared, 0);
+        var wrap = new Rfc3394WrapEngine(new AesEngine());
+        wrap.Init(false, new KeyParameter(DeriveKek(shared)));
+        var encryptedKey = WebEncoders.Base64UrlDecode(parts[1]);
+        var cek = wrap.Unwrap(encryptedKey, 0, encryptedKey.Length);
+        var iv = WebEncoders.Base64UrlDecode(parts[2]);
+        var ciphertext = WebEncoders.Base64UrlDecode(parts[3]);
+        var tag = WebEncoders.Base64UrlDecode(parts[4]);
+        using var aes = new AesGcm(cek, 16);
+        var plaintext = new byte[ciphertext.Length];
+        aes.Decrypt(iv, ciphertext, tag, plaintext, Encoding.ASCII.GetBytes(protectedValue));
+        return plaintext;
     }
 
     private static byte[] DeriveKek(byte[] shared)
