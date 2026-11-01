@@ -6,7 +6,9 @@ using System.Text.Json.Nodes;
 using Amazon.S3;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
+using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Entities;
+using XcavateProfileApi.Services;
 using XcavateProfileApi.Services.Indexer;
 
 namespace XcavateBuckets.Tests;
@@ -168,7 +170,7 @@ public class LawyerTermsBucketWebhookTests
             LegalMessages = await db.Messages.Where(row => row.BucketId == legalBucketId).ToListAsync()
         });
 
-        Assert.Multiple(() =>
+        await Assert.MultipleAsync(async () =>
         {
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(body.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.True);
@@ -178,9 +180,9 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(state.Bucket.Category, Is.EqualTo("spv-lawyer-terms"));
             Assert.That(state.Bucket.Creator, Is.EqualTo(AssetPda));
             Assert.That(state.Bucket.IsWritable, Is.True);
-            Assert.That(state.Bucket.EncryptionKey, Does.StartWith("0x"));
-            Assert.That(Convert.FromHexString(state.Bucket.EncryptionKey!.AsSpan(2)), Has.Length.EqualTo(32));
-            Assert.That(Convert.FromHexString(state.Bucket.EncryptionKey.AsSpan(2)).Any(value => value != 0),
+            Assert.That(state.Bucket.EncryptionKey, Has.Length.EqualTo(43));
+            Assert.That(WebEncoders.Base64UrlDecode(state.Bucket.EncryptionKey!), Has.Length.EqualTo(32));
+            Assert.That(WebEncoders.Base64UrlDecode(state.Bucket.EncryptionKey!).Any(value => value != 0),
                 Is.True);
             using (var properties = JsonDocument.Parse(state.Bucket.Properties!))
             {
@@ -199,7 +201,8 @@ public class LawyerTermsBucketWebhookTests
             }));
             Assert.That(state.Viewers, Is.EquivalentTo(new[]
             {
-                TestDb.OtherKey32, TestDb.ViewerKey32, TestDb.Key32
+                WebhooksHost.DefaultBucketAdminViewerKey,
+                TestDb.OtherKey32Base64Url, TestDb.ViewerKey32Base64Url, TestDb.Key32Base64Url
             }));
 
             Assert.That(state.Messages, Has.Count.EqualTo(3));
@@ -211,17 +214,40 @@ public class LawyerTermsBucketWebhookTests
             using (var keySharing = JsonDocument.Parse(state.Messages[0].IpfsContent!))
             {
                 Assert.That(keySharing.RootElement.GetProperty("recipients").GetArrayLength(),
-                    Is.EqualTo(3));
+                    Is.EqualTo(4));
                 Assert.That(keySharing.RootElement.GetProperty("ciphertext").GetString(),
                     Is.Not.Null.And.Not.Empty);
                 Assert.That(state.Messages[0].IpfsContent, Does.Not.Contain("\"keys\""));
                 Assert.That(state.Messages[0].IpfsContent, Does.Not.Contain("\"d\""));
             }
+            var adminPlaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+                state.Messages[0].IpfsContent!, WebhooksHost.DefaultBucketAdminPrivateKey);
+            byte[] bucketPrivateKey;
+            string bucketKid;
+            using (var adminPayload = JsonDocument.Parse(adminPlaintext))
+            {
+                var recipients = adminPayload.RootElement.GetProperty("to").EnumerateArray()
+                    .Select(value => value.GetString()).ToArray();
+                var secretJwk = adminPayload.RootElement.GetProperty("keys")[0];
+                bucketPrivateKey = WebEncoders.Base64UrlDecode(secretJwk.GetProperty("d").GetString()!);
+                bucketKid = secretJwk.GetProperty("kid").GetString()!;
+                Assert.That(adminPayload.RootElement.GetProperty("from").GetString(),
+                    Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
+                Assert.That(recipients, Does.Contain(WebhooksHost.DefaultBucketAdminViewerKey));
+                Assert.That(WebEncoders.Base64UrlDecode(secretJwk.GetProperty("x").GetString()!),
+                    Is.EqualTo(WebEncoders.Base64UrlDecode(state.Bucket.EncryptionKey!)));
+            }
+            var promptPlaintext = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+                state.Messages[1].IpfsContent!, bucketPrivateKey, bucketKid);
+            var snapshotPayload = await host.S3.DownloadObjectAsync(
+                "xcavate-profile", $"terms-documents/by-candidacy/{Candidacy}.pdf", CancellationToken.None);
+            var decryptedPdf = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+                Encoding.UTF8.GetString(snapshotPayload), bucketPrivateKey, bucketKid);
             Assert.That(state.Messages[1].Tag, Is.EqualTo("lawyer/terms-vote"));
             Assert.That(state.Messages[1].Reference,
                 Is.EqualTo($"lawyer-terms/{Candidacy}/vote-prompt"));
-            Assert.That(state.Messages[1].ContentType, Is.EqualTo("text/plain"));
-            Assert.That(state.Messages[1].IpfsContent, Is.EqualTo(
+            Assert.That(state.Messages[1].ContentType, Is.EqualTo("text/plain;charset=utf-8"));
+            Assert.That(Encoding.UTF8.GetString(promptPlaintext), Is.EqualTo(
                 "All property token holders should now vote on whether to accept the Lawyer's terms."));
             Assert.That(state.Messages[1].ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
                 SHA256.HashData(Encoding.UTF8.GetBytes(state.Messages[1].IpfsContent!)))));
@@ -231,8 +257,9 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(state.Messages[2].Description, Is.EqualTo("terms.pdf"));
             Assert.That(state.Messages[2].ContentType, Is.EqualTo("application/pdf"));
             Assert.That(state.Messages[2].IpfsContent, Is.Null);
+            Assert.That(decryptedPdf, Is.EqualTo(PdfBytes));
             Assert.That(state.Messages[2].ContentHash,
-                Is.EqualTo("0x" + Convert.ToHexString(SHA256.HashData(PdfBytes))));
+                Is.EqualTo("0x" + Convert.ToHexString(SHA256.HashData(snapshotPayload))));
             Assert.That(state.LegalMessages.Single().Tag, Is.EqualTo("voting/terms"));
             Assert.That(state.LegalMessages.Single().Contributor, Is.EqualTo("system:voting"));
         });
@@ -262,10 +289,22 @@ public class LawyerTermsBucketWebhookTests
             .Where(message => message.BucketId == bucketId && message.Tag == "lawyer/terms-document")
             .Select(message => message.Reference)
             .SingleAsync());
+        var keySharingBody = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId && message.Tag == "didcomm/key-sharing-v1")
+            .Select(message => message.IpfsContent)
+            .SingleAsync());
+        var keySharingPlaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+            keySharingBody!, WebhooksHost.DefaultBucketAdminPrivateKey);
+        using var keySharingDocument = JsonDocument.Parse(keySharingPlaintext);
+        var secretJwk = keySharingDocument.RootElement.GetProperty("keys")[0];
+        var bucketPrivateKey = WebEncoders.Base64UrlDecode(secretJwk.GetProperty("d").GetString()!);
+        var bucketKid = secretJwk.GetProperty("kid").GetString();
+        var decryptedSnapshot = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+            Encoding.UTF8.GetString(snapshot), bucketPrivateKey, bucketKid);
 
         Assert.Multiple(() =>
         {
-            Assert.That(snapshot, Is.EqualTo(PdfBytes));
+            Assert.That(decryptedSnapshot, Is.EqualTo(PdfBytes));
             Assert.That(current, Is.EqualTo(replacement));
             Assert.That(reference,
                 Is.EqualTo($"https://objects.test/xcavate-profile/terms-documents/by-candidacy/{Candidacy}.pdf"));
@@ -297,6 +336,167 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(messageCount, Is.EqualTo(3));
             Assert.That(bucket.EncryptionKey, Is.EqualTo(originalKey));
         });
+    }
+
+    [Test]
+    public async Task Existing_plaintext_messages_are_repaired_on_redelivery()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (_, first) = await PostClaimAsync(host);
+        var bucketId = first.GetProperty("lawyerTermsBucketId").GetInt64();
+        await host.WithDbAsync(async db =>
+        {
+            var prompt = await db.Messages.SingleAsync(message =>
+                message.BucketId == bucketId && message.Tag == "lawyer/terms-vote");
+            prompt.IpfsContent = LawyerTermsBucketProtocol.VotePrompt;
+            prompt.ContentType = "text/plain";
+            await db.SaveChangesAsync();
+            return true;
+        });
+        using (var rawPdf = new MemoryStream(PdfBytes, writable: false))
+        {
+            await host.S3.UploadImageAsync(
+                "xcavate-profile", $"terms-documents/by-candidacy/{Candidacy}.pdf",
+                rawPdf, "application/pdf");
+        }
+
+        await host.WithDbAsync(async db =>
+        {
+            var keySharing = await db.Messages.SingleAsync(message =>
+                message.BucketId == bucketId && message.Tag == "didcomm/key-sharing-v1");
+            var plaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+                keySharing.IpfsContent!, WebhooksHost.DefaultBucketAdminPrivateKey);
+            var payload = JsonNode.Parse(plaintext)!.AsObject();
+            var secret = payload["keys"]![0]!.AsObject();
+            secret.Remove("kid");
+            secret.Remove("use");
+            secret.Remove("y");
+            var recipients = payload["to"]!.AsArray()
+                .Select(node => X25519KeyCodec.Decode32(node!.GetValue<string>(), "recipient"))
+                .ToList();
+            keySharing.IpfsContent = LawyerTermsBucketProtocol.EncryptForRecipients(
+                payload.ToJsonString(), recipients);
+            await db.SaveChangesAsync();
+            return true;
+        });
+
+        var (status, second) = await PostClaimAsync(host);
+        var messages = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId)
+            .OrderBy(message => message.MessageId)
+            .ToListAsync());
+        var keySharingPlaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+            messages[0].IpfsContent!, WebhooksHost.DefaultBucketAdminPrivateKey);
+        using var keySharingDocument = JsonDocument.Parse(keySharingPlaintext);
+        var secretJwk = keySharingDocument.RootElement.GetProperty("keys")[0];
+        var bucketPrivateKey = WebEncoders.Base64UrlDecode(secretJwk.GetProperty("d").GetString()!);
+        var bucketKid = secretJwk.TryGetProperty("kid", out var kidElement)
+            ? kidElement.GetString()
+            : null;
+        var promptPlaintext = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+            messages[1].IpfsContent!, bucketPrivateKey, bucketKid);
+        var snapshot = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", $"terms-documents/by-candidacy/{Candidacy}.pdf", CancellationToken.None);
+        var decryptedPdf = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+            Encoding.UTF8.GetString(snapshot), bucketPrivateKey, bucketKid);
+        using var promptHeader = JsonDocument.Parse(WebEncoders.Base64UrlDecode(
+            messages[1].IpfsContent!.Split('.')[0]));
+        using var snapshotHeader = JsonDocument.Parse(WebEncoders.Base64UrlDecode(
+            Encoding.UTF8.GetString(snapshot).Split('.')[0]));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(promptHeader.RootElement.TryGetProperty("kid", out _), Is.False);
+            Assert.That(snapshotHeader.RootElement.TryGetProperty("kid", out _), Is.False);
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(second.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.False);
+            Assert.That(messages, Has.Count.EqualTo(3));
+            Assert.That(messages[1].ContentType, Is.EqualTo("text/plain;charset=utf-8"));
+            Assert.That(Encoding.UTF8.GetString(promptPlaintext),
+                Is.EqualTo(LawyerTermsBucketProtocol.VotePrompt));
+            Assert.That(decryptedPdf, Is.EqualTo(PdfBytes));
+        });
+    }
+
+    [Test]
+    public async Task Repair_reuses_an_already_encrypted_snapshot_without_double_encryption()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (_, first) = await PostClaimAsync(host);
+        var bucketId = first.GetProperty("lawyerTermsBucketId").GetInt64();
+        await host.WithDbAsync(async db =>
+        {
+            var prompt = await db.Messages.SingleAsync(message =>
+                message.BucketId == bucketId && message.Tag == "lawyer/terms-vote");
+            prompt.IpfsContent = LawyerTermsBucketProtocol.VotePrompt;
+            prompt.ContentType = "text/plain";
+            await db.SaveChangesAsync();
+            return true;
+        });
+
+        var (_, second) = await PostClaimAsync(host);
+        var messages = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId)
+            .OrderBy(message => message.MessageId)
+            .ToListAsync());
+        var keySharingPlaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+            messages[0].IpfsContent!, WebhooksHost.DefaultBucketAdminPrivateKey);
+        using var keySharingDocument = JsonDocument.Parse(keySharingPlaintext);
+        var secretJwk = keySharingDocument.RootElement.GetProperty("keys")[0];
+        var bucketPrivateKey = WebEncoders.Base64UrlDecode(secretJwk.GetProperty("d").GetString()!);
+        var bucketKid = secretJwk.GetProperty("kid").GetString();
+        var snapshot = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", $"terms-documents/by-candidacy/{Candidacy}.pdf", CancellationToken.None);
+        var decryptedPdf = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+            Encoding.UTF8.GetString(snapshot), bucketPrivateKey, bucketKid);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(second.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.False);
+            Assert.That(decryptedPdf, Is.EqualTo(PdfBytes));
+        });
+    }
+
+    [Test]
+    public async Task Repair_rejects_a_compact_snapshot_with_the_wrong_key_instead_of_nesting_jwe()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        await PostClaimAsync(host);
+        await host.WithDbAsync(async db =>
+        {
+            var bucket = await db.Buckets.SingleAsync(bucket => bucket.Category == "spv-lawyer-terms");
+            var prompt = await db.Messages.SingleAsync(message =>
+                message.BucketId == bucket.BucketId && message.Tag == "lawyer/terms-vote");
+            prompt.IpfsContent = LawyerTermsBucketProtocol.VotePrompt;
+            prompt.ContentType = "text/plain";
+            await db.SaveChangesAsync();
+            return true;
+        });
+        var otherKey = LawyerTermsBucketProtocol.CreateKeySharing(
+            "OtherAdmin", [new KeyValuePair<string, string>("OtherViewer", TestDb.ViewerKey32Base64Url)]);
+        var wrongPayload = LawyerTermsBucketProtocol.EncryptMessage(PdfBytes, otherKey.SecretJwk);
+        var wrongBytes = Encoding.UTF8.GetBytes(wrongPayload);
+        using (var content = new MemoryStream(wrongBytes, writable: false))
+        {
+            await host.S3.UploadImageAsync(
+                "xcavate-profile", $"terms-documents/by-candidacy/{Candidacy}.pdf",
+                content, LawyerTermsBucketProtocol.KeySharingContentType);
+        }
+
+        Assert.ThrowsAsync<Org.BouncyCastle.Crypto.InvalidCipherTextException>(
+            async () => await PostClaimAsync(host));
+        var snapshot = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", $"terms-documents/by-candidacy/{Candidacy}.pdf", CancellationToken.None);
+        Assert.That(snapshot, Is.EqualTo(wrongBytes));
     }
 
     [Test]
@@ -357,6 +557,25 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(
             webhookSecret: WebhookSecret, bucketAdminAddress: "");
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+
+        var (status, _) = await PostClaimAsync(host);
+
+        await Assert.MultipleAsync(async () =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+            Assert.That(await TermsBucketCountAsync(host), Is.Zero);
+        });
+    }
+
+    [TestCase("")]
+    [TestCase("{not-json}")]
+    public async Task Missing_or_invalid_admin_jwk_returns_503_without_a_terms_bucket(string jwk)
+    {
+        await using var host = await WebhooksHost.StartAsync(
+            webhookSecret: WebhookSecret, bucketAdminX25519Key: jwk);
         await SeedNamespaceAsync(host);
         await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
@@ -509,6 +728,35 @@ public class LawyerTermsBucketWebhookTests
     }
 
     [Test]
+    public async Task Base64url_profile_keys_are_preserved_as_viewer_memberships()
+    {
+        const string lawyerKey = "u4FbLrw9hDL8bTbGBoXwgIgAgJ_71i4K3ZX6KW8oMDo";
+        const string holderKey = "wGf64t6XctVDZW1Nbb3n_A6NFHgjsUCCKZplxaZ921A";
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        await host.SeedViewerKeyAsync(Lawyer, lawyerKey);
+        await host.SeedViewerKeyAsync(HolderOne, holderKey);
+
+        var (status, body) = await PostClaimAsync(host);
+        Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+        var bucketId = body.GetProperty("lawyerTermsBucketId").GetInt64();
+        var viewers = await host.WithDbAsync(async db => await db.BucketViewers
+            .Where(row => row.BucketId == bucketId)
+            .Select(row => row.ViewerId)
+            .ToListAsync());
+
+        Assert.That(viewers, Is.EquivalentTo(new[]
+        {
+            WebhooksHost.DefaultBucketAdminViewerKey,
+            lawyerKey,
+            holderKey,
+            TestDb.ViewerKey32Base64Url
+        }));
+    }
+
+    [Test]
     public async Task Duplicate_wallets_and_viewer_keys_create_only_one_membership_per_subject()
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
@@ -534,7 +782,10 @@ public class LawyerTermsBucketWebhookTests
             {
                 WebhooksHost.DefaultBucketAdminAddress, HolderOne, Lawyer
             }));
-            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32 }));
+            Assert.That(state.Viewers, Is.EquivalentTo(new[]
+            {
+                WebhooksHost.DefaultBucketAdminViewerKey, TestDb.Key32Base64Url
+            }));
         });
     }
 }

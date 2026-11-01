@@ -35,8 +35,7 @@ public class InputValidator(BucketOptions options)
 
     /// <summary>
     /// Requires a hex string decoding to exactly 32 bytes, with or without a <c>0x</c> prefix.
-    /// Used for encryption keys, X25519 viewer keys and content hashes, all <c>[u8; 32]</c> in the
-    /// pallet.
+    /// Used for content hashes, which remain hex. X25519 keys use <see cref="X25519Value"/> instead.
     /// </summary>
     public void Hex32Value(string? value, string field)
     {
@@ -67,6 +66,9 @@ public class InputValidator(BucketOptions options)
             }
         }
     }
+
+    /// <summary>Accepts base64url or legacy hex and returns canonical unpadded base64url.</summary>
+    public string X25519Value(string? value, string field) => X25519KeyCodec.Normalize(value, field);
 
     /// <summary>
     /// Validates and canonicalises a properties map. Keys are sorted so the stored JSON matches the

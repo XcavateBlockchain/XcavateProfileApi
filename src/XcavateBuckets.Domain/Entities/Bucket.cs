@@ -37,7 +37,7 @@ public class Bucket
     /// </summary>
     public bool IsWritable { get; set; }
 
-    /// <summary>32-byte hex encryption key. Non-null exactly when the bucket is writable.</summary>
+    /// <summary>Canonical base64url X25519 public key. Non-null exactly when writable.</summary>
     public string? EncryptionKey { get; set; }
 
     /// <summary>Per-bucket message counter, from the pallet's <c>Bucket.next_message_id</c>.</summary>

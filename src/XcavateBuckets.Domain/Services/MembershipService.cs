@@ -115,15 +115,33 @@ public class MembershipService(
     public async Task<BucketViewer> AddViewerAsync(
         string caller, long? namespaceId, long bucketId, string viewer, CancellationToken ct)
     {
-        validator.Hex32Value(viewer, "viewer");
+        viewer = validator.X25519Value(viewer, "viewer");
         await auth.GetBucketAsync(namespaceId, bucketId, ct);
         await auth.EnsureIsAdminAsync(bucketId, caller, ct);
 
-        var existing = await db.BucketViewers
-            .FirstOrDefaultAsync(v => v.BucketId == bucketId && v.ViewerId == viewer, ct);
-        if (existing is not null)
+        var matching = (await db.BucketViewers
+                .Where(v => v.BucketId == bucketId)
+                .ToListAsync(ct))
+            .Where(v => X25519KeyCodec.KeysEqual(v.ViewerId, viewer))
+            .ToList();
+        if (matching.Count > 0)
         {
-            return existing;
+            var addedAt = matching.Min(v => v.AddedAt);
+            var canonical = matching.FirstOrDefault(v => v.ViewerId == viewer);
+            if (canonical is null)
+            {
+                canonical = new BucketViewer
+                {
+                    BucketId = bucketId,
+                    ViewerId = viewer,
+                    AddedAt = addedAt
+                };
+                db.BucketViewers.Add(canonical);
+            }
+            canonical.AddedAt = addedAt;
+            db.BucketViewers.RemoveRange(matching.Where(v => v != canonical));
+            await db.SaveChangesAsync(ct);
+            return canonical;
         }
 
         var entity = new BucketViewer
@@ -144,14 +162,17 @@ public class MembershipService(
         await auth.GetBucketAsync(namespaceId, bucketId, ct);
         await auth.EnsureIsAdminAsync(bucketId, caller, ct);
 
-        var entity = await db.BucketViewers
-            .FirstOrDefaultAsync(v => v.BucketId == bucketId && v.ViewerId == viewer, ct);
-        if (entity is null)
+        var matching = (await db.BucketViewers
+                .Where(v => v.BucketId == bucketId)
+                .ToListAsync(ct))
+            .Where(v => X25519KeyCodec.KeysEqual(v.ViewerId, viewer))
+            .ToList();
+        if (matching.Count == 0)
         {
             return;
         }
 
-        db.BucketViewers.Remove(entity);
+        db.BucketViewers.RemoveRange(matching);
         await db.SaveChangesAsync(ct);
     }
 }

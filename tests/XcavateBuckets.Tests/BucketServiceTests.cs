@@ -179,7 +179,7 @@ public class BucketServiceTests
         Assert.Multiple(() =>
         {
             Assert.That(resumed.IsWritable, Is.True);
-            Assert.That(resumed.EncryptionKey, Is.EqualTo(TestDb.OtherKey32));
+            Assert.That(resumed.EncryptionKey, Is.EqualTo(TestDb.OtherKey32Base64Url));
         });
     }
 
@@ -209,7 +209,7 @@ public class BucketServiceTests
         Assert.Multiple(() =>
         {
             Assert.That(rotated.IsWritable, Is.True);
-            Assert.That(rotated.EncryptionKey, Is.EqualTo(TestDb.OtherKey32));
+            Assert.That(rotated.EncryptionKey, Is.EqualTo(TestDb.OtherKey32Base64Url));
         });
     }
 

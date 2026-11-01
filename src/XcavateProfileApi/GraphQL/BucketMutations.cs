@@ -340,14 +340,14 @@ public class BucketMutations
         ValidateOffersNamespaceInput(
             input.PropertyName, input.AssetId, input.Cluster, "propertyName", validator);
         validator.Required(input.ShareListingId, MaxShareListingIdLen, "shareListingId");
-        validator.Hex32Value(input.BucketEncryptionKey, "bucketEncryptionKey");
+        validator.X25519Value(input.BucketEncryptionKey, "bucketEncryptionKey");
         if (input.BuyerViewerKey is not null)
         {
-            validator.Hex32Value(input.BuyerViewerKey, "buyerViewerKey");
+            validator.X25519Value(input.BuyerViewerKey, "buyerViewerKey");
         }
         if (input.SellerViewerKey is not null)
         {
-            validator.Hex32Value(input.SellerViewerKey, "sellerViewerKey");
+            validator.X25519Value(input.SellerViewerKey, "sellerViewerKey");
         }
         if (string.IsNullOrWhiteSpace(input.Seller))
         {

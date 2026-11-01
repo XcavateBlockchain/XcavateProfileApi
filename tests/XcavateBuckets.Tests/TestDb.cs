@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using XcavateBuckets.Domain;
@@ -23,6 +24,17 @@ public sealed class TestDb : IDisposable
     public const string OtherKey32 = "0x2222222222222222222222222222222222222222222222222222222222222222";
     public const string ViewerKey32 = "0x3333333333333333333333333333333333333333333333333333333333333333";
     public const string Hash32 = "0x4444444444444444444444444444444444444444444444444444444444444444";
+
+    public static readonly string Key32Base64Url = Base64UrlKey(Key32);
+    public static readonly string OtherKey32Base64Url = Base64UrlKey(OtherKey32);
+    public static readonly string ViewerKey32Base64Url = Base64UrlKey(ViewerKey32);
+    public static readonly string Hash32Base64Url = Base64UrlKey(Hash32);
+
+    public static string Base64UrlKey(string hex)
+    {
+        var value = hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex[2..] : hex;
+        return WebEncoders.Base64UrlEncode(Convert.FromHexString(value));
+    }
 
     private readonly SqliteConnection _connection;
 

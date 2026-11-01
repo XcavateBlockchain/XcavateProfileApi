@@ -216,7 +216,8 @@ public class LawyerReviewBucketWebhookTests
             Assert.That(state.Bucket.Category, Is.EqualTo("lawyer-document-review"));
             Assert.That(state.Bucket.Creator, Is.EqualTo(AssetPda));
             Assert.That(state.Bucket.IsWritable, Is.True);
-            Assert.That(Convert.FromHexString(state.Bucket.EncryptionKey!.AsSpan(2)), Has.Length.EqualTo(32));
+            Assert.That(Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(
+                state.Bucket.EncryptionKey!), Has.Length.EqualTo(32));
             using (var properties = JsonDocument.Parse(state.Bucket.Properties!))
             {
                 Assert.That(properties.RootElement.GetProperty("kind").GetString(),
@@ -237,7 +238,8 @@ public class LawyerReviewBucketWebhookTests
             }));
             Assert.That(state.Viewers, Is.EquivalentTo(new[]
             {
-                TestDb.Key32, TestDb.OtherKey32, TestDb.ViewerKey32, TestDb.Hash32
+                TestDb.Key32Base64Url, TestDb.OtherKey32Base64Url,
+                TestDb.ViewerKey32Base64Url, TestDb.Hash32Base64Url
             }));
             Assert.That(state.Messages, Has.Count.EqualTo(4));
             Assert.That(state.Messages.Select(message => message.Contributor), Is.All.EqualTo(
@@ -715,7 +717,7 @@ public class LawyerReviewBucketWebhookTests
             {
                 WebhooksHost.DefaultBucketAdminAddress, SpvLawyer, DeveloperLawyer
             }));
-            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32, TestDb.OtherKey32 }));
+            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32Base64Url, TestDb.OtherKey32Base64Url }));
         });
     }
 
@@ -746,7 +748,7 @@ public class LawyerReviewBucketWebhookTests
             {
                 WebhooksHost.DefaultBucketAdminAddress, SpvLawyer, DeveloperLawyer
             }));
-            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32, TestDb.OtherKey32 }));
+            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32Base64Url, TestDb.OtherKey32Base64Url }));
             using var keySharing = JsonDocument.Parse(state.KeyMessage.IpfsContent!);
             Assert.That(keySharing.RootElement.GetProperty("recipients").GetArrayLength(), Is.EqualTo(2));
         });

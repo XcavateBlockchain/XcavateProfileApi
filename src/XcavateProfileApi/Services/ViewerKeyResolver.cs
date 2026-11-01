@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using XcavateBuckets.Domain;
 using XcavateProfileApi.Data;
 
 namespace XcavateProfileApi.Services;
@@ -7,10 +8,8 @@ namespace XcavateProfileApi.Services;
 /// Resolves the bucket viewer id (a 32-byte X25519 key) for a wallet, or null when the wallet has
 /// no usable one: the profile keyed directly by the wallet first, then the
 /// <c>WalletMigrations</c> fallback for a profile still keyed by the legacy SS58 address of a
-/// migrated account. A stored key that is not well-formed 32-byte hex resolves to null — it would
-/// be an <c>InvalidInput</c> failure at <c>MembershipService.AddViewerAsync</c> and, worse, an
-/// endless retry of a permanently-unactionable event for the webhook callers. Shared by
-/// WebhooksController and the offer-bucket GraphQL mutations.
+/// migrated account. Base64url is preserved, legacy hex is normalized to base64url, and malformed
+/// keys resolve to null rather than causing a permanent <c>InvalidInput</c> retry loop.
 /// </summary>
 public class ViewerKeyResolver(ProfileDbContext profiles)
 {
@@ -29,10 +28,10 @@ public class ViewerKeyResolver(ProfileDbContext profiles)
                 (m, p) => p.X25519Key)
             .FirstOrDefaultAsync(ct);
 
-        return IsHex32Key(key) ? key : null;
+        return X25519KeyCodec.TryNormalize(key, out var canonical) ? canonical : null;
     }
 
-    /// <summary>The domain's viewer-id shape: exactly 32 bytes of hex, optional <c>0x</c> prefix.</summary>
+    /// <summary>Legacy hex shape accepted for backward-compatible inputs.</summary>
     public static bool IsHex32Key(string? key)
     {
         if (string.IsNullOrWhiteSpace(key))

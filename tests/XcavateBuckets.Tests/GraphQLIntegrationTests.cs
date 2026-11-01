@@ -368,7 +368,7 @@ public class GraphQLIntegrationTests
         Assert.Multiple(() =>
         {
             Assert.That(bucket.GetProperty("isWritable").GetBoolean(), Is.True);
-            Assert.That(bucket.GetProperty("encryptionKey").GetString(), Is.EqualTo(Key32));
+            Assert.That(bucket.GetProperty("encryptionKey").GetString(), Is.EqualTo(TestDb.Key32Base64Url));
             Assert.That(bucket.GetProperty("namespace").GetProperty("name").GetString(),
                 Is.EqualTo("deeds"));
             Assert.That(bucket.GetProperty("admins")[0].GetProperty("subjectId").GetString(),

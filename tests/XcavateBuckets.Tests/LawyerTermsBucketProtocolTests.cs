@@ -15,7 +15,7 @@ namespace XcavateBuckets.Tests;
 [TestFixture]
 public class LawyerTermsBucketProtocolTests
 {
-    private sealed record TestKeyPair(byte[] PrivateKey, byte[] PublicKey, string PublicKeyHex);
+    internal sealed record TestKeyPair(byte[] PrivateKey, byte[] PublicKey, string PublicKeyHex);
 
     [Test]
     public void CreateKeySharing_encrypts_the_private_jwk_for_each_participant()
@@ -30,7 +30,7 @@ public class LawyerTermsBucketProtocolTests
                 new KeyValuePair<string, string>("HolderA", holder.PublicKeyHex)
             ]);
 
-        var publicKey = Convert.FromHexString(result.PublicKeyHex.AsSpan(2));
+        var publicKey = WebEncoders.Base64UrlDecode(result.PublicKey);
         using var jwe = JsonDocument.Parse(result.Body);
         var root = jwe.RootElement;
         var plaintext = DecryptForRecipient(result.Body, holder.PrivateKey);
@@ -47,7 +47,7 @@ public class LawyerTermsBucketProtocolTests
 
         Assert.Multiple(() =>
         {
-            Assert.That(result.PublicKeyHex, Does.StartWith("0x"));
+            Assert.That(result.PublicKey, Has.Length.EqualTo(43));
             Assert.That(publicKey, Has.Length.EqualTo(32));
             Assert.That(publicKey.Any(value => value != 0), Is.True);
             Assert.That(id, Is.Not.Null.And.Not.Empty);
@@ -57,7 +57,10 @@ public class LawyerTermsBucketProtocolTests
             Assert.That(result.Body, Does.Not.Contain("\"keys\""));
             Assert.That(result.Body, Does.Not.Contain(key.GetProperty("d").GetString()));
             Assert.That(payload.GetProperty("from").GetString(), Is.EqualTo("BucketAdmin111"));
-            Assert.That(recipients, Is.EquivalentTo(new[] { "BucketAdmin111", "HolderA", "LawyerB" }));
+            Assert.That(recipients, Is.EquivalentTo(new[]
+            {
+                TestDb.Base64UrlKey(holder.PublicKeyHex), TestDb.Base64UrlKey(lawyer.PublicKeyHex)
+            }));
             Assert.That(key.GetProperty("kty").GetString(), Is.EqualTo("OKP"));
             Assert.That(key.GetProperty("crv").GetString(), Is.EqualTo("X25519"));
             Assert.That(privateKey, Has.Length.EqualTo(32));
@@ -80,6 +83,39 @@ public class LawyerTermsBucketProtocolTests
     }
 
     [Test]
+    public void Compact_message_decrypts_with_the_bucket_secret()
+    {
+        var holder = NewKeyPair();
+        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(
+            "BucketAdmin111", [new KeyValuePair<string, string>("HolderA", holder.PublicKeyHex)]);
+        var plaintext = "All property token holders should now vote on whether to accept the Lawyer's terms.";
+        var encrypted = LawyerTermsBucketProtocol.EncryptMessage(
+            plaintext,
+            keySharing.SecretJwk,
+            new Dictionary<string, string> { ["filename"] = "terms.pdf" });
+        var bucketPrivateKey = WebEncoders.Base64UrlDecode(
+            keySharing.SecretJwk["d"]!.GetValue<string>());
+        var expectedKid = keySharing.SecretJwk["kid"]!.GetValue<string>();
+
+        var decrypted = DecryptCompactMessage(encrypted, bucketPrivateKey, expectedKid);
+        using var header = JsonDocument.Parse(WebEncoders.Base64UrlDecode(
+            encrypted.Split('.')[0]));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Encoding.UTF8.GetString(decrypted), Is.EqualTo(plaintext));
+            Assert.That(encrypted, Does.Not.Contain(plaintext));
+            Assert.That(header.RootElement.GetProperty("alg").GetString(),
+                Is.EqualTo("ECDH-ES+A256KW"));
+            Assert.That(header.RootElement.GetProperty("enc").GetString(), Is.EqualTo("A256GCM"));
+            Assert.That(header.RootElement.GetProperty("typ").GetString(),
+                Is.EqualTo("didcomm/encrypted-message-v1"));
+            Assert.That(header.RootElement.GetProperty("kid").GetString(), Is.EqualTo(expectedKid));
+            Assert.That(header.RootElement.GetProperty("filename").GetString(), Is.EqualTo("terms.pdf"));
+        });
+    }
+
+    [Test]
     public void CreateKeySharing_generates_a_fresh_bucket_key_each_time()
     {
         var lawyer = NewKeyPair();
@@ -87,7 +123,7 @@ public class LawyerTermsBucketProtocolTests
         var first = LawyerTermsBucketProtocol.CreateKeySharing("BucketAdmin111", recipients);
         var second = LawyerTermsBucketProtocol.CreateKeySharing("BucketAdmin111", recipients);
 
-        Assert.That(second.PublicKeyHex, Is.Not.EqualTo(first.PublicKeyHex));
+        Assert.That(second.PublicKey, Is.Not.EqualTo(first.PublicKey));
         Assert.That(second.Body, Is.Not.EqualTo(first.Body));
     }
 
@@ -117,7 +153,7 @@ public class LawyerTermsBucketProtocolTests
         });
     }
 
-    private static TestKeyPair NewKeyPair()
+    internal static TestKeyPair NewKeyPair()
     {
         var privateKey = new X25519PrivateKeyParameters(RandomNumberGenerator.GetBytes(32), 0);
         var publicKey = privateKey.GeneratePublicKey().GetEncoded();
@@ -125,19 +161,22 @@ public class LawyerTermsBucketProtocolTests
             privateKey.GetEncoded(), publicKey, "0x" + Convert.ToHexString(publicKey));
     }
 
-    private static string DecryptForRecipient(string jweJson, byte[] recipientPrivateKey)
+    internal static string DecryptForRecipient(string jweJson, byte[] recipientPrivateKey)
     {
         using var document = JsonDocument.Parse(jweJson);
         var root = document.RootElement;
         var protectedValue = root.GetProperty("protected").GetString()!;
         var protectedHeader = Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(protectedValue));
+        string[] protectedNames;
         using (var header = JsonDocument.Parse(protectedHeader))
         {
+            protectedNames = header.RootElement.EnumerateObject().Select(property => property.Name).ToArray();
             Assert.Multiple(() =>
             {
-                Assert.That(header.RootElement.GetProperty("alg").GetString(),
-                    Is.EqualTo("ECDH-ES+A256KW"));
                 Assert.That(header.RootElement.GetProperty("enc").GetString(), Is.EqualTo("A256GCM"));
+                Assert.That(header.RootElement.GetProperty("typ").GetString(),
+                    Is.EqualTo("didcomm/key-sharing-v1"));
+                Assert.That(header.RootElement.TryGetProperty("alg", out _), Is.False);
             });
         }
 
@@ -148,7 +187,12 @@ public class LawyerTermsBucketProtocolTests
         foreach (var recipient in root.GetProperty("recipients").EnumerateArray())
         {
             var header = recipient.GetProperty("header");
-            Assert.That(header.GetProperty("alg").GetString(), Is.EqualTo("ECDH-ES+A256KW"));
+            var recipientHeaderNames = header.EnumerateObject().Select(property => property.Name).ToArray();
+            Assert.Multiple(() =>
+            {
+                Assert.That(header.GetProperty("alg").GetString(), Is.EqualTo("ECDH-ES+A256KW"));
+                Assert.That(recipientHeaderNames.Intersect(protectedNames), Is.Empty);
+            });
             var epk = header.GetProperty("epk");
             Assert.Multiple(() =>
             {
@@ -173,6 +217,11 @@ public class LawyerTermsBucketProtocolTests
                 continue;
             }
 
+            var recipientPublicKey = new X25519PrivateKeyParameters(recipientPrivateKey, 0)
+                .GeneratePublicKey().GetEncoded();
+            Assert.That(WebEncoders.Base64UrlDecode(header.GetProperty("kid").GetString()!),
+                Is.EqualTo(recipientPublicKey));
+
             using var aes = new AesGcm(cek, 16);
             var plaintext = new byte[ciphertext.Length];
             aes.Decrypt(iv, ciphertext, tag, plaintext, aad);
@@ -180,6 +229,43 @@ public class LawyerTermsBucketProtocolTests
         }
 
         throw new CryptographicException("No recipient entry can be unwrapped by this key.");
+    }
+
+    internal static byte[] DecryptCompactMessage(
+        string compactJwe, byte[] recipientPrivateKey, string? expectedKid = null)
+    {
+        var parts = compactJwe.Split('.');
+        Assert.That(parts, Has.Length.EqualTo(5));
+        var protectedValue = parts[0];
+        using var header = JsonDocument.Parse(WebEncoders.Base64UrlDecode(protectedValue));
+        Assert.Multiple(() =>
+        {
+            Assert.That(header.RootElement.GetProperty("alg").GetString(),
+                Is.EqualTo("ECDH-ES+A256KW"));
+            Assert.That(header.RootElement.GetProperty("enc").GetString(), Is.EqualTo("A256GCM"));
+            Assert.That(header.RootElement.GetProperty("typ").GetString(),
+                Is.EqualTo("didcomm/encrypted-message-v1"));
+            if (expectedKid is not null)
+            {
+                Assert.That(header.RootElement.GetProperty("kid").GetString(), Is.EqualTo(expectedKid));
+            }
+        });
+
+        var ephemeralPublic = WebEncoders.Base64UrlDecode(
+            header.RootElement.GetProperty("epk").GetProperty("x").GetString()!);
+        var shared = new byte[32];
+        X25519.ScalarMult(recipientPrivateKey, 0, ephemeralPublic, 0, shared, 0);
+        var wrap = new Rfc3394WrapEngine(new AesEngine());
+        wrap.Init(false, new KeyParameter(DeriveKek(shared)));
+        var encryptedKey = WebEncoders.Base64UrlDecode(parts[1]);
+        var cek = wrap.Unwrap(encryptedKey, 0, encryptedKey.Length);
+        var iv = WebEncoders.Base64UrlDecode(parts[2]);
+        var ciphertext = WebEncoders.Base64UrlDecode(parts[3]);
+        var tag = WebEncoders.Base64UrlDecode(parts[4]);
+        using var aes = new AesGcm(cek, 16);
+        var plaintext = new byte[ciphertext.Length];
+        aes.Decrypt(iv, ciphertext, tag, plaintext, Encoding.ASCII.GetBytes(protectedValue));
+        return plaintext;
     }
 
     private static byte[] DeriveKek(byte[] shared)

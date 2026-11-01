@@ -122,13 +122,73 @@ public class MembershipServiceTests
     }
 
     [Test]
-    public async Task AddViewerAsync_is_performed_by_a_bucket_admin()
+    public async Task AddViewerAsync_stores_canonical_base64url_and_accepts_legacy_hex_lookups()
     {
         await _fixture.Memberships.AddViewerAsync(
             TestDb.Bob, _ns.NamespaceId, _bucket.BucketId, TestDb.ViewerKey32, Ct);
 
-        Assert.That(await _fixture.Auth.IsViewerAsync(_bucket.BucketId, TestDb.ViewerKey32, Ct),
-            Is.True);
+        var stored = await _fixture.Db.BucketViewers.FindAsync(_bucket.BucketId, TestDb.ViewerKey32Base64Url);
+        Assert.Multiple(() =>
+        {
+            Assert.That(stored?.ViewerId, Is.EqualTo(TestDb.ViewerKey32Base64Url));
+            Assert.That(_fixture.Auth.IsViewerAsync(_bucket.BucketId, TestDb.ViewerKey32, Ct).Result,
+                Is.True);
+            Assert.That(_fixture.Auth.IsViewerAsync(
+                _bucket.BucketId, TestDb.ViewerKey32Base64Url, Ct).Result, Is.True);
+        });
+    }
+
+    [Test]
+    public async Task AddViewerAsync_replaces_a_legacy_hex_row_without_mutating_its_primary_key()
+    {
+        var addedAt = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        _fixture.Db.BucketViewers.Add(new BucketViewer
+        {
+            BucketId = _bucket.BucketId,
+            ViewerId = TestDb.ViewerKey32,
+            AddedAt = addedAt
+        });
+        await _fixture.Db.SaveChangesAsync(Ct);
+
+        await _fixture.Memberships.AddViewerAsync(
+            TestDb.Bob, _ns.NamespaceId, _bucket.BucketId, TestDb.ViewerKey32Base64Url, Ct);
+
+        var stored = _fixture.Db.BucketViewers.Single(row => row.BucketId == _bucket.BucketId);
+        Assert.Multiple(() =>
+        {
+            Assert.That(stored.ViewerId, Is.EqualTo(TestDb.ViewerKey32Base64Url));
+            Assert.That(stored.AddedAt, Is.EqualTo(addedAt));
+        });
+    }
+
+    [Test]
+    public async Task AddViewerAsync_collapses_cross_encoding_duplicates_when_hex_is_oldest()
+    {
+        var oldest = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        _fixture.Db.BucketViewers.AddRange(
+            new BucketViewer
+            {
+                BucketId = _bucket.BucketId,
+                ViewerId = TestDb.ViewerKey32,
+                AddedAt = oldest
+            },
+            new BucketViewer
+            {
+                BucketId = _bucket.BucketId,
+                ViewerId = TestDb.ViewerKey32Base64Url,
+                AddedAt = oldest.AddDays(1)
+            });
+        await _fixture.Db.SaveChangesAsync(Ct);
+
+        await _fixture.Memberships.AddViewerAsync(
+            TestDb.Bob, _ns.NamespaceId, _bucket.BucketId, TestDb.ViewerKey32Base64Url, Ct);
+
+        var stored = _fixture.Db.BucketViewers.Single(row => row.BucketId == _bucket.BucketId);
+        Assert.Multiple(() =>
+        {
+            Assert.That(stored.ViewerId, Is.EqualTo(TestDb.ViewerKey32Base64Url));
+            Assert.That(stored.AddedAt, Is.EqualTo(oldest));
+        });
     }
 
     [Test]
