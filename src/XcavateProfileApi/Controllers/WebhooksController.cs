@@ -439,6 +439,20 @@ public class WebhooksController : ControllerBase
             },
             ct);
 
+        if (result is OkObjectResult)
+        {
+            var termsNamespace = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
+            if (termsNamespace is not null)
+            {
+                var termsFailure = await PostLawyerTermsVotingResultAsync(
+                    payload, election, ratified, status, termsNamespace, ct);
+                if (termsFailure is not null)
+                {
+                    return termsFailure;
+                }
+            }
+        }
+
         // A rejected round grants no access, and a non-Ok answer (the 404 retry paths) means the
         // bucket is not there to grant on — either way there is no membership work to do.
         if (!ratified || result is not OkObjectResult)
@@ -958,9 +972,9 @@ public class WebhooksController : ControllerBase
 
     /// <summary>
     /// Receives the <c>spv_case_claimed</c> event, creates the candidacy's encrypted lawyer-terms
-    /// bucket, and retains the one-per-round <c>voting/terms</c> announcement in the property's
-    /// legal-process bucket. Each candidacy gets its own bucket, key ceremony, admin prompt, and
-    /// the claiming lawyer's current terms PDF.
+    /// bucket, and posts the one-per-round <c>voting/terms</c> announcement to both that bucket and
+    /// the property's legal-process bucket. Each candidacy gets its own bucket, key ceremony, admin
+    /// prompt, and the claiming lawyer's current terms PDF.
     /// </summary>
     // POST: webhooks/spv_case_claimed_devnet
     [HttpPost("spv_case_claimed_devnet")]
@@ -1022,20 +1036,70 @@ public class WebhooksController : ControllerBase
             return setup.Failure;
         }
 
+        Func<long, JsonObject> buildBody = listingId => new JsonObject
+        {
+            ["kind"] = "terms",
+            ["listingId"] = listingId,
+            ["round"] = payload.Round.Value,
+            ["expiresAt"] = IndexerClient.Iso8601(election.Expiry),
+            ["status"] = "open"
+        };
+        var reference = $"voting/terms/{payload.PropertyId}/round/{payload.Round}/open";
+        var description = $"SPV lawyer election round {payload.Round} opened";
         var votingResult = await PostVotingMessageAsync(
             payload.PropertyId, payload.Property,
             tag: TermsVotingTag,
-            reference: $"voting/terms/{payload.PropertyId}/round/{payload.Round}/open",
-            description: $"SPV lawyer election round {payload.Round} opened",
-            buildBody: listingId => new JsonObject
-            {
-                ["kind"] = "terms",
-                ["listingId"] = listingId,
-                ["round"] = payload.Round.Value,
-                ["expiresAt"] = IndexerClient.Iso8601(election.Expiry),
-                ["status"] = "open"
-            },
+            reference: reference,
+            description: description,
+            buildBody: buildBody,
             ct);
+        if (votingResult is not OkObjectResult)
+        {
+            return votingResult;
+        }
+
+        var termsVotingResult = await PostVotingMessageAsync(
+            payload.PropertyId, payload.Property,
+            tag: TermsVotingTag,
+            reference: reference,
+            description: description,
+            buildBody: buildBody,
+            ct,
+            bucketId: setup.BucketId!.Value,
+            contributor: admin,
+            admin: admin);
+        if (termsVotingResult is not OkObjectResult)
+        {
+            return termsVotingResult;
+        }
+
+        var resultReference = $"voting/result/terms/{payload.PropertyId}/round/{payload.Round}";
+        var legalBucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
+        var finalized = legalBucket is null
+            ? null
+            : await _db.Messages.OrderByDescending(message => message.MessageId)
+                .FirstOrDefaultAsync(
+                    message => message.BucketId == legalBucket.BucketId
+                        && message.Tag == VotingResultTag && message.Reference == resultReference,
+                    ct);
+        if (finalized?.IpfsContent is not null)
+        {
+            var finalBody = JsonNode.Parse(finalized.IpfsContent)!.AsObject();
+            var termsFinalResult = await PostVotingMessageAsync(
+                payload.PropertyId, payload.Property,
+                tag: VotingResultTag,
+                reference: resultReference,
+                description: finalized.Description ?? $"SPV lawyer election round {payload.Round} closed",
+                buildBody: _ => finalBody,
+                ct,
+                bucketId: setup.BucketId!.Value,
+                contributor: admin,
+                admin: admin);
+            if (termsFinalResult is not OkObjectResult)
+            {
+                return termsFinalResult;
+            }
+        }
 
         return WithLawyerTermsSetup(
             votingResult, setup.BucketId!.Value, setup.Created, setup.HolderCount);
@@ -1152,6 +1216,7 @@ public class WebhooksController : ControllerBase
             new("round", payload.Round!.Value.ToString(CultureInfo.InvariantCulture)),
             new("lawyer", payload.Lawyer!),
             new("candidacy", payload.Candidacy!),
+            new("cluster", payload.Cluster ?? "devnet"),
             new("listing", payload.Listing ?? string.Empty),
             new("property", payload.Property ?? string.Empty),
             new("tx_signature", payload.TxSignature ?? string.Empty),
@@ -1307,6 +1372,99 @@ public class WebhooksController : ControllerBase
         catch (Exception ex) when (ex is JsonException or FormatException)
         {
             return false;
+        }
+    }
+
+    private async Task<IActionResult?> PostLawyerTermsVotingResultAsync(
+        SpvLawyerElectedPayload payload,
+        SpvElectionInfo election,
+        bool ratified,
+        string status,
+        Namespace ns,
+        CancellationToken ct)
+    {
+        var round = election.Round.ToString(CultureInfo.InvariantCulture);
+        var buckets = (await _db.Buckets.Where(bucket =>
+                bucket.NamespaceId == ns.NamespaceId && bucket.Category == LawyerTermsBucketCategory)
+            .ToListAsync(ct))
+            .Where(bucket => LawyerTermsRound(bucket) == round)
+            .ToList();
+        if (buckets.Count == 0)
+        {
+            return null;
+        }
+
+        var admin = _config[BucketAdminAddressConfigKey]?.Trim();
+        if (string.IsNullOrWhiteSpace(admin))
+        {
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                $"The bucket admin address ({BucketAdminAddressConfigKey}) is not configured.");
+        }
+
+        if (ratified)
+        {
+            var resolve = await ResolveAsync(
+                ct,
+                async c => await _indexer.GetSpvCandidacyAsync(
+                    payload.ListingId!.Value, election.Round, election.SpvLawyer, c),
+                what: "winning SPV candidacy");
+            if (resolve.Failed)
+            {
+                return resolve.Failure;
+            }
+
+            var name = LawyerTermsBucketName(ns, resolve.Value!.Id);
+            if (buckets.All(bucket => bucket.Name != name))
+            {
+                return NotFound("The winning lawyer's terms bucket does not exist yet.");
+            }
+        }
+
+        foreach (var bucket in buckets)
+        {
+            var result = await PostVotingMessageAsync(
+                payload.ListingId, payload.Property,
+                tag: VotingResultTag,
+                reference: $"voting/result/terms/{payload.ListingId}/round/{election.Round}",
+                description: $"SPV lawyer election round {election.Round} {status}",
+                buildBody: listingId => new JsonObject
+                {
+                    ["kind"] = "terms",
+                    ["listingId"] = listingId,
+                    ["round"] = election.Round,
+                    ["status"] = status
+                },
+                ct,
+                bucketId: bucket.BucketId,
+                contributor: admin,
+                admin: admin);
+            if (result is not OkObjectResult)
+            {
+                return result;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? LawyerTermsRound(Bucket bucket)
+    {
+        if (string.IsNullOrWhiteSpace(bucket.Properties))
+        {
+            return null;
+        }
+        try
+        {
+            using var properties = JsonDocument.Parse(bucket.Properties);
+            return properties.RootElement.TryGetProperty("round", out var round)
+                && round.ValueKind == JsonValueKind.String
+                    ? round.GetString()
+                    : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
@@ -2044,10 +2202,11 @@ public class WebhooksController : ControllerBase
     }
 
     /// <summary>
-    /// The shared flow behind every voting webhook: resolve the property's namespace and legal
-    /// bucket (404 while either is missing), skip an exact duplicate (idempotent redelivery), then
-    /// post the message under the system identity — installing the operator admin and the system
-    /// contributor and unlocking the bucket first, all idempotently, inside one transaction.
+    /// The shared flow behind every voting webhook: resolve the property's namespace and target
+    /// bucket (the legal bucket unless <paramref name="bucketId"/> selects a lawyer-terms bucket),
+    /// skip an exact duplicate, then post under the requested contributor. The default remains the
+    /// legal bucket's namespace-admin/system identity; lawyer-terms posts use their configured admin.
+    /// Membership grants and any legacy unlock are idempotent inside one transaction.
     /// <paramref name="buildBody"/> receives the numeric listing id (the payload's
     /// <c>property_id</c>, or the namespace's as a fallback) and returns the deterministic
     /// plaintext JSON body.
@@ -2059,7 +2218,10 @@ public class WebhooksController : ControllerBase
         string reference,
         string description,
         Func<long, JsonObject> buildBody,
-        CancellationToken ct)
+        CancellationToken ct,
+        long? bucketId = null,
+        string? contributor = null,
+        string? admin = null)
     {
         var ns = await FindNamespaceAsync(propertyId, propertyPda, ct);
         if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
@@ -2067,10 +2229,13 @@ public class WebhooksController : ControllerBase
             return NotFound("No webhook-created namespace matches this property yet.");
         }
 
-        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
+        var bucket = bucketId is { } targetId
+            ? await _db.Buckets.SingleOrDefaultAsync(
+                candidate => candidate.BucketId == targetId && candidate.NamespaceId == ns.NamespaceId, ct)
+            : await FindLegalBucketAsync(ns.NamespaceId, ct);
         if (bucket is null)
         {
-            return NotFound("The property's legal bucket does not exist yet.");
+            return NotFound("The property's target voting bucket does not exist yet.");
         }
 
         var listingId = propertyId ?? ns.PropertyId;
@@ -2080,6 +2245,8 @@ public class WebhooksController : ControllerBase
         }
 
         var body = buildBody(listingId.Value).ToJsonString();
+        var poster = contributor ?? VotingSystemIdentity;
+        var operatorAdmin = admin ?? ns.Creator;
 
         // Redelivery guard: the same event rebuilds the same body bytes, so an identical tagged
         // message already in the bucket means this exact announcement was posted before.
@@ -2098,22 +2265,23 @@ public class WebhooksController : ControllerBase
         await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         // A bucket created before the claim webhook existed may lack the operator admin row the
         // contributor-add and resume-writing caller checks need; adding it is idempotent.
-        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
-        // The system poster. Idempotent too, which doubles as the guard against the deal_executed
+        await _memberships.AddAdminAsync(
+            ns.Creator, ns.NamespaceId, bucket.BucketId, operatorAdmin, ct);
+        // The poster is idempotent too, which doubles as the guard against the deal_executed
         // sweep: if it removed every contributor, the next voting webhook re-adds this one.
         await _memberships.AddContributorAsync(
-            ns.Creator, ns.NamespaceId, bucket.BucketId, VotingSystemIdentity, ct);
+            operatorAdmin, ns.NamespaceId, bucket.BucketId, poster, ct);
         if (!bucket.IsWritable)
         {
             // See the group remark: the only admin is the PropertyAsset PDA, so unlocking can only
             // ever happen server-side. The placeholder key is no E2E key — voting messages are
             // plaintext by design.
             await _buckets.ResumeWritingAsync(
-                ns.Creator, ns.NamespaceId, bucket.BucketId, PlaceholderEncryptionKey, ct);
+                operatorAdmin, ns.NamespaceId, bucket.BucketId, PlaceholderEncryptionKey, ct);
         }
 
         var message = await _messages.WriteAsync(
-            VotingSystemIdentity,
+            poster,
             ns.NamespaceId,
             bucket.BucketId,
             new MessageWriteRequest(
@@ -2670,6 +2838,10 @@ public sealed class SpvCaseClaimedPayload
     /// <summary>The base58 LawyerCandidacy PDA the claim created.</summary>
     [JsonPropertyName("candidacy")]
     public string? Candidacy { get; set; }
+
+    /// <summary>The Solana cluster that produced the claim; older events default to devnet.</summary>
+    [JsonPropertyName("cluster")]
+    public string? Cluster { get; set; }
 
     /// <summary>The slot the candidacy landed in.</summary>
     [JsonPropertyName("slot")]

@@ -11,6 +11,7 @@ namespace XcavateBuckets.Tests;
 public sealed class TestIndexerClient : IIndexerClient
 {
     public SpvElectionInfo? SpvElection { get; set; }
+    public SpvCandidacyInfo? SpvCandidacy { get; set; }
     public ListingLawyersInfo? ListingLawyers { get; set; }
     public PropertyLettingInfo? PropertyLetting { get; set; }
     public ProposalInfo? OpenProposal { get; set; }
@@ -38,6 +39,10 @@ public sealed class TestIndexerClient : IIndexerClient
 
     public Task<SpvElectionInfo?> GetListingSpvElectionAsync(long listingId, CancellationToken ct)
         => Respond(SpvElection);
+
+    public Task<SpvCandidacyInfo?> GetSpvCandidacyAsync(
+        long listingId, int round, string lawyer, CancellationToken ct)
+        => Respond(SpvCandidacy);
 
     public Task<ListingLawyersInfo?> GetListingLawyersAsync(long listingId, CancellationToken ct)
         => Respond(ListingLawyers);

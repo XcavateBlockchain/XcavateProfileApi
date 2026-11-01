@@ -15,6 +15,9 @@ public sealed class IndexerOptions
 /// <summary>A listing's SPV-lawyer election as the indexer mirrors it (marketplace <c>Listing</c>).</summary>
 public sealed record SpvElectionInfo(int Round, long Expiry, int CandidateCount, string SpvLawyer);
 
+/// <summary>One lawyer's candidacy in an exact listing and election round.</summary>
+public sealed record SpvCandidacyInfo(string Id, int Round, string Lawyer);
+
 /// <summary>The two lawyer wallets assigned to a marketplace listing.</summary>
 public sealed record ListingLawyersInfo(string SpvLawyer, string DeveloperLawyer);
 
@@ -54,6 +57,10 @@ public interface IIndexerClient
 {
     /// <summary>The listing's SPV-lawyer election counters + assignment, or null if the listing is absent.</summary>
     Task<SpvElectionInfo?> GetListingSpvElectionAsync(long listingId, CancellationToken ct);
+
+    /// <summary>A lawyer's candidacy in an exact listing and round, including closed history.</summary>
+    Task<SpvCandidacyInfo?> GetSpvCandidacyAsync(
+        long listingId, int round, string lawyer, CancellationToken ct);
 
     /// <summary>Both lawyer wallets assigned to the listing, or null if the listing is absent.</summary>
     Task<ListingLawyersInfo?> GetListingLawyersAsync(long listingId, CancellationToken ct);
@@ -143,6 +150,29 @@ public class IndexerClient(
                 LongOf(node.Value, "spvElectionExpiry"),
                 (int)LongOf(node.Value, "spvElectionCandidateCount"),
                 node.Value.GetProperty("spvLawyer").GetString() ?? string.Empty);
+    }
+
+    public async Task<SpvCandidacyInfo?> GetSpvCandidacyAsync(
+        long listingId, int round, string lawyer, CancellationToken ct)
+    {
+        var nodes = await QueryAsync(
+            """
+            query($listingId: I64!, $round: I64!, $lawyer: String!) {
+              lawyerCandidacies(listingId: $listingId, round: $round, lawyer: $lawyer, first: 1, offset: 0) {
+                nodes { id round lawyer }
+              }
+            }
+            """,
+            new { listingId = I64Var(listingId), round = I64Var(round), lawyer },
+            "lawyerCandidacies", ct);
+
+        var node = FirstNode(nodes);
+        return node is null
+            ? null
+            : new SpvCandidacyInfo(
+                node.Value.GetProperty("id").GetString()!,
+                (int)LongOf(node.Value, "round"),
+                node.Value.GetProperty("lawyer").GetString()!);
     }
 
     public async Task<ListingLawyersInfo?> GetListingLawyersAsync(long listingId, CancellationToken ct)

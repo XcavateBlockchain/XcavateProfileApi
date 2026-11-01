@@ -43,6 +43,7 @@ public class LawyerTermsBucketWebhookTests
             ["listing"] = "ListingPDA111",
             ["property"] = AssetPda,
             ["candidacy"] = candidacy,
+            ["cluster"] = "devnet",
             ["slot"] = 487_700_100,
             ["tx_signature"] = $"Tx-{lawyer}-{candidacy}",
             ["block_time"] = "2026-10-01T10:00:00+00:00",
@@ -192,6 +193,7 @@ public class LawyerTermsBucketWebhookTests
                 Assert.That(properties.RootElement.GetProperty("round").GetString(), Is.EqualTo("1"));
                 Assert.That(properties.RootElement.GetProperty("lawyer").GetString(), Is.EqualTo(Lawyer));
                 Assert.That(properties.RootElement.GetProperty("candidacy").GetString(), Is.EqualTo(Candidacy));
+                Assert.That(properties.RootElement.GetProperty("cluster").GetString(), Is.EqualTo("devnet"));
             }
 
             Assert.That(state.Admins, Is.EqualTo(new[] { WebhooksHost.DefaultBucketAdminAddress }));
@@ -205,7 +207,7 @@ public class LawyerTermsBucketWebhookTests
                 TestDb.OtherKey32Base64Url, TestDb.ViewerKey32Base64Url, TestDb.Key32Base64Url
             }));
 
-            Assert.That(state.Messages, Has.Count.EqualTo(3));
+            Assert.That(state.Messages, Has.Count.EqualTo(4));
             Assert.That(state.Messages.Select(message => message.Contributor), Is.All.EqualTo(
                 WebhooksHost.DefaultBucketAdminAddress));
             Assert.That(state.Messages[0].Tag, Is.EqualTo("didcomm/key-sharing-v1"));
@@ -260,6 +262,15 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(decryptedPdf, Is.EqualTo(PdfBytes));
             Assert.That(state.Messages[2].ContentHash,
                 Is.EqualTo("0x" + Convert.ToHexString(SHA256.HashData(snapshotPayload))));
+            Assert.That(state.Messages[3].Tag, Is.EqualTo("voting/terms"));
+            Assert.That(state.Messages[3].Reference, Is.EqualTo("voting/terms/12/round/1/open"));
+            using (var vote = JsonDocument.Parse(state.Messages[3].IpfsContent!))
+            {
+                Assert.That(vote.RootElement.GetProperty("kind").GetString(), Is.EqualTo("terms"));
+                Assert.That(vote.RootElement.GetProperty("listingId").GetInt64(), Is.EqualTo(ListingId));
+                Assert.That(vote.RootElement.GetProperty("round").GetInt32(), Is.EqualTo(1));
+                Assert.That(vote.RootElement.GetProperty("status").GetString(), Is.EqualTo("open"));
+            }
             Assert.That(state.LegalMessages.Single().Tag, Is.EqualTo("voting/terms"));
             Assert.That(state.LegalMessages.Single().Contributor, Is.EqualTo("system:voting"));
         });
@@ -333,7 +344,7 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(secondStatus, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(second.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.False);
             Assert.That(second.GetProperty("lawyerTermsBucketId").GetInt64(), Is.EqualTo(bucketId));
-            Assert.That(messageCount, Is.EqualTo(3));
+            Assert.That(messageCount, Is.EqualTo(4));
             Assert.That(bucket.EncryptionKey, Is.EqualTo(originalKey));
         });
     }
@@ -413,7 +424,7 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(snapshotHeader.RootElement.TryGetProperty("kid", out _), Is.False);
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(second.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.False);
-            Assert.That(messages, Has.Count.EqualTo(3));
+            Assert.That(messages, Has.Count.EqualTo(4));
             Assert.That(messages[1].ContentType, Is.EqualTo("text/plain;charset=utf-8"));
             Assert.That(Encoding.UTF8.GetString(promptPlaintext),
                 Is.EqualTo(LawyerTermsBucketProtocol.VotePrompt));
@@ -547,8 +558,188 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(secondStatus, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(second.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.False);
             Assert.That(second.GetProperty("lawyerTermsBucketId").GetInt64(), Is.EqualTo(bucketId));
-            Assert.That(termsMessageCount, Is.EqualTo(3));
+            Assert.That(termsMessageCount, Is.EqualTo(4));
             Assert.That(legalMessageCount, Is.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public async Task Election_result_is_posted_to_legal_and_all_lawyer_terms_buckets_in_the_round()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        var legalBucketId = await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (_, claim) = await PostClaimAsync(host);
+        var termsBucketId = claim.GetProperty("lawyerTermsBucketId").GetInt64();
+        const string losingLawyer = "LawyerWallet222";
+        await host.SeedViewerKeyAsync(losingLawyer, TestDb.Hash32);
+        await host.SeedTermsDocumentAsync(losingLawyer, PdfBytes);
+        var (_, losingClaim) = await PostClaimAsync(
+            host, lawyer: losingLawyer, candidacy: "CandidacyPDA222");
+        var losingBucketId = losingClaim.GetProperty("lawyerTermsBucketId").GetInt64();
+        host.Indexer.SpvElection = new SpvElectionInfo(1, Expiry, 1, Lawyer);
+        host.Indexer.SpvCandidacy = new SpvCandidacyInfo(Candidacy, 1, Lawyer);
+        var json = new JsonObject
+        {
+            ["event"] = "spv_lawyer_elected",
+            ["listing_id"] = ListingId,
+            ["property_id"] = ListingId,
+            ["listing"] = "ListingPDA111",
+            ["property"] = AssetPda,
+            ["cluster"] = "devnet",
+            ["winner_registry"] = "WinnerRegistryPDA111",
+            ["slot"] = 487_700_200,
+            ["tx_signature"] = "ElectedTx1111111111111111111111111111111111111111",
+            ["block_time"] = "2026-10-02T10:00:00+00:00",
+            ["program"] = "marketplace"
+        }.ToJsonString();
+
+        using var response = await host.Client.PostAsync(
+            $"/webhooks/spv_lawyer_elected_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+        var state = await host.WithDbAsync(async db => new
+        {
+            LegalResult = await db.Messages.SingleAsync(message =>
+                message.BucketId == legalBucketId && message.Tag == "voting/result"),
+            TermsResult = await db.Messages.SingleAsync(message =>
+                message.BucketId == termsBucketId && message.Tag == "voting/result"),
+            LosingResult = await db.Messages.SingleAsync(message =>
+                message.BucketId == losingBucketId && message.Tag == "voting/result")
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(state.LegalResult.Contributor, Is.EqualTo("system:voting"));
+            Assert.That(state.TermsResult.Contributor, Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
+            Assert.That(state.LosingResult.Contributor, Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
+            Assert.That(state.TermsResult.Reference, Is.EqualTo("voting/result/terms/12/round/1"));
+            Assert.That(state.TermsResult.IpfsContent, Is.EqualTo(state.LegalResult.IpfsContent));
+            Assert.That(state.LosingResult.IpfsContent, Is.EqualTo(state.LegalResult.IpfsContent));
+            using var result = JsonDocument.Parse(state.TermsResult.IpfsContent!);
+            Assert.That(result.RootElement.GetProperty("status").GetString(), Is.EqualTo("ratified"));
+            Assert.That(result.RootElement.GetProperty("round").GetInt32(), Is.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public async Task Rejected_election_result_closes_only_buckets_in_that_round()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (_, firstClaim) = await PostClaimAsync(host);
+        var roundOneBucketId = firstClaim.GetProperty("lawyerTermsBucketId").GetInt64();
+        const string secondLawyer = "LawyerWallet222";
+        await host.SeedViewerKeyAsync(secondLawyer, TestDb.Hash32);
+        await host.SeedTermsDocumentAsync(secondLawyer, PdfBytes);
+        var (_, secondClaim) = await PostClaimAsync(
+            host, lawyer: secondLawyer, candidacy: "CandidacyPDA222", round: 2);
+        var roundTwoBucketId = secondClaim.GetProperty("lawyerTermsBucketId").GetInt64();
+        host.Indexer.SpvElection = new SpvElectionInfo(2, Expiry, 2, "11111111111111111111111111111111");
+        var json = new JsonObject
+        {
+            ["event"] = "spv_lawyer_elected",
+            ["listing_id"] = ListingId,
+            ["property_id"] = ListingId,
+            ["listing"] = "ListingPDA111",
+            ["property"] = AssetPda,
+            ["cluster"] = "devnet",
+            ["winner_registry"] = "WinnerRegistryPDA111",
+            ["slot"] = 487_700_200,
+            ["tx_signature"] = "ElectedTx1111111111111111111111111111111111111111",
+            ["block_time"] = "2026-10-02T10:00:00+00:00",
+            ["program"] = "marketplace"
+        }.ToJsonString();
+
+        using var response = await host.Client.PostAsync(
+            $"/webhooks/spv_lawyer_elected_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+        var state = await host.WithDbAsync(async db => new
+        {
+            RoundOneHasResult = await db.Messages.AnyAsync(message =>
+                message.BucketId == roundOneBucketId && message.Tag == "voting/result"),
+            RoundTwoResult = await db.Messages.SingleAsync(message =>
+                message.BucketId == roundTwoBucketId && message.Tag == "voting/result")
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(state.RoundOneHasResult, Is.False);
+            Assert.That(state.RoundTwoResult.Contributor, Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
+            using var result = JsonDocument.Parse(state.RoundTwoResult.IpfsContent!);
+            Assert.That(result.RootElement.GetProperty("status").GetString(), Is.EqualTo("rejected"));
+            Assert.That(result.RootElement.GetProperty("round").GetInt32(), Is.EqualTo(2));
+        });
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task Late_claim_after_finalization_reconciles_open_then_result(bool ratified)
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        var legalBucketId = await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        const string losingLawyer = "LawyerWallet222";
+        await host.SeedViewerKeyAsync(losingLawyer, TestDb.Hash32);
+        await host.SeedTermsDocumentAsync(losingLawyer, PdfBytes);
+        host.Indexer.SpvElection = new SpvElectionInfo(
+            1, Expiry, 1, ratified ? Lawyer : "11111111111111111111111111111111");
+        host.Indexer.SpvCandidacy = new SpvCandidacyInfo(Candidacy, 1, Lawyer);
+        var json = new JsonObject
+        {
+            ["event"] = "spv_lawyer_elected",
+            ["listing_id"] = ListingId,
+            ["property_id"] = ListingId,
+            ["listing"] = "ListingPDA111",
+            ["property"] = AssetPda,
+            ["cluster"] = "devnet",
+            ["winner_registry"] = "WinnerRegistryPDA111",
+            ["slot"] = 487_700_200,
+            ["tx_signature"] = "ElectedTx1111111111111111111111111111111111111111",
+            ["block_time"] = "2026-10-02T10:00:00+00:00",
+            ["program"] = "marketplace"
+        }.ToJsonString();
+        using (var finalResponse = await host.Client.PostAsync(
+            $"/webhooks/spv_lawyer_elected_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
+            new StringContent(json, Encoding.UTF8, "application/json")))
+        {
+            Assert.That(finalResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+        }
+        host.Indexer.SpvElection = new SpvElectionInfo(
+            1, Expiry, 1, "11111111111111111111111111111111");
+
+        var (claimStatus, claim) = await PostClaimAsync(
+            host, lawyer: losingLawyer, candidacy: "CandidacyPDA222");
+        var bucketId = claim.GetProperty("lawyerTermsBucketId").GetInt64();
+        var (redeliveryStatus, _) = await PostClaimAsync(
+            host, lawyer: losingLawyer, candidacy: "CandidacyPDA222");
+        var state = await host.WithDbAsync(async db => new
+        {
+            LegalResult = await db.Messages.SingleAsync(message =>
+                message.BucketId == legalBucketId && message.Tag == "voting/result"),
+            TermsMessages = await db.Messages.Where(message => message.BucketId == bucketId)
+                .OrderBy(message => message.MessageId).ToListAsync()
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(claimStatus, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(redeliveryStatus, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(state.TermsMessages, Has.Count.EqualTo(5));
+            Assert.That(state.TermsMessages[^2].Tag, Is.EqualTo("voting/terms"));
+            Assert.That(state.TermsMessages[^1].Tag, Is.EqualTo("voting/result"));
+            Assert.That(state.TermsMessages[^1].Contributor,
+                Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
+            Assert.That(state.TermsMessages[^1].IpfsContent,
+                Is.EqualTo(state.LegalResult.IpfsContent));
+            using var result = JsonDocument.Parse(state.TermsMessages[^1].IpfsContent!);
+            Assert.That(result.RootElement.GetProperty("status").GetString(),
+                Is.EqualTo(ratified ? "ratified" : "rejected"));
         });
     }
 
