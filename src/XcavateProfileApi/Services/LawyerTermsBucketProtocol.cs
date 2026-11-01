@@ -35,7 +35,8 @@ public static class LawyerTermsBucketProtocol
         var publicKey = privateKey.GeneratePublicKey().GetEncoded();
         var id = Guid.NewGuid().ToString();
         var recipientArray = new JsonArray();
-        foreach (var recipient in new[] { admin }.Concat(participants.Select(participant => participant.Key))
+        foreach (var recipient in participants
+                     .Select(participant => X25519KeyCodec.Normalize(participant.Value, "recipient"))
                      .Distinct(StringComparer.Ordinal))
         {
             recipientArray.Add(recipient);
@@ -77,7 +78,7 @@ public static class LawyerTermsBucketProtocol
     private static string EncryptForRecipients(string plaintext, IReadOnlyCollection<byte[]> publicKeys)
     {
         var protectedValue = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(
-            """{"enc":"A256GCM","alg":"ECDH-ES+A256KW"}"""));
+            """{"enc":"A256GCM","typ":"didcomm/key-sharing-v1"}"""));
         var aad = Encoding.ASCII.GetBytes(protectedValue);
         var cek = RandomNumberGenerator.GetBytes(32);
         var iv = RandomNumberGenerator.GetBytes(12);
@@ -104,6 +105,7 @@ public static class LawyerTermsBucketProtocol
                 ["header"] = new JsonObject
                 {
                     ["alg"] = "ECDH-ES+A256KW",
+                    ["kid"] = WebEncoders.Base64UrlEncode(publicKey),
                     ["epk"] = new JsonObject
                     {
                         ["kty"] = "OKP",

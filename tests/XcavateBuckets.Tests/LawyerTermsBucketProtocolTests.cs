@@ -15,7 +15,7 @@ namespace XcavateBuckets.Tests;
 [TestFixture]
 public class LawyerTermsBucketProtocolTests
 {
-    private sealed record TestKeyPair(byte[] PrivateKey, byte[] PublicKey, string PublicKeyHex);
+    internal sealed record TestKeyPair(byte[] PrivateKey, byte[] PublicKey, string PublicKeyHex);
 
     [Test]
     public void CreateKeySharing_encrypts_the_private_jwk_for_each_participant()
@@ -57,7 +57,10 @@ public class LawyerTermsBucketProtocolTests
             Assert.That(result.Body, Does.Not.Contain("\"keys\""));
             Assert.That(result.Body, Does.Not.Contain(key.GetProperty("d").GetString()));
             Assert.That(payload.GetProperty("from").GetString(), Is.EqualTo("BucketAdmin111"));
-            Assert.That(recipients, Is.EquivalentTo(new[] { "BucketAdmin111", "HolderA", "LawyerB" }));
+            Assert.That(recipients, Is.EquivalentTo(new[]
+            {
+                TestDb.Base64UrlKey(holder.PublicKeyHex), TestDb.Base64UrlKey(lawyer.PublicKeyHex)
+            }));
             Assert.That(key.GetProperty("kty").GetString(), Is.EqualTo("OKP"));
             Assert.That(key.GetProperty("crv").GetString(), Is.EqualTo("X25519"));
             Assert.That(privateKey, Has.Length.EqualTo(32));
@@ -117,7 +120,7 @@ public class LawyerTermsBucketProtocolTests
         });
     }
 
-    private static TestKeyPair NewKeyPair()
+    internal static TestKeyPair NewKeyPair()
     {
         var privateKey = new X25519PrivateKeyParameters(RandomNumberGenerator.GetBytes(32), 0);
         var publicKey = privateKey.GeneratePublicKey().GetEncoded();
@@ -125,19 +128,22 @@ public class LawyerTermsBucketProtocolTests
             privateKey.GetEncoded(), publicKey, "0x" + Convert.ToHexString(publicKey));
     }
 
-    private static string DecryptForRecipient(string jweJson, byte[] recipientPrivateKey)
+    internal static string DecryptForRecipient(string jweJson, byte[] recipientPrivateKey)
     {
         using var document = JsonDocument.Parse(jweJson);
         var root = document.RootElement;
         var protectedValue = root.GetProperty("protected").GetString()!;
         var protectedHeader = Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(protectedValue));
+        string[] protectedNames;
         using (var header = JsonDocument.Parse(protectedHeader))
         {
+            protectedNames = header.RootElement.EnumerateObject().Select(property => property.Name).ToArray();
             Assert.Multiple(() =>
             {
-                Assert.That(header.RootElement.GetProperty("alg").GetString(),
-                    Is.EqualTo("ECDH-ES+A256KW"));
                 Assert.That(header.RootElement.GetProperty("enc").GetString(), Is.EqualTo("A256GCM"));
+                Assert.That(header.RootElement.GetProperty("typ").GetString(),
+                    Is.EqualTo("didcomm/key-sharing-v1"));
+                Assert.That(header.RootElement.TryGetProperty("alg", out _), Is.False);
             });
         }
 
@@ -148,7 +154,12 @@ public class LawyerTermsBucketProtocolTests
         foreach (var recipient in root.GetProperty("recipients").EnumerateArray())
         {
             var header = recipient.GetProperty("header");
-            Assert.That(header.GetProperty("alg").GetString(), Is.EqualTo("ECDH-ES+A256KW"));
+            var recipientHeaderNames = header.EnumerateObject().Select(property => property.Name).ToArray();
+            Assert.Multiple(() =>
+            {
+                Assert.That(header.GetProperty("alg").GetString(), Is.EqualTo("ECDH-ES+A256KW"));
+                Assert.That(recipientHeaderNames.Intersect(protectedNames), Is.Empty);
+            });
             var epk = header.GetProperty("epk");
             Assert.Multiple(() =>
             {
@@ -172,6 +183,11 @@ public class LawyerTermsBucketProtocolTests
             {
                 continue;
             }
+
+            var recipientPublicKey = new X25519PrivateKeyParameters(recipientPrivateKey, 0)
+                .GeneratePublicKey().GetEncoded();
+            Assert.That(WebEncoders.Base64UrlDecode(header.GetProperty("kid").GetString()!),
+                Is.EqualTo(recipientPublicKey));
 
             using var aes = new AesGcm(cek, 16);
             var plaintext = new byte[ciphertext.Length];

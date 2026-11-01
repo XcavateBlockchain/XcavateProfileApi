@@ -918,6 +918,16 @@ public class WebhooksController : ControllerBase
                 $"The bucket admin address ({BucketAdminAddressConfigKey}) is not configured.");
         }
 
+        string adminViewerKey;
+        try
+        {
+            adminViewerKey = BucketAdminKeyProvider.GetPublicKey(_config);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, ex.Message);
+        }
+
         var ns = await FindNamespaceAsync(payload.PropertyId, payload.Property, ct);
         if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
         {
@@ -932,7 +942,7 @@ public class WebhooksController : ControllerBase
         }
         var election = resolve.Value!;
 
-        var setup = await EnsureLawyerTermsBucketAsync(ns, payload, admin, ct);
+        var setup = await EnsureLawyerTermsBucketAsync(ns, payload, admin, adminViewerKey, ct);
         if (setup.Failure is not null)
         {
             return setup.Failure;
@@ -959,7 +969,11 @@ public class WebhooksController : ControllerBase
 
     private async Task<(IActionResult? Failure, long? BucketId, bool Created, int? HolderCount)>
         EnsureLawyerTermsBucketAsync(
-            Namespace ns, SpvCaseClaimedPayload payload, string admin, CancellationToken ct)
+            Namespace ns,
+            SpvCaseClaimedPayload payload,
+            string admin,
+            string adminViewerKey,
+            CancellationToken ct)
     {
         var name = LawyerTermsBucketName(ns, payload.Candidacy!);
         var existing = await _db.Buckets.FirstOrDefaultAsync(
@@ -1019,6 +1033,7 @@ public class WebhooksController : ControllerBase
             }
             viewers.Add(new(wallet, key));
         }
+        viewers.Add(new(admin, adminViewerKey));
 
         string snapshotUrl;
         try

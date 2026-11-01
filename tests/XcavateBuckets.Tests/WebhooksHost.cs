@@ -1,12 +1,16 @@
+using System.Security.Cryptography;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using Org.BouncyCastle.Crypto.Parameters;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
 using XcavateProfileApi.Controllers;
@@ -68,12 +72,45 @@ public sealed class WebhooksHost : IAsyncDisposable
     public NotificationQueue? Queue { get; }
 
     public const string DefaultBucketAdminAddress = "BucketAdmin111";
+    public static readonly string DefaultBucketAdminViewerKey;
+    public static readonly byte[] DefaultBucketAdminPrivateKey;
+    public static readonly string DefaultBucketAdminX25519Key;
+
+    static WebhooksHost()
+    {
+        var privateKey = new X25519PrivateKeyParameters(RandomNumberGenerator.GetBytes(32), 0);
+        var publicKey = privateKey.GeneratePublicKey().GetEncoded();
+        DefaultBucketAdminPrivateKey = privateKey.GetEncoded();
+        DefaultBucketAdminViewerKey = WebEncoders.Base64UrlEncode(publicKey);
+        var publicJwk = new JsonObject
+        {
+            ["crv"] = "X25519",
+            ["kty"] = "OKP",
+            ["x"] = DefaultBucketAdminViewerKey,
+            ["kid"] = "test-bucket-admin"
+        };
+        var privateJwk = new JsonObject
+        {
+            ["crv"] = "X25519",
+            ["d"] = WebEncoders.Base64UrlEncode(DefaultBucketAdminPrivateKey),
+            ["kty"] = "OKP",
+            ["x"] = DefaultBucketAdminViewerKey,
+            ["kid"] = "test-bucket-admin"
+        };
+        DefaultBucketAdminX25519Key = new JsonObject
+        {
+            ["publicJwk"] = publicJwk,
+            ["privateJwk"] = privateJwk
+        }.ToJsonString();
+    }
 
     public static async Task<WebhooksHost> StartAsync(
         string? webhookSecret = null,
         bool pushConfigured = true,
-        string? bucketAdminAddress = DefaultBucketAdminAddress)
+        string? bucketAdminAddress = DefaultBucketAdminAddress,
+        string? bucketAdminX25519Key = null)
     {
+        bucketAdminX25519Key ??= DefaultBucketAdminX25519Key;
         var connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
         // The profile store is a second context on its own in-memory database (the controller's
@@ -100,6 +137,10 @@ public sealed class WebhooksHost : IAsyncDisposable
                 if (bucketAdminAddress is not null)
                 {
                     values["BUCKET_ADMIN_ADDRESS"] = bucketAdminAddress;
+                }
+                if (bucketAdminX25519Key is not null)
+                {
+                    values["BUCKET_ADMIN_X25519_KEY"] = bucketAdminX25519Key;
                 }
                 config.AddInMemoryCollection(values);
             });

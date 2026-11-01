@@ -298,9 +298,12 @@ lawyer's own bucket carries their terms discussion and document.
   lookup or bucket write. Configure the Indexer's `SPV_CASE_CLAIMED_WEBHOOK_URL` with the same
   `?secret=` query parameter.
 - **Operator admin.** `BUCKET_ADMIN_ADDRESS` is required (503 when blank) and is installed as both
-  bucket admin and contributor, so the two requested messages are authored by that address. The
-  deployment workflow renders it from `BUCKET_ADMIN_ADDRESS`, and Compose passes it through
-  to the API. No admin viewer key is required unless the admin is itself a claimed-token holder.
+  bucket admin and contributor, so the two requested messages are authored by that address.
+  `BUCKET_ADMIN_X25519_KEY` is also required (503 when missing or invalid): the API reads only its
+  `publicJwk.x`, installs it as the admin's viewer, and wraps the bucket key for the admin as well
+  as every holder/lawyer. Store the keypair JSON on ONE line; the private JWK is never read into
+  application logic or logged. Both values are rendered from same-named GitHub environment secrets
+  and passed through Compose.
 - **Participants.** Current positive `shareHoldings` wallets (not mere reservations) and the
   claiming lawyer are contributors, with their profile/migrated X25519 keys stored as canonical
   base64url viewers (legacy hex is normalized). A missing required key answers 404 before any

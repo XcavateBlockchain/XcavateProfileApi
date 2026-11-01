@@ -199,6 +199,7 @@ public class LawyerTermsBucketWebhookTests
             }));
             Assert.That(state.Viewers, Is.EquivalentTo(new[]
             {
+                WebhooksHost.DefaultBucketAdminViewerKey,
                 TestDb.OtherKey32Base64Url, TestDb.ViewerKey32Base64Url, TestDb.Key32Base64Url
             }));
 
@@ -211,11 +212,24 @@ public class LawyerTermsBucketWebhookTests
             using (var keySharing = JsonDocument.Parse(state.Messages[0].IpfsContent!))
             {
                 Assert.That(keySharing.RootElement.GetProperty("recipients").GetArrayLength(),
-                    Is.EqualTo(3));
+                    Is.EqualTo(4));
                 Assert.That(keySharing.RootElement.GetProperty("ciphertext").GetString(),
                     Is.Not.Null.And.Not.Empty);
                 Assert.That(state.Messages[0].IpfsContent, Does.Not.Contain("\"keys\""));
                 Assert.That(state.Messages[0].IpfsContent, Does.Not.Contain("\"d\""));
+            }
+            var adminPlaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+                state.Messages[0].IpfsContent!, WebhooksHost.DefaultBucketAdminPrivateKey);
+            using (var adminPayload = JsonDocument.Parse(adminPlaintext))
+            {
+                var recipients = adminPayload.RootElement.GetProperty("to").EnumerateArray()
+                    .Select(value => value.GetString()).ToArray();
+                var publicJwk = adminPayload.RootElement.GetProperty("keys")[0].GetProperty("x").GetString();
+                Assert.That(adminPayload.RootElement.GetProperty("from").GetString(),
+                    Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
+                Assert.That(recipients, Does.Contain(WebhooksHost.DefaultBucketAdminViewerKey));
+                Assert.That(WebEncoders.Base64UrlDecode(publicJwk!),
+                    Is.EqualTo(WebEncoders.Base64UrlDecode(state.Bucket.EncryptionKey!)));
             }
             Assert.That(state.Messages[1].Tag, Is.EqualTo("lawyer/terms-vote"));
             Assert.That(state.Messages[1].Reference,
@@ -357,6 +371,25 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(
             webhookSecret: WebhookSecret, bucketAdminAddress: "");
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+
+        var (status, _) = await PostClaimAsync(host);
+
+        await Assert.MultipleAsync(async () =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+            Assert.That(await TermsBucketCountAsync(host), Is.Zero);
+        });
+    }
+
+    [TestCase("")]
+    [TestCase("{not-json}")]
+    public async Task Missing_or_invalid_admin_jwk_returns_503_without_a_terms_bucket(string jwk)
+    {
+        await using var host = await WebhooksHost.StartAsync(
+            webhookSecret: WebhookSecret, bucketAdminX25519Key: jwk);
         await SeedNamespaceAsync(host);
         await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
@@ -530,6 +563,7 @@ public class LawyerTermsBucketWebhookTests
 
         Assert.That(viewers, Is.EquivalentTo(new[]
         {
+            WebhooksHost.DefaultBucketAdminViewerKey,
             lawyerKey,
             holderKey,
             TestDb.ViewerKey32Base64Url
@@ -562,7 +596,10 @@ public class LawyerTermsBucketWebhookTests
             {
                 WebhooksHost.DefaultBucketAdminAddress, HolderOne, Lawyer
             }));
-            Assert.That(state.Viewers, Is.EquivalentTo(new[] { TestDb.Key32Base64Url }));
+            Assert.That(state.Viewers, Is.EquivalentTo(new[]
+            {
+                WebhooksHost.DefaultBucketAdminViewerKey, TestDb.Key32Base64Url
+            }));
         });
     }
 }
