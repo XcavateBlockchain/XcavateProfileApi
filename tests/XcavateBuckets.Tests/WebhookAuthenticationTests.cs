@@ -14,6 +14,7 @@ public class WebhookAuthenticationTests
         yield return "/webhooks/offers_namespace_created_devnet";
         yield return "/webhooks/property_claim_started_devnet";
         yield return "/webhooks/spv_lawyer_elected_devnet";
+        yield return "/webhooks/developer_lawyer_assigned_devnet";
         yield return "/webhooks/deal_executed_devnet";
         yield return "/webhooks/letting_agent_appointed_devnet";
         yield return "/webhooks/shares_transferred_devnet";

@@ -63,6 +63,10 @@ public class BucketDbContext(DbContextOptions<BucketDbContext> options) : DbCont
             entity.HasKey(e => e.BucketId);
             entity.Property(e => e.BucketId).ValueGeneratedOnAdd();
             entity.HasIndex(e => e.NamespaceId);
+            entity.HasIndex(e => new { e.NamespaceId, e.Category, e.Name })
+                .IsUnique()
+                .HasDatabaseName("ux_buckets_lawyer_document_review")
+                .HasFilter("\"Category\" = 'lawyer-document-review'");
             if (propertiesColumnType is not null)
             {
                 entity.Property(e => e.Properties).HasColumnType(propertiesColumnType);

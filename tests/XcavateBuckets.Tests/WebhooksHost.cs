@@ -19,8 +19,9 @@ namespace XcavateBuckets.Tests;
 
 /// <summary>
 /// An in-process host running the real <see cref="WebhooksController"/> (and the notification
-/// webhooks controller) over the real bucket domain services and SQLite databases (bucket +
-/// profile stores) — the counterpart to <see cref="RestHost"/> and <see cref="GraphQLHost"/>. It
+/// webhooks controller) over the real bucket domain services and SQLite databases by default, or
+/// PostgreSQL for the concurrency integration test — the counterpart to <see cref="RestHost"/> and
+/// <see cref="GraphQLHost"/>. It
 /// covers the property-asset webhook, including its idempotent redelivery, without the docker
 /// stack the E2E suite needs. The shared webhook secret is injected as configuration when a test
 /// asks for it; test helpers present it through the same query parameter the indexer uses.
@@ -28,13 +29,13 @@ namespace XcavateBuckets.Tests;
 public sealed class WebhooksHost : IAsyncDisposable
 {
     private readonly IHost _host;
-    private readonly SqliteConnection _connection;
-    private readonly SqliteConnection _profileConnection;
+    private readonly SqliteConnection? _connection;
+    private readonly SqliteConnection? _profileConnection;
 
     private WebhooksHost(
         IHost host,
-        SqliteConnection connection,
-        SqliteConnection profileConnection,
+        SqliteConnection? connection,
+        SqliteConnection? profileConnection,
         HttpClient client,
         TestIndexerClient indexer,
         NotificationQueue? queue,
@@ -72,14 +73,20 @@ public sealed class WebhooksHost : IAsyncDisposable
     public static async Task<WebhooksHost> StartAsync(
         string? webhookSecret = null,
         bool pushConfigured = true,
-        string? bucketAdminAddress = DefaultBucketAdminAddress)
+        string? bucketAdminAddress = DefaultBucketAdminAddress,
+        string? postgresConnectionString = null,
+        Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor? bucketInterceptor = null)
     {
-        var connection = new SqliteConnection("DataSource=:memory:");
-        connection.Open();
-        // The profile store is a second context on its own in-memory database (the controller's
-        // wallet -> viewer-key resolution reads it).
-        var profileConnection = new SqliteConnection("DataSource=:memory:");
-        profileConnection.Open();
+        var usePostgres = !string.IsNullOrWhiteSpace(postgresConnectionString);
+        SqliteConnection? connection = null;
+        SqliteConnection? profileConnection = null;
+        if (!usePostgres)
+        {
+            connection = new SqliteConnection("DataSource=:memory:");
+            connection.Open();
+            profileConnection = new SqliteConnection("DataSource=:memory:");
+            profileConnection.Open();
+        }
 
         var indexer = new TestIndexerClient();
         var s3 = new StubS3Service();
@@ -111,8 +118,37 @@ public sealed class WebhooksHost : IAsyncDisposable
                     .AddControllers(options => options.SuppressAsyncSuffixInActionNames = false)
                     .AddApplicationPart(typeof(WebhooksController).Assembly);
 
-                services.AddDbContext<BucketDbContext>(o => o.UseSqlite(connection));
-                services.AddDbContext<ProfileDbContext>(o => o.UseSqlite(profileConnection));
+                services.AddDbContext<BucketDbContext>(o =>
+                {
+                    if (usePostgres)
+                    {
+                        o.UseNpgsql(postgresConnectionString, npgsql =>
+                            npgsql.MigrationsHistoryTable(BucketDbContext.MigrationsHistoryTable));
+                        if (bucketInterceptor is not null)
+                        {
+                            o.AddInterceptors(bucketInterceptor);
+                        }
+                    }
+                    else
+                    {
+                        o.UseSqlite(connection!);
+                        if (bucketInterceptor is not null)
+                        {
+                            o.AddInterceptors(bucketInterceptor);
+                        }
+                    }
+                });
+                services.AddDbContext<ProfileDbContext>(o =>
+                {
+                    if (usePostgres)
+                    {
+                        o.UseNpgsql(postgresConnectionString);
+                    }
+                    else
+                    {
+                        o.UseSqlite(profileConnection!);
+                    }
+                });
 
                 // The voting webhooks resolve vote state through this stub instead of the live
                 // indexer GraphQL.
@@ -142,10 +178,20 @@ public sealed class WebhooksHost : IAsyncDisposable
 
         using (var scope = host.Services.CreateScope())
         {
-            await scope.ServiceProvider.GetRequiredService<BucketDbContext>()
-                .Database.EnsureCreatedAsync();
-            await scope.ServiceProvider.GetRequiredService<ProfileDbContext>()
-                .Database.EnsureCreatedAsync();
+            if (usePostgres)
+            {
+                await scope.ServiceProvider.GetRequiredService<ProfileDbContext>()
+                    .Database.MigrateAsync();
+                await scope.ServiceProvider.GetRequiredService<BucketDbContext>()
+                    .Database.MigrateAsync();
+            }
+            else
+            {
+                await scope.ServiceProvider.GetRequiredService<BucketDbContext>()
+                    .Database.EnsureCreatedAsync();
+                await scope.ServiceProvider.GetRequiredService<ProfileDbContext>()
+                    .Database.EnsureCreatedAsync();
+            }
         }
 
         return new WebhooksHost(
@@ -236,7 +282,7 @@ public sealed class WebhooksHost : IAsyncDisposable
         Client.Dispose();
         await _host.StopAsync();
         _host.Dispose();
-        _connection.Dispose();
-        _profileConnection.Dispose();
+        _connection?.Dispose();
+        _profileConnection?.Dispose();
     }
 }

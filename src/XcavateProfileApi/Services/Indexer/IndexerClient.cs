@@ -15,6 +15,9 @@ public sealed class IndexerOptions
 /// <summary>A listing's SPV-lawyer election as the indexer mirrors it (marketplace <c>Listing</c>).</summary>
 public sealed record SpvElectionInfo(int Round, long Expiry, int CandidateCount, string SpvLawyer);
 
+/// <summary>The two lawyer wallets assigned to a marketplace listing.</summary>
+public sealed record ListingLawyersInfo(string SpvLawyer, string DeveloperLawyer);
+
 /// <summary>The property's letting seat as the indexer mirrors it (property <c>PropertyLetting</c>).</summary>
 public sealed record PropertyLettingInfo(
     string Agent, long ElectionExpiry, long ElectionRound, int ElectionQuorumBps, int GovernanceStrikes);
@@ -51,6 +54,9 @@ public interface IIndexerClient
 {
     /// <summary>The listing's SPV-lawyer election counters + assignment, or null if the listing is absent.</summary>
     Task<SpvElectionInfo?> GetListingSpvElectionAsync(long listingId, CancellationToken ct);
+
+    /// <summary>Both lawyer wallets assigned to the listing, or null if the listing is absent.</summary>
+    Task<ListingLawyersInfo?> GetListingLawyersAsync(long listingId, CancellationToken ct);
 
     /// <summary>The property's letting seat row, or null if absent.</summary>
     Task<PropertyLettingInfo?> GetPropertyLettingAsync(long assetId, CancellationToken ct);
@@ -137,6 +143,26 @@ public class IndexerClient(
                 LongOf(node.Value, "spvElectionExpiry"),
                 (int)LongOf(node.Value, "spvElectionCandidateCount"),
                 node.Value.GetProperty("spvLawyer").GetString() ?? string.Empty);
+    }
+
+    public async Task<ListingLawyersInfo?> GetListingLawyersAsync(long listingId, CancellationToken ct)
+    {
+        var nodes = await QueryAsync(
+            """
+            query($id: I64!) {
+              listings(listingId: $id, first: 1, offset: 0) {
+                nodes { spvLawyer developerLawyer }
+              }
+            }
+            """,
+            new { id = I64Var(listingId) }, "listings", ct);
+
+        var node = FirstNode(nodes);
+        return node is null
+            ? null
+            : new ListingLawyersInfo(
+                node.Value.GetProperty("spvLawyer").GetString() ?? string.Empty,
+                node.Value.GetProperty("developerLawyer").GetString() ?? string.Empty);
     }
 
     public async Task<PropertyLettingInfo?> GetPropertyLettingAsync(long assetId, CancellationToken ct)

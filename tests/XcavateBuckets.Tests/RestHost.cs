@@ -167,9 +167,15 @@ public sealed class StubS3Service : IS3Service
 
     public Exception? DownloadError { get; set; }
 
+    public Exception? UploadError { get; set; }
+
     public async Task<string> UploadImageAsync(
         string bucketName, string key, Stream content, string contentType)
     {
+        if (UploadError is not null)
+        {
+            throw UploadError;
+        }
         using var buffer = new MemoryStream();
         await content.CopyToAsync(buffer);
 

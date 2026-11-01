@@ -92,6 +92,7 @@ query GetBucketById($id: ID!) {
     namespaceId
     name
     category
+    properties
     isWritable
     encryptionKey
     namespace {

@@ -64,6 +64,11 @@ namespace XcavateBuckets.Domain.Migrations
 
                     b.HasIndex("NamespaceId");
 
+                    b.HasIndex("NamespaceId", "Category", "Name")
+                        .IsUnique()
+                        .HasDatabaseName("ux_buckets_lawyer_document_review")
+                        .HasFilter("\"Category\" = 'lawyer-document-review'");
+
                     b.ToTable("buckets", (string)null);
                 });
 

@@ -104,6 +104,15 @@ public class PackageContentsTests
             Does.Contain("CreateNamespace").And.Contain("GetBuckets"));
     }
 
+    [Test]
+    public void Get_bucket_by_id_selects_properties()
+    {
+        var properties = typeof(IGetBucketById_Bucket).GetProperty("Properties");
+
+        Assert.That(properties, Is.Not.Null);
+        Assert.That(properties!.PropertyType, Is.EqualTo(typeof(string)));
+    }
+
     /// <summary>
     /// The signing overloads that take a Substrate <c>Account</c> are gone; the
     /// <see cref="IRequestSigner"/> ones they delegated to are the whole API here.

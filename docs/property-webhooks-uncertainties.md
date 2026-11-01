@@ -170,7 +170,7 @@ Every indexer `*_WEBHOOK_URL` value must have this shape:
 Use a hex or base64url secret, or URL-encode the query value if it contains other characters. The
 indexer's delivery loop cannot set headers, so the URL is the credential. This applies to every
 route: `INIT_PROPERTY_ASSET_WEBHOOK_URL`, `PROPERTY_CLAIM_STARTED_WEBHOOK_URL`,
-`SPV_LAWYER_ELECTED_WEBHOOK_URL`, `DEAL_EXECUTED_WEBHOOK_URL`,
+`SPV_LAWYER_ELECTED_WEBHOOK_URL`, `DEVELOPER_LAWYER_ASSIGNED_WEBHOOK_URL`, `DEAL_EXECUTED_WEBHOOK_URL`,
 `LETTING_AGENT_APPOINTED_WEBHOOK_URL`, `SHARES_TRANSFERRED_WEBHOOK_URL`,
 `SPV_CASE_CLAIMED_WEBHOOK_URL`, `AGENT_ELECTION_OPENED_WEBHOOK_URL`,
 `PROPOSAL_CREATED_WEBHOOK_URL`, `PROPOSAL_FINALIZED_WEBHOOK_URL`,
@@ -299,7 +299,7 @@ lawyer's own bucket carries their terms discussion and document.
   `?secret=` query parameter.
 - **Operator admin.** `BUCKET_ADMIN_ADDRESS` is required (503 when blank) and is installed as both
   bucket admin and contributor, so the two requested messages are authored by that address. The
-  deployment workflow renders it from `HETZNER_BUCKET_ADMIN_ADDRESS`, and Compose passes it through
+  deployment workflow renders it from the `BUCKET_ADMIN_ADDRESS` environment secret, and Compose passes it through
   to the API. No admin viewer key is required unless the admin is itself a claimed-token holder.
 - **Participants.** Current positive `shareHoldings` wallets (not mere reservations) and the
   claiming lawyer are contributors, with their profile/migrated X25519 keys as viewers. A missing
@@ -323,3 +323,42 @@ lawyer's own bucket carries their terms discussion and document.
   bucket can commit before the voting call answers 404; the next delivery reuses it and finishes
   only the voting announcement. Different lawyers in one round get distinct buckets without
   duplicating that round's legacy announcement.
+
+## 11. Lawyer document-review buckets — IMPLEMENTED
+
+A ratified SPV election and a completed developer-lawyer assignment now ensure one
+`lawyer-document-review` bucket per property namespace. The new authenticated route is
+`POST /webhooks/developer_lawyer_assigned_devnet`, configured through the Indexer's
+`DEVELOPER_LAWYER_ASSIGNED_WEBHOOK_URL`; the existing `spv_lawyer_elected` route invokes the same
+ensure operation when it arrives after the assignment. Either event can therefore arrive first. The
+SPV route preserves its legacy 200 response while the developer seat is empty because the developer
+event supplies the later trigger.
+
+- **Resolved pair and namespace.** Both wallet seats come from the Indexer `listings` connection
+  through `GetListingLawyersAsync`; empty and all-zero seats are not ready. The developer route
+  answers 404 until the pair and property namespace exist, and 502 on Indexer resolution failures.
+  `INDEXER_GRAPHQL_URL` is rendered by the deploy workflow (with the devnet default) and passed
+  explicitly by Compose.
+- **Property and cluster metadata.** Both lawyer triggers accept additive `property_id` and `cluster`
+  fields. New values must keep `property_id` equal to `listing_id` and use exactly `devnet` or
+  `mainnet`. Bucket properties retain `listing_id` and add its same invariant-culture decimal as
+  `property_id`, plus the trigger's exact cluster. Legacy payloads may omit both fields. Redelivery
+  additively fills only missing metadata keys, preserving all other properties, the original key,
+  and the four initial messages; concurrent redeliveries converge on the same values. Both generated
+  bucket clients select `properties` from `GetBucketById`.
+- **Membership.** `BUCKET_ADMIN_ADDRESS` is the bucket admin and contributor. Current positive
+  claimed `shareHoldings` wallets have only their X25519 keys added as viewers; the two lawyers are
+  contributors and their X25519 keys are viewers. Duplicate wallets/keys stay idempotent, and a
+  missing required key answers 404 before any bucket write. The deployment workflow sources the
+  admin from the `BUCKET_ADMIN_ADDRESS` environment secret.
+- **Encryption and messages.** A fresh X25519 keypair unlocks the bucket immediately. The admin
+  writes the key-sharing message, then the exact review prompt, then the SPV and developer documents
+  in that order. Available PDFs are snapshotted by listing/role under
+  `terms-documents/by-listing/{listingId}/{spv-lawyer|developer-lawyer}.pdf` and use the existing
+  `lawyer/terms-document` tag. An absent document row produces the exact requested plaintext
+  fallback instead of blocking the bucket; S3 failures for an existing document answer 502.
+- **Idempotency and concurrency.** The deterministic name `<namespace> - Lawyer document review`
+  (256-character maximum), category, and namespace identify the bucket. A partial unique PostgreSQL
+  index enforces that identity for this category; a conflicting request rolls back and returns the
+  committed bucket. All bucket/membership/key/message writes share one transaction. Redelivery,
+  overlapping triggers, and the second trigger retain the original key and four messages.

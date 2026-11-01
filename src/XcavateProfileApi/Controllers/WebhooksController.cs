@@ -408,7 +408,8 @@ public class WebhooksController : ControllerBase
     {
         if (payload is null
             || !string.Equals(payload.Event, LawyerElectedEventName, StringComparison.Ordinal)
-            || payload.ListingId is null)
+            || payload.ListingId is null
+            || !ValidLawyerReviewMetadata(payload.ListingId, payload.PropertyId, payload.Cluster))
         {
             return BadRequest("The body is not a valid 'spv_lawyer_elected' webhook payload.");
         }
@@ -510,7 +511,80 @@ public class WebhooksController : ControllerBase
         }
         await transaction.CommitAsync(ct);
 
-        return WithMembershipCounts(result, lawyerContributorAdded, holdersAdded, holdersSkipped);
+        var membershipResult = WithMembershipCounts(
+            result, lawyerContributorAdded, holdersAdded, holdersSkipped);
+        var lawyerPair = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetListingLawyersAsync(payload.ListingId.Value, c),
+            allowMissing: true,
+            what: "the listing lawyer assignments");
+        if (lawyerPair.Failed)
+        {
+            return lawyerPair.Failure!;
+        }
+        if (!LawyerSeatsAssigned(lawyerPair.Value))
+        {
+            return membershipResult;
+        }
+
+        var review = await EnsureLawyerReviewBucketAsync(
+            payload.ListingId.Value,
+            payload.Listing,
+            payload.Property,
+            payload.TxSignature,
+            payload.Program,
+            payload.Cluster,
+            ct);
+        if (review.Failure is not null)
+        {
+            return review.Failure;
+        }
+        return WithLawyerReviewSetup(
+            membershipResult, review.BucketId, review.Created, review.HolderCount);
+    }
+
+    /// <summary>
+    /// Receives the <c>developer_lawyer_assigned</c> event and ensures the property's encrypted
+    /// lawyer document-review bucket once both lawyer seats are filled.
+    /// </summary>
+    // POST: webhooks/developer_lawyer_assigned_devnet
+    [HttpPost("developer_lawyer_assigned_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> DeveloperLawyerAssignedDevnet(
+        [FromBody] DeveloperLawyerAssignedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, DeveloperLawyerAssignedEventName, StringComparison.Ordinal)
+            || payload.ListingId is null
+            || !ValidLawyerReviewMetadata(payload.ListingId, payload.PropertyId, payload.Cluster)
+            || string.IsNullOrWhiteSpace(payload.DeveloperLawyer)
+            || payload.DeveloperLawyer.Length > 128)
+        {
+            return BadRequest("The body is not a valid 'developer_lawyer_assigned' webhook payload.");
+        }
+
+        var review = await EnsureLawyerReviewBucketAsync(
+            payload.ListingId.Value,
+            payload.Listing,
+            payload.Property,
+            payload.TxSignature,
+            payload.Program,
+            payload.Cluster,
+            ct);
+        if (review.Failure is not null)
+        {
+            return review.Failure;
+        }
+
+        return WithLawyerReviewSetup(
+            Ok(new { status = review.Created ? "created" : "ignored" }),
+            review.BucketId,
+            review.Created,
+            review.HolderCount);
     }
 
     /// <summary>
@@ -1143,6 +1217,365 @@ public class WebhooksController : ControllerBase
         return baseName + suffix;
     }
 
+    private static bool LawyerSeatsAssigned(ListingLawyersInfo? lawyers) =>
+        lawyers is not null
+        && !string.IsNullOrWhiteSpace(lawyers.SpvLawyer)
+        && lawyers.SpvLawyer != SystemDefaultPubkey
+        && !string.IsNullOrWhiteSpace(lawyers.DeveloperLawyer)
+        && lawyers.DeveloperLawyer != SystemDefaultPubkey;
+
+    private static bool ValidLawyerReviewMetadata(long? listingId, long? propertyId, string? cluster) =>
+        (propertyId is null || propertyId == listingId)
+        && (cluster is null || cluster is "devnet" or "mainnet");
+
+    private async Task<(IActionResult? Failure, long? BucketId, bool Created, int? HolderCount)>
+        EnsureLawyerReviewBucketAsync(
+            long listingId,
+            string? listing,
+            string? property,
+            string? txSignature,
+            string? program,
+            string? cluster,
+            CancellationToken ct)
+    {
+        var admin = _config[BucketAdminAddressConfigKey]?.Trim();
+        if (string.IsNullOrWhiteSpace(admin))
+        {
+            return (StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                $"The bucket admin address ({BucketAdminAddressConfigKey}) is not configured."),
+                null, false, null);
+        }
+
+        var ns = await FindNamespaceAsync(listingId, property, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        {
+            return (NotFound("No webhook-created namespace matches this property yet."),
+                null, false, null);
+        }
+
+        var name = LawyerReviewBucketName(ns);
+        var existing = await _db.Buckets.FirstOrDefaultAsync(
+            bucket => bucket.NamespaceId == ns.NamespaceId
+                && bucket.Category == LawyerReviewBucketCategory
+                && bucket.Name == name,
+            ct);
+        if (existing is not null)
+        {
+            await BackfillLawyerReviewMetadataAsync(existing, listingId, cluster, ct);
+            return (null, existing.BucketId, false, null);
+        }
+
+        var lawyerResolve = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetListingLawyersAsync(listingId, c),
+            allowMissing: true,
+            what: "the listing lawyer assignments");
+        if (lawyerResolve.Failed)
+        {
+            return (lawyerResolve.Failure, null, false, null);
+        }
+        var lawyers = lawyerResolve.Value;
+        if (!LawyerSeatsAssigned(lawyers))
+        {
+            return (NotFound("Both lawyer seats must be assigned before the review bucket can be created."),
+                null, false, null);
+        }
+
+        var holderResolve = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetShareHolderWalletsAsync(listingId, c),
+            what: "claimed property token holders");
+        if (holderResolve.Failed)
+        {
+            return (holderResolve.Failure, null, false, null);
+        }
+        var holders = holderResolve.Value!
+            .Where(wallet => !string.IsNullOrWhiteSpace(wallet))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(wallet => wallet, StringComparer.Ordinal)
+            .ToList();
+
+        var viewers = new List<KeyValuePair<string, string>>();
+        foreach (var wallet in holders
+                     .Append(lawyers!.SpvLawyer)
+                     .Append(lawyers.DeveloperLawyer)
+                     .Distinct(StringComparer.Ordinal))
+        {
+            var key = await ResolveViewerKeyAsync(wallet, ct);
+            if (key is null)
+            {
+                return (NotFound($"No profile X25519 key for required participant '{wallet}'."),
+                    null, false, null);
+            }
+            viewers.Add(new(wallet, key));
+        }
+
+        var spvDocument = await PrepareLawyerReviewDocumentAsync(
+            listingId,
+            "spv-lawyer",
+            lawyers.SpvLawyer,
+            SpvReviewDocumentFallback,
+            $"lawyer-review/{listingId}/spv-document-missing",
+            ct);
+        if (spvDocument.Failure is not null)
+        {
+            return (spvDocument.Failure, null, false, null);
+        }
+        var developerDocument = await PrepareLawyerReviewDocumentAsync(
+            listingId,
+            "developer-lawyer",
+            lawyers.DeveloperLawyer,
+            DeveloperReviewDocumentFallback,
+            $"lawyer-review/{listingId}/developer-document-missing",
+            ct);
+        if (developerDocument.Failure is not null)
+        {
+            return (developerDocument.Failure, null, false, null);
+        }
+
+        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(admin, viewers);
+        var properties = new List<KeyValuePair<string, string>>
+        {
+            new("kind", "lawyer_document_review"),
+            new("listing_id", listingId.ToString(CultureInfo.InvariantCulture)),
+            new("property_id", listingId.ToString(CultureInfo.InvariantCulture)),
+            new("spv_lawyer", lawyers.SpvLawyer),
+            new("developer_lawyer", lawyers.DeveloperLawyer),
+            new("listing", listing ?? string.Empty),
+            new("property", property ?? string.Empty),
+            new("tx_signature", txSignature ?? string.Empty),
+            new("program", program ?? string.Empty)
+        };
+        if (cluster is not null)
+        {
+            properties.Add(new("cluster", cluster));
+        }
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        try
+        {
+            var bucket = await _buckets.CreateAsync(
+                ns.Creator!,
+                ns.NamespaceId,
+                name,
+                LawyerReviewBucketCategory,
+                properties,
+                ct);
+            await _memberships.AddAdminAsync(ns.Creator!, ns.NamespaceId, bucket.BucketId, admin, ct);
+            await _memberships.AddContributorAsync(admin, ns.NamespaceId, bucket.BucketId, admin, ct);
+            foreach (var lawyer in new[] { lawyers.SpvLawyer, lawyers.DeveloperLawyer }
+                         .Distinct(StringComparer.Ordinal))
+            {
+                await _memberships.AddContributorAsync(
+                    admin, ns.NamespaceId, bucket.BucketId, lawyer, ct);
+            }
+            foreach (var viewer in viewers)
+            {
+                await _memberships.AddViewerAsync(
+                    admin, ns.NamespaceId, bucket.BucketId, viewer.Value, ct);
+            }
+
+            await _buckets.ResumeWritingAsync(
+                admin, ns.NamespaceId, bucket.BucketId, keySharing.PublicKeyHex, ct);
+            await _messages.WriteAsync(
+                admin,
+                ns.NamespaceId,
+                bucket.BucketId,
+                new MessageWriteRequest(
+                    keySharing.Reference,
+                    LawyerTermsBucketProtocol.KeySharingTag,
+                    keySharing.Body,
+                    "Lawyer review bucket encryption key",
+                    LawyerTermsBucketProtocol.KeySharingContentType,
+                    keySharing.ContentHash,
+                    null),
+                ct);
+            await _messages.WriteAsync(
+                admin,
+                ns.NamespaceId,
+                bucket.BucketId,
+                new MessageWriteRequest(
+                    $"lawyer-review/{listingId}/prompt",
+                    LawyerReviewPromptTag,
+                    LawyerReviewPrompt,
+                    "Review both lawyers' terms documents",
+                    "text/plain",
+                    LawyerTermsBucketProtocol.ContentHash(LawyerReviewPrompt),
+                    null),
+                ct);
+            await _messages.WriteAsync(
+                admin, ns.NamespaceId, bucket.BucketId, spvDocument.Message!, ct);
+            await _messages.WriteAsync(
+                admin, ns.NamespaceId, bucket.BucketId, developerDocument.Message!, ct);
+            await transaction.CommitAsync(ct);
+
+            return (null, bucket.BucketId, true, holders.Count);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException
+                   {
+                       SqlState: Npgsql.PostgresErrorCodes.UniqueViolation,
+                       ConstraintName: "ux_buckets_lawyer_document_review"
+                   })
+        {
+            await transaction.RollbackAsync(ct);
+            var committed = await _db.Buckets.FirstOrDefaultAsync(
+                bucket => bucket.NamespaceId == ns.NamespaceId
+                    && bucket.Category == LawyerReviewBucketCategory
+                    && bucket.Name == name,
+                ct);
+            if (committed is not null)
+            {
+                await BackfillLawyerReviewMetadataAsync(committed, listingId, cluster, ct);
+                return (null, committed.BucketId, false, null);
+            }
+            throw;
+        }
+    }
+
+    private async Task BackfillLawyerReviewMetadataAsync(
+        Bucket bucket, long listingId, string? cluster, CancellationToken ct)
+    {
+        var propertyId = listingId.ToString(CultureInfo.InvariantCulture);
+        if (_db.Database.IsNpgsql())
+        {
+            await _db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "buckets"
+                SET "Properties" = COALESCE("Properties", jsonb_build_object())
+                    || CASE
+                        WHEN jsonb_typeof(COALESCE("Properties", jsonb_build_object()) -> 'property_id') IS NULL
+                        THEN jsonb_build_object('property_id', {propertyId})
+                        ELSE jsonb_build_object()
+                    END
+                    || CASE
+                        WHEN {cluster} IS NOT NULL
+                            AND jsonb_typeof(COALESCE("Properties", jsonb_build_object()) -> 'cluster') IS NULL
+                        THEN jsonb_build_object('cluster', {cluster})
+                        ELSE jsonb_build_object()
+                    END
+                WHERE "BucketId" = {bucket.BucketId}
+                """, ct);
+        }
+        else
+        {
+            await _db.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "buckets"
+                SET "Properties" = json_patch(
+                    COALESCE("Properties", json_object()),
+                    json_patch(
+                        CASE
+                            WHEN json_extract(COALESCE("Properties", json_object()), '$.property_id') IS NULL
+                            THEN json_object('property_id', {propertyId})
+                            ELSE json_object()
+                        END,
+                        CASE
+                            WHEN {cluster} IS NOT NULL
+                                AND json_extract(COALESCE("Properties", json_object()), '$.cluster') IS NULL
+                            THEN json_object('cluster', {cluster})
+                            ELSE json_object()
+                        END))
+                WHERE "BucketId" = {bucket.BucketId}
+                """, ct);
+        }
+    }
+
+    private async Task<(IActionResult? Failure, MessageWriteRequest? Message)>
+        PrepareLawyerReviewDocumentAsync(
+            long listingId,
+            string role,
+            string wallet,
+            string fallback,
+            string fallbackReference,
+            CancellationToken ct)
+    {
+        var document = await _profileDb.LawyerTermsDocuments.AsNoTracking()
+            .FirstOrDefaultAsync(row => row.Ss58Address == wallet, ct);
+        if (document is null)
+        {
+            return (null, new MessageWriteRequest(
+                fallbackReference,
+                LawyerReviewDocumentMissingTag,
+                fallback,
+                fallback,
+                "text/plain",
+                LawyerTermsBucketProtocol.ContentHash(fallback),
+                null));
+        }
+
+        byte[] pdf;
+        try
+        {
+            pdf = await _s3.DownloadObjectAsync(
+                TermsDocumentController.Bucket,
+                TermsDocumentController.ObjectKey(wallet),
+                ct);
+        }
+        catch (Amazon.S3.AmazonS3Exception ex)
+        {
+            return (StatusCode(
+                StatusCodes.Status502BadGateway,
+                $"Could not download the {role} terms PDF: {ex.Message}"), null);
+        }
+
+        string snapshotUrl;
+        try
+        {
+            using var content = new MemoryStream(pdf, writable: false);
+            snapshotUrl = await _s3.UploadImageAsync(
+                TermsDocumentController.Bucket,
+                TermsDocumentController.ReviewSnapshotObjectKey(listingId, role),
+                content,
+                document.ContentType);
+        }
+        catch (Amazon.S3.AmazonS3Exception ex)
+        {
+            return (StatusCode(
+                StatusCodes.Status502BadGateway,
+                $"Could not snapshot the {role} terms PDF: {ex.Message}"), null);
+        }
+
+        return (null, new MessageWriteRequest(
+            snapshotUrl,
+            LawyerTermsBucketProtocol.DocumentTag,
+            null,
+            document.FileName,
+            document.ContentType,
+            LawyerTermsBucketProtocol.ContentHash(pdf),
+            null));
+    }
+
+    private static string LawyerReviewBucketName(Namespace ns)
+    {
+        var baseName = string.IsNullOrWhiteSpace(ns.Name) ? $"namespace {ns.NamespaceId}" : ns.Name!;
+        const string suffix = " - Lawyer document review";
+        if (baseName.Length + suffix.Length > MaxBucketNameLen)
+        {
+            baseName = baseName[..(MaxBucketNameLen - suffix.Length)];
+        }
+        return baseName + suffix;
+    }
+
+    private static IActionResult WithLawyerReviewSetup(
+        IActionResult result, long? bucketId, bool created, int? holderCount)
+    {
+        if (result is not OkObjectResult ok)
+        {
+            return result;
+        }
+
+        var body = JsonSerializer.SerializeToNode(ok.Value)!.AsObject();
+        if (bucketId is not null)
+        {
+            body["lawyerReviewBucketId"] = bucketId;
+        }
+        body["lawyerReviewBucketCreated"] = created;
+        if (holderCount is not null)
+        {
+            body["lawyerReviewHolderCount"] = holderCount;
+        }
+        return new OkObjectResult(body);
+    }
+
     /// <summary>
     /// Receives the <c>agent_election_opened</c> event (a letting agent stood for the property's
     /// seat election — the indexer fires it per candidacy) and posts a <c>voting/election</c> open
@@ -1650,6 +2083,7 @@ public class WebhooksController : ControllerBase
     private const string EventName = "property_asset_registered";
     private const string ClaimStartedEventName = "property_claim_started";
     private const string LawyerElectedEventName = "spv_lawyer_elected";
+    private const string DeveloperLawyerAssignedEventName = "developer_lawyer_assigned";
     private const string DealExecutedEventName = "deal_executed";
     private const string AgentAppointedEventName = "letting_agent_appointed";
     private const string SharesTransferredEventName = "property_shares_transferred";
@@ -1671,6 +2105,15 @@ public class WebhooksController : ControllerBase
     private const string LegalBucketCategory = "legal-process";
 
     private const string LawyerTermsBucketCategory = "spv-lawyer-terms";
+    private const string LawyerReviewBucketCategory = "lawyer-document-review";
+    private const string LawyerReviewPromptTag = "lawyer/document-review";
+    private const string LawyerReviewDocumentMissingTag = "lawyer/terms-document-missing";
+    private const string LawyerReviewPrompt =
+        "The SPV Lawyer and Developer Lawyer must now review each other's documents and finalize the terms. Please feel free to discuss any questions here.";
+    private const string SpvReviewDocumentFallback =
+        "SPV Lawyer's terms document is not available. Please send it here.";
+    private const string DeveloperReviewDocumentFallback =
+        "Developer Lawyer's terms document is not available. Please send it here.";
 
     /// <summary>The tags the voting announcements are posted under (open per kind, one result tag).</summary>
     private const string TermsVotingTag = "voting/terms";
@@ -1811,6 +2254,14 @@ public sealed class SpvLawyerElectedPayload
     [JsonPropertyName("listing_id")]
     public long? ListingId { get; set; }
 
+    /// <summary>The numeric property id; additive and equal to listing_id when supplied.</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The exact Solana cluster; null only for legacy deliveries.</summary>
+    [JsonPropertyName("cluster")]
+    public string? Cluster { get; set; }
+
     /// <summary>The base58 Listing PDA.</summary>
     [JsonPropertyName("listing")]
     public string? Listing { get; set; }
@@ -1828,6 +2279,61 @@ public sealed class SpvLawyerElectedPayload
     public string? WinnerRegistry { get; set; }
 
     /// <summary>The slot the election finalized in.</summary>
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    /// <summary>The base58 transaction signature.</summary>
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    /// <summary>The block time, ISO-8601.</summary>
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>
+/// The <c>developer_lawyer_assigned</c> webhook payload (marketplace
+/// <c>assign_developer_lawyer</c>). Field names are the indexer's snake_case wire names.
+/// </summary>
+public sealed class DeveloperLawyerAssignedPayload
+{
+    /// <summary>Always <c>developer_lawyer_assigned</c>.</summary>
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    /// <summary>The on-chain listing id (the namespace's PropertyId).</summary>
+    [JsonPropertyName("listing_id")]
+    public long? ListingId { get; set; }
+
+    /// <summary>The numeric property id; additive and equal to listing_id when supplied.</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The exact Solana cluster; null only for legacy deliveries.</summary>
+    [JsonPropertyName("cluster")]
+    public string? Cluster { get; set; }
+
+    /// <summary>The developer lawyer's base58 wallet from the instruction arguments.</summary>
+    [JsonPropertyName("developer_lawyer")]
+    public string? DeveloperLawyer { get; set; }
+
+    /// <summary>The developer lawyer's base58 registry PDA.</summary>
+    [JsonPropertyName("developer_lawyer_registry")]
+    public string? DeveloperLawyerRegistry { get; set; }
+
+    /// <summary>The base58 Listing PDA.</summary>
+    [JsonPropertyName("listing")]
+    public string? Listing { get; set; }
+
+    /// <summary>The base58 PropertyAsset PDA (the namespace's creator).</summary>
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    /// <summary>The slot the assignment landed in.</summary>
     [JsonPropertyName("slot")]
     public long Slot { get; set; }
 

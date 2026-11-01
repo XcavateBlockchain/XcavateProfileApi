@@ -31,6 +31,9 @@ public class TermsDocumentController : ControllerBase
     internal static string SnapshotObjectKey(string candidacy) =>
         $"terms-documents/by-candidacy/{candidacy}.pdf";
 
+    internal static string ReviewSnapshotObjectKey(long listingId, string role) =>
+        $"terms-documents/by-listing/{listingId}/{role}.pdf";
+
     private const string PdfExtension = ".pdf";
     private const string PdfContentType = "application/pdf";
 

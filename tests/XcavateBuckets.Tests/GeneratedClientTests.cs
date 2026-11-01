@@ -108,7 +108,17 @@ public class GeneratedClientTests
         var namespaceId = ns.Data!.CreateNamespace.NamespaceId;
 
         var bucket = await client.CreateBucket.ExecuteAsync(
-            namespaceId, new BucketMetadataInput { Name = "titles", Category = "legal" });
+            namespaceId,
+            new BucketMetadataInput
+            {
+                Name = "titles",
+                Category = "legal",
+                Properties = new List<PropertyInput>
+                {
+                    new() { Key = "property_id", Value = "12" },
+                    new() { Key = "cluster", Value = "mainnet" }
+                }
+            });
         bucket.EnsureNoErrors();
         var bucketId = bucket.Data!.CreateBucket.BucketId;
 
@@ -152,6 +162,8 @@ public class GeneratedClientTests
         Assert.Multiple(() =>
         {
             Assert.That(readBucket.EncryptionKey, Is.EqualTo(TestDb.Key32));
+            Assert.That(readBucket.GetType().GetProperty("Properties")?.GetValue(readBucket),
+                Is.EqualTo("""{"cluster":"mainnet","property_id":"12"}"""));
             Assert.That(readBucket.Namespace, Is.Not.Null);
             Assert.That(readBucket.Namespace!.Name, Is.EqualTo("deeds"));
             Assert.That(readBucket.Messages, Has.Count.EqualTo(1));
