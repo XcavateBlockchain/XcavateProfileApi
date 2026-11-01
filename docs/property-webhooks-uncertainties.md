@@ -299,7 +299,7 @@ lawyer's own bucket carries their terms discussion and document.
   `?secret=` query parameter.
 - **Operator admin.** `BUCKET_ADMIN_ADDRESS` is required (503 when blank) and is installed as both
   bucket admin and contributor, so the two requested messages are authored by that address. The
-  deployment workflow renders it from `HETZNER_BUCKET_ADMIN_ADDRESS`, and Compose passes it through
+  deployment workflow renders it from `BUCKET_ADMIN_ADDRESS`, and Compose passes it through
   to the API. No admin viewer key is required unless the admin is itself a claimed-token holder.
 - **Participants.** Current positive `shareHoldings` wallets (not mere reservations) and the
   claiming lawyer are contributors, with their profile/migrated X25519 keys stored as canonical
