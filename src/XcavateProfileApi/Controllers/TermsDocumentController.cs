@@ -72,6 +72,15 @@ public class TermsDocumentController : ControllerBase
         return Ok(ToResponse(document));
     }
 
+    [HttpGet("~/api/terms-documents/by-candidacy/{candidacy}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<IActionResult> DownloadSnapshotAsync(string candidacy, CancellationToken cancellationToken)
+    {
+        var payload = await _s3Service.DownloadObjectAsync(
+            Bucket, SnapshotObjectKey(candidacy), cancellationToken);
+        return File(payload, LawyerTermsBucketProtocol.KeySharingContentType);
+    }
+
     /// <summary>
     /// Uploads (or replaces) the wallet's terms document (multipart PDF, up to 25 MB). Requires a
     /// signed request from the owner or an admin; like the image upload, the signature covers an

@@ -111,7 +111,8 @@ public sealed class WebhooksHost : IAsyncDisposable
         string? bucketAdminAddress = DefaultBucketAdminAddress,
         string? bucketAdminX25519Key = null,
         string? postgresConnectionString = null,
-        Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor? bucketInterceptor = null)
+        Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor? bucketInterceptor = null,
+        string? profileApiPublicUrl = null)
     {
         bucketAdminX25519Key ??= DefaultBucketAdminX25519Key;
         var usePostgres = !string.IsNullOrWhiteSpace(postgresConnectionString);
@@ -148,6 +149,10 @@ public sealed class WebhooksHost : IAsyncDisposable
                 if (bucketAdminX25519Key is not null)
                 {
                     values["BUCKET_ADMIN_X25519_KEY"] = bucketAdminX25519Key;
+                }
+                if (profileApiPublicUrl is not null)
+                {
+                    values["PROFILE_API_PUBLIC_URL"] = profileApiPublicUrl;
                 }
                 config.AddInMemoryCollection(values);
             });
@@ -195,6 +200,11 @@ public sealed class WebhooksHost : IAsyncDisposable
                 // indexer GraphQL.
                 services.AddSingleton<IIndexerClient>(indexer);
                 services.AddSingleton<XcavateProfileApi.Services.IS3Service>(s3);
+                services.AddSingleton(new List<string>());
+                services.AddScoped<XcavateProfileApi.Middleware.SignatureValidationOptions>();
+                services.AddScoped<
+                    XcavateProfileApi.Middleware.ISignatureValidator,
+                    XcavateProfileApi.Middleware.SignatureValidator>();
 
                 // Program.cs registers the queue only with NOTIFICATIONS_API_KEY; the
                 // notification webhooks resolve it per request, so its absence is the

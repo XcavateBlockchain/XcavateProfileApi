@@ -322,11 +322,14 @@ lawyer's own bucket carries their terms discussion and document.
   and rewriting the prompt and snapshot in place.
 - **PDF delivery.** Bucket messages cannot inline the 25 MB terms PDF, so its bytes are encrypted
   as compact JWE and snapshotted to `terms-documents/by-candidacy/{candidacy}.pdf`. The message
-  references that encrypted per-candidacy object with `application/pdf`, the original filename in
-  the protected header, null `IpfsContent` (the client fetches the object), and SHA-256 of the
-  encrypted payload. Later re-uploads of the lawyer's current document cannot change the snapshot
-  voters received. Missing documents answer 404, and object-storage failures answer 502, before any
-  bucket is written.
+  references `/api/terms-documents/by-candidacy/{candidacy}` on the CORS-enabled Profile API, using
+  the configured `PROFILE_API_PUBLIC_URL` origin (the request origin is only a local fallback). The
+  endpoint serves the encrypted object with message metadata `application/pdf`, the original
+  filename in the protected header, null `IpfsContent`, and SHA-256 of the encrypted payload. Later
+  re-uploads of the lawyer's current document cannot change the snapshot voters received. Missing
+  documents answer 404, and object-storage failures answer 502, before any bucket is written.
+  Redelivery migrates old S3 references even when the prompt is already encrypted, without changing
+  the prompt, keys, or message count.
 - **Retry semantics.** Bucket lookup by namespace/category/deterministic name makes redelivery
   reuse the bucket, key, and three messages. A per-candidacy PostgreSQL advisory lock serializes
   lookup, key generation, snapshot upload, and message commit, so concurrent first deliveries cannot
