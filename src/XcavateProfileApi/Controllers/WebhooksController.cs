@@ -1136,6 +1136,26 @@ public class WebhooksController : ControllerBase
             return BadRequest("The body is not a valid 'spv_lawyer_vote_cast' webhook payload.");
         }
 
+        var reference = $"lawyer-terms/{payload.Candidacy}/approved/"
+            + $"{payload.TxSignature}:{payload.InstructionPath}";
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        if (_db.Database.IsNpgsql())
+        {
+            await _db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtext({0}))", new[] { (object)reference }, ct);
+        }
+
+        var duplicateId = await _db.Messages
+            .Where(message => message.Reference == reference
+                && message.Tag == LawyerTermsApprovedTag
+                && message.Contributor == payload.Voter)
+            .Select(message => (long?)message.BucketId)
+            .FirstOrDefaultAsync(ct);
+        if (duplicateId is not null)
+        {
+            return Ok(new { status = "ignored", reason = "this vote was already posted", bucketId = duplicateId });
+        }
+
         var admin = _config[BucketAdminAddressConfigKey]?.Trim();
         if (string.IsNullOrWhiteSpace(admin))
         {
@@ -1170,8 +1190,6 @@ public class WebhooksController : ControllerBase
             return NotFound(new { status = "not_found", reason = "candidacy terms bucket is not ready" });
         }
 
-        var reference = $"lawyer-terms/{payload.Candidacy}/approved/"
-            + $"{payload.TxSignature}:{payload.InstructionPath}";
         var keySharing = await _db.Messages
             .OrderByDescending(message => message.MessageId)
             .FirstOrDefaultAsync(
@@ -1198,20 +1216,6 @@ public class WebhooksController : ControllerBase
             return StatusCode(
                 StatusCodes.Status503ServiceUnavailable,
                 "The bucket admin cannot decrypt the terms bucket key.");
-        }
-
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        if (_db.Database.IsNpgsql())
-        {
-            await _db.Database.ExecuteSqlRawAsync(
-                "SELECT pg_advisory_xact_lock(hashtext({0}))", new[] { (object)reference }, ct);
-        }
-
-        if (await _db.Messages.AnyAsync(
-                message => message.BucketId == bucket.BucketId && message.Reference == reference,
-                ct))
-        {
-            return Ok(new { status = "ignored", reason = "this vote was already posted", bucketId = bucket.BucketId });
         }
 
         await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, admin, ct);

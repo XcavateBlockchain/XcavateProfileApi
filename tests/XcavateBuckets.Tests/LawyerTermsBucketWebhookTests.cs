@@ -222,6 +222,36 @@ public class LawyerTermsBucketWebhookTests
         await host.WithDbAsync(async db => await db.Messages.SingleAsync(message =>
             message.BucketId == bucketId && message.Tag == "lawyer/terms-approved"));
 
+    private static async Task AddMessageAsync(
+        WebhooksHost host,
+        long bucketId,
+        string reference,
+        string tag,
+        string contributor,
+        string content)
+    {
+        await host.WithDbAsync(async db =>
+        {
+            var bucket = await db.Buckets.SingleAsync(row => row.BucketId == bucketId);
+            db.Messages.Add(new Message
+            {
+                BucketId = bucketId,
+                MessageId = bucket.NextMessageId,
+                Contributor = contributor,
+                Reference = reference,
+                Tag = tag,
+                Description = "Test message",
+                ContentType = "text/plain",
+                ContentHash = LawyerTermsBucketProtocol.ContentHash(content),
+                IpfsContent = content,
+                CreatedAt = DateTime.UtcNow
+            });
+            bucket.NextMessageId++;
+            await db.SaveChangesAsync();
+            return true;
+        });
+    }
+
     [Test]
     public async Task Spv_lawyer_vote_posts_encrypted_approved_terms_as_the_voter()
     {
@@ -306,6 +336,66 @@ public class LawyerTermsBucketWebhookTests
                 $"lawyer-terms/{Candidacy}/approved/{VoteTx}:0",
                 $"lawyer-terms/{Candidacy}/approved/{VoteTx}:1"
             }));
+        });
+    }
+
+    [Test]
+    public async Task Spv_lawyer_vote_redelivery_is_acknowledged_before_current_key_access_is_required()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedTermsBucketAsync(host);
+        await PostVoteAsync(host);
+        await AddMessageAsync(
+            host, bucketId, "key-sharing:broken", "didcomm/key-sharing-v1",
+            WebhooksHost.DefaultBucketAdminAddress, "not-a-key-sharing-document");
+
+        var (status, body) = await PostVoteAsync(host);
+        var state = await host.WithDbAsync(async db => new
+        {
+            Messages = await db.Messages.CountAsync(message =>
+                message.BucketId == bucketId && message.Tag == "lawyer/terms-approved"),
+            TagCount = await db.TagMessageCounts.Where(row =>
+                row.BucketId == bucketId && row.TagName == "lawyer/terms-approved")
+                .Select(row => row.Count)
+                .SingleAsync()
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("ignored"));
+            Assert.That(state.Messages, Is.EqualTo(1));
+            Assert.That(state.TagCount, Is.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public async Task Spv_lawyer_vote_reference_collision_does_not_suppress_the_genuine_approval()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedTermsBucketAsync(host);
+        var reference = $"lawyer-terms/{Candidacy}/approved/{VoteTx}:0";
+        await AddMessageAsync(host, bucketId, reference, "lawyer/other", "OtherContributor", "collision");
+
+        var (status, body) = await PostVoteAsync(host);
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("posted"));
+        });
+
+        var message = await ApprovalMessageAsync(host, bucketId);
+        var key = await BucketKeyAsync(host, bucketId);
+        var plaintext = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+            message.IpfsContent!, key.PrivateKey, key.Kid);
+        var collidingMessageCount = await host.WithDbAsync(async db => await db.Messages
+            .CountAsync(row => row.BucketId == bucketId && row.Reference == reference));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Encoding.UTF8.GetString(plaintext), Is.EqualTo("Approved terms"));
+            Assert.That(message.Contributor, Is.EqualTo(Voter));
+            Assert.That(collidingMessageCount, Is.EqualTo(2));
         });
     }
 
