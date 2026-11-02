@@ -1105,6 +1105,162 @@ public class WebhooksController : ControllerBase
             votingResult, setup.BucketId!.Value, setup.Created, setup.HolderCount);
     }
 
+    /// <summary>
+    /// Receives <c>spv_lawyer_vote_cast</c> and writes the exact encrypted message
+    /// <c>Approved terms</c> to the voted candidacy's terms bucket under the voter's address.
+    /// The shared webhook secret replaces a voter signature only at this server-to-server boundary.
+    /// </summary>
+    // POST: webhooks/spv_lawyer_vote_cast_devnet
+    [HttpPost("spv_lawyer_vote_cast_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> SpvLawyerVoteCastDevnet(
+        [FromBody] SpvLawyerVoteCastPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, SpvLawyerVoteCastEventName, StringComparison.Ordinal)
+            || payload.PropertyId is null
+            || payload.Amount is null
+            || string.IsNullOrWhiteSpace(payload.Voter)
+            || payload.Voter.Length > 128
+            || string.IsNullOrWhiteSpace(payload.Candidacy)
+            || payload.Candidacy.Length > 128
+            || string.IsNullOrWhiteSpace(payload.TxSignature)
+            || payload.TxSignature.Length > 128
+            || string.IsNullOrWhiteSpace(payload.InstructionPath)
+            || payload.InstructionPath.Length > 64
+            || (payload.Cluster is not null && payload.Cluster is not "devnet" and not "mainnet"))
+        {
+            return BadRequest("The body is not a valid 'spv_lawyer_vote_cast' webhook payload.");
+        }
+
+        var admin = _config[BucketAdminAddressConfigKey]?.Trim();
+        if (string.IsNullOrWhiteSpace(admin))
+        {
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                $"The bucket admin address ({BucketAdminAddressConfigKey}) is not configured.");
+        }
+
+        JsonObject adminPrivateJwk;
+        try
+        {
+            adminPrivateJwk = BucketAdminKeyProvider.GetPrivateJwk(_config);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, ex.Message);
+        }
+
+        var ns = await FindNamespaceAsync(payload.PropertyId, null, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        {
+            return NotFound(new { status = "not_found", reason = "property namespace is not ready" });
+        }
+
+        var buckets = await _db.Buckets.Where(bucket =>
+                bucket.NamespaceId == ns.NamespaceId && bucket.Category == LawyerTermsBucketCategory)
+            .ToListAsync(ct);
+        var bucket = buckets.FirstOrDefault(candidate =>
+            LawyerTermsCandidacy(candidate) == payload.Candidacy);
+        if (bucket is null)
+        {
+            return NotFound(new { status = "not_found", reason = "candidacy terms bucket is not ready" });
+        }
+
+        var reference = $"lawyer-terms/{payload.Candidacy}/approved/"
+            + $"{payload.TxSignature}:{payload.InstructionPath}";
+        var keySharing = await _db.Messages
+            .OrderByDescending(message => message.MessageId)
+            .FirstOrDefaultAsync(
+                message => message.BucketId == bucket.BucketId
+                    && message.Tag == LawyerTermsBucketProtocol.KeySharingTag,
+                ct);
+        if (string.IsNullOrWhiteSpace(keySharing?.IpfsContent))
+        {
+            return NotFound(new { status = "not_found", reason = "terms bucket key is not ready" });
+        }
+
+        string encrypted;
+        string publicKey;
+        try
+        {
+            var secretJwk = LawyerTermsBucketProtocol.DecryptKeySharing(
+                keySharing.IpfsContent, adminPrivateJwk);
+            encrypted = LawyerTermsBucketProtocol.EncryptMessage(ApprovedTermsMessage, secretJwk);
+            publicKey = secretJwk["x"]!.GetValue<string>();
+        }
+        catch (Exception ex) when (ex is CryptographicException or JsonException
+            or FormatException or System.Collections.Generic.KeyNotFoundException)
+        {
+            return StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                "The bucket admin cannot decrypt the terms bucket key.");
+        }
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        if (_db.Database.IsNpgsql())
+        {
+            await _db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtext({0}))", new[] { (object)reference }, ct);
+        }
+
+        if (await _db.Messages.AnyAsync(
+                message => message.BucketId == bucket.BucketId && message.Reference == reference,
+                ct))
+        {
+            return Ok(new { status = "ignored", reason = "this vote was already posted", bucketId = bucket.BucketId });
+        }
+
+        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, admin, ct);
+        await _memberships.AddContributorAsync(
+            admin, ns.NamespaceId, bucket.BucketId, payload.Voter, ct);
+        if (!bucket.IsWritable)
+        {
+            await _buckets.ResumeWritingAsync(
+                admin, ns.NamespaceId, bucket.BucketId, publicKey, ct);
+        }
+
+        var message = await _messages.WriteAsync(
+            payload.Voter,
+            ns.NamespaceId,
+            bucket.BucketId,
+            new MessageWriteRequest(
+                reference,
+                LawyerTermsApprovedTag,
+                encrypted,
+                ApprovedTermsMessage,
+                "text/plain;charset=utf-8",
+                LawyerTermsBucketProtocol.ContentHash(encrypted),
+                null),
+            ct);
+        await transaction.CommitAsync(ct);
+
+        return Ok(new { status = "posted", bucketId = bucket.BucketId, messageId = message.MessageId });
+    }
+
+    private static string? LawyerTermsCandidacy(Bucket bucket)
+    {
+        if (string.IsNullOrWhiteSpace(bucket.Properties))
+        {
+            return null;
+        }
+        try
+        {
+            using var properties = JsonDocument.Parse(bucket.Properties);
+            return properties.RootElement.TryGetProperty("candidacy", out var candidacy)
+                && candidacy.ValueKind == JsonValueKind.String
+                    ? candidacy.GetString()
+                    : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private async Task<(IActionResult? Failure, long? BucketId, bool Created, int? HolderCount)>
         EnsureLawyerTermsBucketAsync(
             Namespace ns,
@@ -2397,6 +2553,9 @@ public class WebhooksController : ControllerBase
     private const string AgentAppointedEventName = "letting_agent_appointed";
     private const string SharesTransferredEventName = "property_shares_transferred";
     private const string SpvCaseClaimedEventName = "spv_case_claimed";
+    private const string SpvLawyerVoteCastEventName = "spv_lawyer_vote_cast";
+    private const string LawyerTermsApprovedTag = "lawyer/terms-approved";
+    private const string ApprovedTermsMessage = "Approved terms";
     private const string AgentElectionOpenedEventName = "agent_election_opened";
     private const string ProposalCreatedEventName = "proposal_created";
     private const string ProposalFinalizedEventName = "proposal_finalized";
@@ -2816,6 +2975,46 @@ public sealed class SharesTransferredPayload
     public DateTime? BlockTime { get; set; }
 
     /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>The <c>spv_lawyer_vote_cast</c> webhook payload posted by the indexer.</summary>
+public sealed class SpvLawyerVoteCastPayload
+{
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    [JsonPropertyName("voter")]
+    public string? Voter { get; set; }
+
+    [JsonPropertyName("candidacy")]
+    public string? Candidacy { get; set; }
+
+    [JsonPropertyName("amount")]
+    public uint? Amount { get; set; }
+
+    [JsonPropertyName("listing")]
+    public string? Listing { get; set; }
+
+    [JsonPropertyName("cluster")]
+    public string? Cluster { get; set; }
+
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    [JsonPropertyName("instruction_path")]
+    public string? InstructionPath { get; set; }
+
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
     [JsonPropertyName("program")]
     public string? Program { get; set; }
 }

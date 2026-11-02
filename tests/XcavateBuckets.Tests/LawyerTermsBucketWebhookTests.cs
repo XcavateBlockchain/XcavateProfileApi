@@ -147,6 +147,227 @@ public class LawyerTermsBucketWebhookTests
         await host.WithDbAsync(async db =>
             await db.Buckets.CountAsync(bucket => bucket.Category == "spv-lawyer-terms"));
 
+    private const string Voter = "VoterWallet333";
+    private const string VoteTx = "VoteTx1111111111111111111111111111111111111111111";
+
+    private static async Task<(HttpStatusCode Status, JsonElement Body)> PostVoteAsync(
+        WebhooksHost host,
+        string instructionPath = "0",
+        string? voter = Voter,
+        string? candidacy = Candidacy,
+        string? eventName = "spv_lawyer_vote_cast")
+    {
+        var json = new JsonObject
+        {
+            ["event"] = eventName,
+            ["property_id"] = ListingId,
+            ["voter"] = voter,
+            ["candidacy"] = candidacy,
+            ["amount"] = 25,
+            ["listing"] = "ListingPDA111",
+            ["cluster"] = "devnet",
+            ["slot"] = 487_700_150,
+            ["tx_signature"] = VoteTx,
+            ["instruction_path"] = instructionPath,
+            ["block_time"] = "2026-10-01T11:00:00+00:00",
+            ["program"] = "marketplace"
+        }.ToJsonString();
+        using var response = await host.Client.PostAsync(
+            $"/webhooks/spv_lawyer_vote_cast_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+        var text = await response.Content.ReadAsStringAsync();
+        JsonElement body;
+        try
+        {
+            body = string.IsNullOrWhiteSpace(text)
+                ? default
+                : JsonSerializer.Deserialize<JsonElement>(text);
+        }
+        catch (JsonException)
+        {
+            body = default;
+        }
+        return (response.StatusCode, body);
+    }
+
+    private static async Task<long> SeedTermsBucketAsync(WebhooksHost host)
+    {
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (status, body) = await PostClaimAsync(host);
+        Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+        return body.GetProperty("lawyerTermsBucketId").GetInt64();
+    }
+
+    private static async Task<(byte[] PrivateKey, string? Kid)> BucketKeyAsync(
+        WebhooksHost host, long bucketId)
+    {
+        var body = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId
+                && message.Tag == "didcomm/key-sharing-v1")
+            .OrderByDescending(message => message.MessageId)
+            .Select(message => message.IpfsContent)
+            .FirstAsync());
+        var plaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+            body!, WebhooksHost.DefaultBucketAdminPrivateKey);
+        using var document = JsonDocument.Parse(plaintext);
+        var key = document.RootElement.GetProperty("keys")[0];
+        return (
+            WebEncoders.Base64UrlDecode(key.GetProperty("d").GetString()!),
+            key.GetProperty("kid").GetString());
+    }
+
+    private static async Task<Message> ApprovalMessageAsync(WebhooksHost host, long bucketId) =>
+        await host.WithDbAsync(async db => await db.Messages.SingleAsync(message =>
+            message.BucketId == bucketId && message.Tag == "lawyer/terms-approved"));
+
+    [Test]
+    public async Task Spv_lawyer_vote_posts_encrypted_approved_terms_as_the_voter()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedTermsBucketAsync(host);
+
+        var (status, body) = await PostVoteAsync(host);
+        var message = await ApprovalMessageAsync(host, bucketId);
+        var key = await BucketKeyAsync(host, bucketId);
+        var plaintext = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+            message.IpfsContent!, key.PrivateKey, key.Kid);
+        var contributors = await host.WithDbAsync(async db => await db.BucketContributors
+            .Where(row => row.BucketId == bucketId)
+            .Select(row => row.SubjectId)
+            .ToListAsync());
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("posted"));
+            Assert.That(Encoding.UTF8.GetString(plaintext), Is.EqualTo("Approved terms"));
+            Assert.That(message.IpfsContent, Does.Not.Contain("Approved terms"));
+            Assert.That(message.Contributor, Is.EqualTo(Voter));
+            Assert.That(message.Description, Is.EqualTo("Approved terms"));
+            Assert.That(message.ContentType, Is.EqualTo("text/plain;charset=utf-8"));
+            Assert.That(message.Reference,
+                Is.EqualTo($"lawyer-terms/{Candidacy}/approved/{VoteTx}:0"));
+            Assert.That(message.ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(message.IpfsContent!)))));
+            Assert.That(contributors, Does.Contain(Voter));
+        });
+    }
+
+    [Test]
+    public async Task Spv_lawyer_vote_redelivery_does_not_duplicate_the_message_or_tag_count()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedTermsBucketAsync(host);
+        await PostVoteAsync(host);
+
+        var (status, body) = await PostVoteAsync(host);
+        var state = await host.WithDbAsync(async db => new
+        {
+            Messages = await db.Messages.CountAsync(message =>
+                message.BucketId == bucketId && message.Tag == "lawyer/terms-approved"),
+            TagCount = await db.TagMessageCounts.Where(row =>
+                row.BucketId == bucketId && row.TagName == "lawyer/terms-approved")
+                .Select(row => row.Count)
+                .SingleAsync()
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("ignored"));
+            Assert.That(state.Messages, Is.EqualTo(1));
+            Assert.That(state.TagCount, Is.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public async Task Spv_lawyer_vote_instruction_paths_remain_distinct_in_one_transaction()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedTermsBucketAsync(host);
+        await PostVoteAsync(host, instructionPath: "0");
+
+        var (status, body) = await PostVoteAsync(host, instructionPath: "1");
+        var references = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId
+                && message.Tag == "lawyer/terms-approved")
+            .OrderBy(message => message.MessageId)
+            .Select(message => message.Reference)
+            .ToListAsync());
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("posted"));
+            Assert.That(references, Is.EqualTo(new[]
+            {
+                $"lawyer-terms/{Candidacy}/approved/{VoteTx}:0",
+                $"lawyer-terms/{Candidacy}/approved/{VoteTx}:1"
+            }));
+        });
+    }
+
+    [Test]
+    public async Task Spv_lawyer_vote_for_an_unknown_candidacy_is_retryable_without_side_effects()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedTermsBucketAsync(host);
+
+        var (status, body) = await PostVoteAsync(host, candidacy: "OtherCandidacyPDA222");
+        var messageCount = await host.WithDbAsync(async db => await db.Messages
+            .CountAsync(message => message.BucketId == bucketId));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.NotFound));
+            Assert.That(body.GetProperty("status").GetString(), Is.EqualTo("not_found"));
+            Assert.That(messageCount, Is.EqualTo(4));
+        });
+    }
+
+    [TestCase("wrong_event", Voter)]
+    [TestCase("spv_lawyer_vote_cast", null)]
+    public async Task Spv_lawyer_vote_rejects_invalid_payloads_without_side_effects(
+        string eventName, string? voter)
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedTermsBucketAsync(host);
+
+        var (status, _) = await PostVoteAsync(host, eventName: eventName, voter: voter);
+        var messageCount = await host.WithDbAsync(async db => await db.Messages
+            .CountAsync(message => message.BucketId == bucketId));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That(messageCount, Is.EqualTo(4));
+        });
+    }
+
+    [Test]
+    public async Task Spv_lawyer_vote_without_admin_configuration_returns_503_without_side_effects()
+    {
+        await using var host = await WebhooksHost.StartAsync(
+            webhookSecret: WebhookSecret, bucketAdminAddress: "", bucketAdminX25519Key: "");
+        await SeedNamespaceAsync(host);
+
+        var (status, _) = await PostVoteAsync(host);
+        var state = await host.WithDbAsync(async db => new
+        {
+            Messages = await db.Messages.CountAsync(),
+            Contributors = await db.BucketContributors.CountAsync()
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+            Assert.That(state.Messages, Is.Zero);
+            Assert.That(state.Contributors, Is.Zero);
+        });
+    }
+
     [Test]
     public async Task Claim_creates_the_complete_encrypted_terms_bucket_and_keeps_the_vote_announcement()
     {
