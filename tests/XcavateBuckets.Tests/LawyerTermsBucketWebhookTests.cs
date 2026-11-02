@@ -255,7 +255,7 @@ public class LawyerTermsBucketWebhookTests
                 SHA256.HashData(Encoding.UTF8.GetBytes(state.Messages[1].IpfsContent!)))));
             Assert.That(state.Messages[2].Tag, Is.EqualTo("lawyer/terms-document"));
             Assert.That(state.Messages[2].Reference,
-                Is.EqualTo($"https://objects.test/xcavate-profile/terms-documents/by-candidacy/{Candidacy}.pdf"));
+                Is.EqualTo($"http://localhost/api/terms-documents/by-candidacy/{Candidacy}"));
             Assert.That(state.Messages[2].Description, Is.EqualTo("terms.pdf"));
             Assert.That(state.Messages[2].ContentType, Is.EqualTo("application/pdf"));
             Assert.That(state.Messages[2].IpfsContent, Is.Null);
@@ -274,6 +274,57 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(state.LegalMessages.Single().Tag, Is.EqualTo("voting/terms"));
             Assert.That(state.LegalMessages.Single().Contributor, Is.EqualTo("system:voting"));
         });
+    }
+
+    [Test]
+    public async Task Claim_stores_a_profile_api_reference_that_downloads_the_encrypted_snapshot()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (_, body) = await PostClaimAsync(host);
+        var bucketId = body.GetProperty("lawyerTermsBucketId").GetInt64();
+        var reference = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId && message.Tag == "lawyer/terms-document")
+            .Select(message => message.Reference)
+            .SingleAsync());
+
+        using var response = await host.Client.GetAsync(reference);
+        var downloaded = await response.Content.ReadAsByteArrayAsync();
+        var snapshot = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", $"terms-documents/by-candidacy/{Candidacy}.pdf", CancellationToken.None);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(reference,
+                Is.EqualTo($"http://localhost/api/terms-documents/by-candidacy/{Candidacy}"));
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(response.Content.Headers.ContentType?.MediaType,
+                Is.EqualTo("application/didcomm-encrypted+json"));
+            Assert.That(downloaded, Is.EqualTo(snapshot));
+        });
+    }
+
+    [Test]
+    public async Task Configured_public_origin_wins_over_the_request_origin_for_snapshot_references()
+    {
+        await using var host = await WebhooksHost.StartAsync(
+            webhookSecret: WebhookSecret,
+            profileApiPublicUrl: "https://profile-api.xcavate.io/");
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (_, body) = await PostClaimAsync(host);
+        var bucketId = body.GetProperty("lawyerTermsBucketId").GetInt64();
+
+        var reference = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId && message.Tag == "lawyer/terms-document")
+            .Select(message => message.Reference)
+            .SingleAsync());
+
+        Assert.That(reference,
+            Is.EqualTo($"https://profile-api.xcavate.io/api/terms-documents/by-candidacy/{Candidacy}"));
     }
 
     [Test]
@@ -318,7 +369,7 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(decryptedSnapshot, Is.EqualTo(PdfBytes));
             Assert.That(current, Is.EqualTo(replacement));
             Assert.That(reference,
-                Is.EqualTo($"https://objects.test/xcavate-profile/terms-documents/by-candidacy/{Candidacy}.pdf"));
+                Is.EqualTo($"http://localhost/api/terms-documents/by-candidacy/{Candidacy}"));
         });
     }
 
@@ -346,6 +397,63 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(second.GetProperty("lawyerTermsBucketId").GetInt64(), Is.EqualTo(bucketId));
             Assert.That(messageCount, Is.EqualTo(4));
             Assert.That(bucket.EncryptionKey, Is.EqualTo(originalKey));
+        });
+    }
+
+    [Test]
+    public async Task Redelivery_migrates_an_old_snapshot_reference_without_rewriting_encrypted_state()
+    {
+        await using var host = await WebhooksHost.StartAsync(
+            webhookSecret: WebhookSecret,
+            profileApiPublicUrl: "https://profile-api.xcavate.io");
+        await SeedNamespaceAsync(host);
+        await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        var (_, first) = await PostClaimAsync(host);
+        var bucketId = first.GetProperty("lawyerTermsBucketId").GetInt64();
+        var original = await host.WithDbAsync(async db => new
+        {
+            Prompt = await db.Messages.SingleAsync(message =>
+                message.BucketId == bucketId && message.Tag == "lawyer/terms-vote"),
+            KeySharing = await db.Messages.SingleAsync(message =>
+                message.BucketId == bucketId && message.Tag == "didcomm/key-sharing-v1"),
+            EncryptionKey = await db.Buckets.Where(bucket => bucket.BucketId == bucketId)
+                .Select(bucket => bucket.EncryptionKey).SingleAsync()
+        });
+        await host.WithDbAsync(async db =>
+        {
+            var document = await db.Messages.SingleAsync(message =>
+                message.BucketId == bucketId && message.Tag == "lawyer/terms-document");
+            document.Reference =
+                $"https://xcavate-profile.fsn1.your-objectstorage.com/terms-documents/by-candidacy/{Candidacy}.pdf";
+            await db.SaveChangesAsync();
+            return true;
+        });
+
+        var (status, second) = await PostClaimAsync(host);
+        var state = await host.WithDbAsync(async db => new
+        {
+            Messages = await db.Messages.Where(message => message.BucketId == bucketId)
+                .OrderBy(message => message.MessageId).ToListAsync(),
+            EncryptionKey = await db.Buckets.Where(bucket => bucket.BucketId == bucketId)
+                .Select(bucket => bucket.EncryptionKey).SingleAsync()
+        });
+        var prompt = state.Messages.Single(message => message.Tag == "lawyer/terms-vote");
+        var keySharing = state.Messages.Single(message => message.Tag == "didcomm/key-sharing-v1");
+        var document = state.Messages.Single(message => message.Tag == "lawyer/terms-document");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(second.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.False);
+            Assert.That(document.Reference,
+                Is.EqualTo($"https://profile-api.xcavate.io/api/terms-documents/by-candidacy/{Candidacy}"));
+            Assert.That(prompt.IpfsContent, Is.EqualTo(original.Prompt.IpfsContent));
+            Assert.That(prompt.ContentHash, Is.EqualTo(original.Prompt.ContentHash));
+            Assert.That(prompt.ContentType, Is.EqualTo(original.Prompt.ContentType));
+            Assert.That(keySharing.IpfsContent, Is.EqualTo(original.KeySharing.IpfsContent));
+            Assert.That(state.EncryptionKey, Is.EqualTo(original.EncryptionKey));
+            Assert.That(state.Messages, Has.Count.EqualTo(4));
         });
     }
 

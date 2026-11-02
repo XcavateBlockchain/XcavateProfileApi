@@ -1192,11 +1192,11 @@ public class WebhooksController : ControllerBase
             keySharing.SecretJwk,
             new Dictionary<string, string> { ["filename"] = document.FileName });
 
-        string snapshotUrl;
+        var snapshotUrl = SnapshotReference(payload.Candidacy!);
         try
         {
             using var content = new MemoryStream(Encoding.UTF8.GetBytes(pdfPayload), writable: false);
-            snapshotUrl = await _s3.UploadImageAsync(
+            await _s3.UploadImageAsync(
                 TermsDocumentController.Bucket,
                 TermsDocumentController.SnapshotObjectKey(payload.Candidacy!),
                 content,
@@ -1293,6 +1293,12 @@ public class WebhooksController : ControllerBase
             message => message.BucketId == bucket.BucketId
                 && message.Tag == LawyerTermsBucketProtocol.VotePromptTag,
             ct);
+        var document = await _db.Messages.SingleAsync(
+            message => message.BucketId == bucket.BucketId
+                && message.Tag == LawyerTermsBucketProtocol.DocumentTag,
+            ct);
+        document.Reference = SnapshotReference(payload.Candidacy!);
+        await _db.SaveChangesAsync(ct);
         if (prompt is null || IsCompactMessage(prompt.IpfsContent))
         {
             return;
@@ -1314,10 +1320,6 @@ public class WebhooksController : ControllerBase
             keySharingMessage.IpfsContent, adminPrivateJwk);
         var promptPayload = LawyerTermsBucketProtocol.EncryptMessage(
             LawyerTermsBucketProtocol.VotePrompt, secretJwk);
-        var document = await _db.Messages.SingleAsync(
-            message => message.BucketId == bucket.BucketId
-                && message.Tag == LawyerTermsBucketProtocol.DocumentTag,
-            ct);
         var pdf = await _s3.DownloadObjectAsync(
             TermsDocumentController.Bucket,
             TermsDocumentController.SnapshotObjectKey(payload.Candidacy!),
@@ -1337,7 +1339,7 @@ public class WebhooksController : ControllerBase
                 new Dictionary<string, string> { ["filename"] = document.Description ?? "terms.pdf" });
         }
         using var content = new MemoryStream(Encoding.UTF8.GetBytes(pdfPayload), writable: false);
-        var snapshotUrl = await _s3.UploadImageAsync(
+        await _s3.UploadImageAsync(
             TermsDocumentController.Bucket,
             TermsDocumentController.SnapshotObjectKey(payload.Candidacy!),
             content,
@@ -1346,9 +1348,27 @@ public class WebhooksController : ControllerBase
         prompt.IpfsContent = promptPayload;
         prompt.ContentType = "text/plain;charset=utf-8";
         prompt.ContentHash = LawyerTermsBucketProtocol.ContentHash(promptPayload);
-        document.Reference = snapshotUrl;
         document.ContentHash = LawyerTermsBucketProtocol.ContentHash(pdfPayload);
         await _db.SaveChangesAsync(ct);
+    }
+
+    private string SnapshotReference(string candidacy)
+    {
+        var publicOrigin = _config["PROFILE_API_PUBLIC_URL"]?.Trim();
+        if (!string.IsNullOrWhiteSpace(publicOrigin))
+        {
+            var path = Url.Action(
+                nameof(TermsDocumentController.DownloadSnapshotAsync),
+                "TermsDocument",
+                new { candidacy });
+            return $"{publicOrigin.TrimEnd('/')}{path}";
+        }
+
+        return Url.Action(
+            nameof(TermsDocumentController.DownloadSnapshotAsync),
+            "TermsDocument",
+            new { candidacy },
+            Request.Scheme)!;
     }
 
     private static bool IsCompactMessage(string? payload)
