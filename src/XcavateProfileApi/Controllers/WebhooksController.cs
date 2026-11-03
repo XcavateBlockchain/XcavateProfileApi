@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Solnet.Wallet.Utilities;
@@ -26,17 +27,9 @@ namespace XcavateProfileApi.Controllers;
 /// every handler is idempotent and answers 2xx whether it acted or deliberately ignored a
 /// redelivery, so the indexer never retries a webhook the API already handled.
 ///
-/// The set implements the "Property namespace &amp; buckets" lifecycle: the asset webhook creates
-/// the property's namespace, the claim-started webhook creates its legal-process bucket, the
-/// lawyer-election / agent-appointment / transfer webhooks manage its membership, and the
-/// deal-executed webhook removes the lawyers when the sale settles.
-///
-/// A second group — the voting webhooks — announces on-chain governance votes as messages in the
-/// property's legal-process bucket, so the messenger clients can render vote state without an
-/// indexer round-trip: terms-vote open/finalize (marketplace, pre-settlement), letting-agent
-/// election open, agent spending-proposal create/finalize and challenge create/finalize
-/// (property program, post-settlement). Messages are plaintext JSON (the server holds no bucket
-/// X25519 key) posted under a synthetic system identity — see the group remark below.
+/// The property webhooks create namespaces, encrypted per-candidacy SPV lawyer-terms buckets,
+/// and the shared lawyer document-review bucket. Election and document-status messages are posted
+/// directly to those buckets; settlement finalizes the review flow.
 /// </summary>
 [ApiController]
 [Route("webhooks")]
@@ -234,170 +227,12 @@ public class WebhooksController : ControllerBase
             : new { status = "created", namespaceId = offersNs.NamespaceId });
     }
 
-    // ---- Property lifecycle webhooks (the "Property namespace & buckets" flow) ----------------
-    //
-    // The five events that continue the flow the asset webhook starts:
-    //
-    //   property_claim_started       -> create the property's legal-process bucket (implemented;
-    //                                   also reconciles the current holder set into its viewers)
-    //   spv_lawyer_elected           -> lawyer write + holder read access (implemented: the vote
-    //                                   result message, then the membership grants)
-    //   deal_executed                -> remove the lawyers from the bucket (implemented)
-    //   letting_agent_appointed      -> add the letting agent (write) (implemented)
-    //   property_shares_transferred  -> swap seller -> buyer read access (implemented: wallets
-    //                                   resolve to viewer X25519 keys through the profiles)
-    //   property_holder_changed      -> primary-market holder joins/leaves (implemented; sale-phase
-    //                                   events defer to the claim-started reconciliation)
-    //
-    // The design decisions behind them are recorded in
-    // docs/property-webhooks-uncertainties.md. Like the asset webhook, every endpoint is
-    // idempotent and answers 2xx whether it acted or deliberately ignored a redelivery. The one
-    // new status is 404: the event's namespace or bucket is not there YET (deliveries are
-    // unordered across event types), so the indexer's retry-with-backoff delivers it again once
-    // the prerequisite exists.
+    // ---- Lawyer terms and document-review lifecycle webhooks ---------------------------------
 
     /// <summary>
-    /// Receives the <c>property_claim_started</c> event (the first successful token claim on a
-    /// sold-out listing, deduped by the indexer to one event per listing) and creates the
-    /// property's legal-process bucket inside its namespace.
+    /// Receives the <c>spv_lawyer_elected</c> event, closes every lawyer-terms bucket in the
+    /// finalized round, and ensures the document-review bucket once both lawyer seats are filled.
     /// </summary>
-    /// <remarks>
-    /// The bucket is created by the namespace's creator (the PropertyAsset PDA, its first
-    /// manager), named after the namespace, categorised <c>legal-process</c> (the marker the
-    /// other lifecycle webhooks look the bucket up by), and the creator is also installed as a
-    /// bucket admin so the later membership webhooks have a caller that passes the admin check.
-    /// The current holder set (reservers and buyers, resolved from the indexer's mirror) is then
-    /// seeded as viewers — the reconciliation that makes the sale phase's deferred holder events
-    /// lossless; an indexer failure answers 502 and the whole event (bucket included) retries.
-    /// Idempotent via the bucket lookup: a redelivery finds the existing bucket and is ignored.
-    /// 404 while the namespace is missing (the asset webhook has not landed yet — the indexer
-    /// retries); 400 when the body is not a valid <c>property_claim_started</c> event.
-    /// </remarks>
-    // POST: webhooks/property_claim_started_devnet
-    [HttpPost("property_claim_started_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> PropertyClaimStartedDevnet(
-        [FromBody] PropertyClaimStartedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, ClaimStartedEventName, StringComparison.Ordinal)
-            || (payload.ListingId is null && string.IsNullOrWhiteSpace(payload.Property)))
-        {
-            return BadRequest("The body is not a valid 'property_claim_started' webhook payload.");
-        }
-
-        var ns = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
-        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
-        {
-            return NotFound("No webhook-created namespace matches this listing yet.");
-        }
-
-        var existing = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        if (existing is not null)
-        {
-            return Ok(new
-            {
-                status = "ignored",
-                reason = "legal bucket already exists for this property",
-                bucketId = existing.BucketId
-            });
-        }
-
-        var properties = new List<KeyValuePair<string, string>>
-        {
-            new("kind", "legal_process"),
-            new("listing_id", payload.ListingId?.ToString() ?? string.Empty),
-            new("listing", payload.Listing ?? string.Empty),
-            new("property", payload.Property ?? string.Empty),
-            new("started_by", payload.Investor ?? string.Empty),
-            new("tx_signature", payload.TxSignature ?? string.Empty),
-            new("program", payload.Program ?? string.Empty)
-        };
-        if (payload.BlockTime is { } blockTime)
-        {
-            properties.Add(new("block_time", blockTime.ToString("O")));
-        }
-
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        var bucket = await _buckets.CreateAsync(
-            caller: ns.Creator,
-            namespaceId: ns.NamespaceId,
-            name: LegalBucketName(ns),
-            category: LegalBucketCategory,
-            properties: properties,
-            ct: ct);
-        // The operator admin: the namespace creator (the PropertyAsset PDA, already a namespace
-        // manager) as a BucketAdmin row, so later membership webhooks can pass it as the caller
-        // the admin check expects.
-        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
-
-        // Seed the bucket's readers from the CURRENT holder set (the indexer's mirror):
-        // holder events during the sale phase answered "deferred" because the bucket did not
-        // exist yet — this reconciliation is what makes those deferrals lossless. It runs inside
-        // the transaction, so an indexer failure (502 via ResolveAsync) rolls the bucket back
-        // with it and the event retries whole. Wallets without a profile X25519 key are skipped
-        // (counted), never retried: they appear on their next qualifying holder event.
-        var holdersAdded = 0;
-        var holdersSkipped = 0;
-        if (payload.ListingId is { } reconcileListingId)
-        {
-            var resolve = await ResolveAsync(
-                ct, async c => await _indexer.GetCurrentHolderWalletsAsync(reconcileListingId, c));
-            if (resolve.Failed)
-            {
-                return resolve.Failure!;
-            }
-
-            foreach (var wallet in resolve.Value!)
-            {
-                var key = await ResolveViewerKeyAsync(wallet, ct);
-                if (key is null)
-                {
-                    holdersSkipped++;
-                    continue;
-                }
-
-                await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
-                holdersAdded++;
-            }
-        }
-        await transaction.CommitAsync(ct);
-
-        return Ok(new
-        {
-            status = "created",
-            bucketId = bucket.BucketId,
-            holdersAdded,
-            holdersSkippedNoKey = holdersSkipped
-        });
-    }
-
-    /// <summary>
-    /// Receives the <c>spv_lawyer_elected</c> event (the SPV lawyer election finalized) and posts
-    /// a <c>voting/result</c> message: "ratified" when the listing's row shows an assigned SPV
-    /// lawyer, "rejected" when the round failed open (the seat stays empty and a new round may
-    /// open). The payload's <c>winner_registry</c> is the winner's on-chain Lawyer REGISTRY PDA,
-    /// not their wallet — the wallet is the listing row's <c>spvLawyer</c>, which the chain's
-    /// <c>finalize_spv_election</c> sets to the winning candidacy's wallet, and the indexer
-    /// commits the event and the listing row in one transaction, so the announcement and the
-    /// grant below never disagree.
-    /// </summary>
-    /// <remarks>
-    /// When the election ratified, the handler additionally grants access on the property's legal
-    /// bucket, atomically in one transaction: the winning lawyer becomes a contributor (WRITE)
-    /// and the current token holders are re-synced as viewers (READ) — the same reconciliation
-    /// the claim-started webhook runs at bucket creation, so a holder who registered their X25519
-    /// key only after their last holder event is picked up here (wallets without a key are
-    /// skipped and counted, never retried). Idempotent: the message duplicate-guard plus the
-    /// membership services' return-existing semantics make a redelivery a harmless re-run, and
-    /// the counters report what THIS delivery changed. A resolution failure (indexer down, the
-    /// listing row missing, or the holder enumeration failing) answers 502 so the indexer
-    /// retries — a failure mid-grant rolls the transaction back, and the redelivery completes it
-    /// with the already-committed message skipped by the guard. 404 while the namespace or bucket
-    /// is missing; 400 when the body is not a valid <c>spv_lawyer_elected</c> event.
-    /// </remarks>
     // POST: webhooks/spv_lawyer_elected_devnet
     [HttpPost("spv_lawyer_elected_devnet")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -425,110 +260,23 @@ public class WebhooksController : ControllerBase
         var ratified = election.SpvLawyer is { Length: > 0 } lawyer
                     && lawyer != SystemDefaultPubkey;
         var status = ratified ? "ratified" : "rejected";
-
-        var result = await PostVotingMessageAsync(
-            payload.ListingId, payload.Property,
-            tag: VotingResultTag,
-            reference: $"voting/result/terms/{payload.ListingId}/round/{election.Round}",
-            description: $"SPV lawyer election round {election.Round} {status}",
-            buildBody: listingId => new JsonObject
-            {
-                ["kind"] = "terms",
-                ["listingId"] = listingId,
-                ["round"] = election.Round,
-                ["status"] = status
-            },
-            ct);
-
-        if (result is OkObjectResult)
-        {
-            var termsNamespace = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
-            if (termsNamespace is not null)
-            {
-                var termsFailure = await PostLawyerTermsVotingResultAsync(
-                    payload, election, ratified, status, termsNamespace, ct);
-                if (termsFailure is not null)
-                {
-                    return termsFailure;
-                }
-            }
-        }
-
-        // A rejected round grants no access, and a non-Ok answer (the 404 retry paths) means the
-        // bucket is not there to grant on — either way there is no membership work to do.
-        if (!ratified || result is not OkObjectResult)
-        {
-            return WithMembershipCounts(result, lawyerContributorAdded: false, 0, 0);
-        }
-
-        // The Ok answer implies the namespace and legal bucket both exist (the post 404s
-        // otherwise); re-fetch them as the grant's subjects.
         var ns = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
-        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        if (ns is null)
         {
-            return WithMembershipCounts(result, lawyerContributorAdded: false, 0, 0);
+            return NotFound("No webhook-created namespace matches this property yet.");
         }
 
-        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        if (bucket is null)
+        var termsFailure = await PostLawyerTermsVotingResultAsync(
+            payload, election, ratified, status, ns, ct);
+        if (termsFailure is not null)
         {
-            return WithMembershipCounts(result, lawyerContributorAdded: false, 0, 0);
+            return termsFailure;
+        }
+        if (!ratified)
+        {
+            return Ok(new { status });
         }
 
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        // A bucket created before the claim webhook existed may lack the operator admin row the
-        // membership caller checks need; adding it is idempotent.
-        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
-
-        // The lawyer gets WRITE. The add itself is idempotent (the service returns the existing
-        // row), so the "added" flag is computed beforehand: a redelivery reports the grant as
-        // already in place instead of double-counting it.
-        var lawyerContributorAdded = !await _db.BucketContributors
-            .AnyAsync(c => c.BucketId == bucket.BucketId && c.SubjectId == election.SpvLawyer, ct);
-        await _memberships.AddContributorAsync(
-            ns.Creator, ns.NamespaceId, bucket.BucketId, election.SpvLawyer, ct);
-
-        // The holders get READ, re-synced from the indexer's CURRENT holder set — the
-        // claim-started reconciliation block, with the same semantics: it runs inside the
-        // transaction, so an indexer failure answers 502, rolls the lawyer's grant back with it,
-        // and the event retries whole.
-        var holderResolve = await ResolveAsync(
-            ct,
-            async c => await _indexer.GetCurrentHolderWalletsAsync(payload.ListingId.Value, c),
-            what: "the current holder set");
-        if (holderResolve.Failed)
-        {
-            return holderResolve.Failure!;
-        }
-
-        var existingViewers = (await _db.BucketViewers
-                .Where(v => v.BucketId == bucket.BucketId)
-                .Select(v => v.ViewerId)
-                .ToListAsync(ct))
-            .Select(key => X25519KeyCodec.TryNormalize(key, out var canonical) ? canonical! : key)
-            .ToHashSet(StringComparer.Ordinal);
-
-        var holdersAdded = 0;
-        var holdersSkipped = 0;
-        foreach (var wallet in holderResolve.Value!)
-        {
-            var key = await ResolveViewerKeyAsync(wallet, ct);
-            if (key is null)
-            {
-                holdersSkipped++;
-                continue;
-            }
-
-            await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
-            if (existingViewers.Add(key))
-            {
-                holdersAdded++;
-            }
-        }
-        await transaction.CommitAsync(ct);
-
-        var membershipResult = WithMembershipCounts(
-            result, lawyerContributorAdded, holdersAdded, holdersSkipped);
         var lawyerPair = await ResolveAsync(
             ct,
             async c => await _indexer.GetListingLawyersAsync(payload.ListingId.Value, c),
@@ -540,7 +288,7 @@ public class WebhooksController : ControllerBase
         }
         if (!LawyerSeatsAssigned(lawyerPair.Value))
         {
-            return membershipResult;
+            return Ok(new { status });
         }
 
         var review = await EnsureLawyerReviewBucketAsync(
@@ -556,7 +304,7 @@ public class WebhooksController : ControllerBase
             return review.Failure;
         }
         return WithLawyerReviewSetup(
-            membershipResult, review.BucketId, review.Created, review.HolderCount);
+            Ok(new { status }), review.BucketId, review.Created, review.HolderCount);
     }
 
     /// <summary>
@@ -725,16 +473,9 @@ public class WebhooksController : ControllerBase
     }
 
     /// <summary>
-    /// Receives the <c>deal_executed</c> event (the sale settled on-chain), removes the
-    /// lawyers from the property's legal bucket, and posts the finalized status to an existing
-    /// lawyer document-review bucket. Token-holder viewers are deliberately untouched — they
-    /// still own tokens after the sale.
+    /// Receives the <c>deal_executed</c> event and posts the finalized status to an existing
+    /// lawyer document-review bucket.
     /// </summary>
-    /// <remarks>
-    /// Idempotent: membership removals are no-ops when the member is already gone, and the
-    /// deterministic finalization message is duplicate-guarded. 404 while the namespace or legal
-    /// bucket is missing; 400 when the body is not a valid <c>deal_executed</c> event.
-    /// </remarks>
     // POST: webhooks/deal_executed_devnet
     [HttpPost("deal_executed_devnet")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -764,48 +505,16 @@ public class WebhooksController : ControllerBase
             return BadRequest("Neither the payload nor the namespace carries a numeric listing id.");
         }
 
-        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        if (bucket is null)
-        {
-            return NotFound("The property's legal bucket does not exist yet.");
-        }
-
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        // A bucket created before the claim webhook existed may lack the operator admin row the
-        // contributor-removal caller check needs; adding it is idempotent.
-        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
-
-        var contributors = await _db.BucketContributors
-            .Where(c => c.BucketId == bucket.BucketId)
-            .Select(c => c.SubjectId)
-            .ToListAsync(ct);
-        var admins = await _db.BucketAdmins
-            .Where(a => a.BucketId == bucket.BucketId)
-            .Select(a => a.SubjectId)
-            .ToListAsync(ct);
-
-        var removedContributors = 0;
-        foreach (var contributor in contributors.Where(s => s != ns.Creator))
-        {
-            await _memberships.RemoveContributorAsync(
-                ns.Creator, ns.NamespaceId, bucket.BucketId, contributor, ct);
-            removedContributors++;
-        }
-
-        var removedAdmins = 0;
-        foreach (var admin in admins.Where(s => s != ns.Creator))
-        {
-            await _memberships.RemoveAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, admin, ct);
-            removedAdmins++;
-        }
-        await transaction.CommitAsync(ct);
-
         var reviewBucket = await _db.Buckets.FirstOrDefaultAsync(
             candidate => candidate.NamespaceId == ns.NamespaceId
                 && candidate.Category == LawyerReviewBucketCategory
                 && candidate.Name == LawyerReviewBucketName(ns),
             ct);
-        if (reviewBucket is not null)
+        if (reviewBucket is null)
+        {
+            return NotFound("The property's lawyer document-review bucket does not exist yet.");
+        }
+        else
         {
             var resolved = await ResolveReviewAsync(
                 listingId.Value, payload.Property, ct);
@@ -825,310 +534,20 @@ public class WebhooksController : ControllerBase
 
         return Ok(new
         {
-            status = "lawyers_removed",
-            removedContributors,
-            removedAdmins,
-            bucketId = bucket.BucketId,
+            status = "processed",
             lawyerReviewBucketId = reviewBucket?.BucketId
         });
     }
 
-    /// <summary>
-    /// Receives the <c>letting_agent_appointed</c> event (the property program's agent election
-    /// finalized) and adds the winning letting agent as a contributor (WRITE) on the property's
-    /// legal bucket. The payload's <c>winner_entry</c> is the winner's LettingAgent ENTRY PDA, not
-    /// their wallet; the wallet is resolved from the indexer's <c>lettingAgents</c> mirror (the
-    /// row whose <c>id</c> is the entry PDA).
-    /// </summary>
-    /// <remarks>
-    /// A payload without <c>winner_entry</c> is a round that seated no agent: acknowledged
-    /// (200 <c>ignored</c>) without acting, because the omitted optional account can never appear
-    /// on retry. A resolution failure (indexer down, or no row for the entry) answers 502 so the
-    /// indexer retries rather than the write-grant being silently skipped. Idempotent: the
-    /// contributor-add returns the existing row, so a redelivery answers 200 and changes nothing.
-    /// 404 while the namespace or bucket is missing; 400 when the body is not a valid
-    /// <c>letting_agent_appointed</c> event.
-    /// </remarks>
-    // POST: webhooks/letting_agent_appointed_devnet
-    [HttpPost("letting_agent_appointed_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> LettingAgentAppointedDevnet(
-        [FromBody] LettingAgentAppointedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, AgentAppointedEventName, StringComparison.Ordinal)
-            || (payload.AssetId is null && string.IsNullOrWhiteSpace(payload.Property)))
-        {
-            return BadRequest("The body is not a valid 'letting_agent_appointed' webhook payload.");
-        }
-
-        var ns = await FindNamespaceAsync(payload.AssetId, payload.Property, ct);
-        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
-        {
-            return NotFound("No webhook-created namespace matches this property yet.");
-        }
-
-        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        if (bucket is null)
-        {
-            return NotFound("The property's legal bucket does not exist yet.");
-        }
-
-        if (string.IsNullOrWhiteSpace(payload.WinnerEntry))
-        {
-            return Ok(new
-            {
-                status = "ignored",
-                acted = false,
-                reason = "the payload carries no winner_entry — the election seated no agent",
-                bucketId = bucket.BucketId
-            });
-        }
-
-        var resolve = await ResolveAsync(
-            ct,
-            async c => await _indexer.GetLettingAgentWalletAsync(payload.WinnerEntry, c),
-            what: "the letting agent's wallet");
-        if (resolve.Failed)
-        {
-            return resolve.Failure!;
-        }
-        var agentWallet = resolve.Value!;
-
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        // A bucket created before the claim webhook existed may lack the operator admin row the
-        // contributor-add caller check needs; adding it is idempotent.
-        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
-        await _memberships.AddContributorAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, agentWallet, ct);
-        await transaction.CommitAsync(ct);
-
-        return Ok(new
-        {
-            status = "agent_added",
-            bucketId = bucket.BucketId,
-            agent = agentWallet
-        });
-    }
-
-    /// <summary>
-    /// Receives the <c>property_shares_transferred</c> event (a resale: a relisted purchase, an
-    /// accepted offer, or a direct send) and swaps read access on the property's legal bucket:
-    /// the seller's viewer is removed and the buyer is added as a viewer. Wallets are resolved to
-    /// viewer ids through the profiles: a bucket viewer id is a 32-byte X25519 key, and the
-    /// profile of a wallet stores it (<see cref="ProfileDbContext"/> — directly keyed by the
-    /// wallet, with <c>WalletMigrations</c> as the fallback for profiles still keyed by a legacy
-    /// SS58 address).
-    /// </summary>
-    /// <remarks>
-    /// A side whose wallet has no profile key (or a malformed legacy one) is skipped and reported
-    /// — never an error, so the indexer does not retry a permanently-unactionable event forever
-    /// (the buyer simply appears in the bucket once they register a key AND a later transfer or
-    /// reconciliation pass adds them — see docs/property-webhooks-uncertainties.md entry 5).
-    /// Idempotent: viewer adds return the existing row and removes are no-ops when absent, so a
-    /// redelivery re-runs harmlessly. A self-transfer (<c>from</c> == <c>to</c>) changes nothing.
-    /// 404 while the namespace or bucket is missing; 400 when the body is not a valid
-    /// <c>property_shares_transferred</c> event.
-    /// </remarks>
-    // POST: webhooks/shares_transferred_devnet
-    [HttpPost("shares_transferred_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> SharesTransferredDevnet(
-        [FromBody] SharesTransferredPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, SharesTransferredEventName, StringComparison.Ordinal)
-            || payload.Kind is not ("relisted_purchase" or "offer_accepted" or "direct_send")
-            || string.IsNullOrWhiteSpace(payload.From)
-            || string.IsNullOrWhiteSpace(payload.To))
-        {
-            return BadRequest("The body is not a valid 'property_shares_transferred' webhook payload.");
-        }
-
-        var ns = await FindNamespaceAsync(payload.AssetId, payload.Property, ct);
-        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
-        {
-            return NotFound("No webhook-created namespace matches this property yet.");
-        }
-
-        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        if (bucket is null)
-        {
-            return NotFound("The property's legal bucket does not exist yet.");
-        }
-
-        // A self-transfer (same wallet on both sides) changes no access.
-        if (string.Equals(payload.From, payload.To, StringComparison.Ordinal))
-        {
-            return Ok(new { status = "ignored", reason = "self-transfer", bucketId = bucket.BucketId });
-        }
-
-        var buyerKey = await ResolveViewerKeyAsync(payload.To, ct);
-        var sellerKey = await ResolveViewerKeyAsync(payload.From, ct);
-
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        // A bucket created before the claim webhook existed may lack the operator admin row the
-        // viewer-add caller check needs; adding it is idempotent.
-        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
-
-        var buyerAdded = false;
-        if (buyerKey is not null)
-        {
-            await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, buyerKey, ct);
-            buyerAdded = true;
-        }
-
-        var sellerRemoved = false;
-        if (sellerKey is not null)
-        {
-            await _memberships.RemoveViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, sellerKey, ct);
-            sellerRemoved = true;
-        }
-        await transaction.CommitAsync(ct);
-
-        return Ok(new
-        {
-            status = "processed",
-            bucketId = bucket.BucketId,
-            buyerViewerAdded = buyerAdded,
-            buyerNote = buyerAdded ? null : "no profile X25519 key for the buyer wallet — skipped",
-            sellerViewerRemoved = sellerRemoved,
-            sellerNote = sellerRemoved ? null : "no profile X25519 key for the seller wallet — skipped"
-        });
-    }
-
-    /// <summary>
-    /// Receives the <c>property_holder_changed</c> event (the primary market's holder lifecycle:
-    /// <c>reserve_shares</c>/<c>buy_property_shares</c> add, <c>unreserve_shares</c>,
-    /// <c>release_reservation</c>, <c>close_cancelled_position</c> and the three
-    /// <c>withdraw_*</c> exits remove) and mirrors it as bucket read access: the investor's
-    /// viewer is added or removed, the wallet resolved to its X25519 key through the profiles
-    /// (the same <see cref="ResolveViewerKeyAsync"/> the transfer webhook uses).
-    /// </summary>
-    /// <remarks>
-    /// The legal bucket only exists from claim start, so events from the sale phase arrive long
-    /// before it: those answer 200 <c>deferred</c> — NOT 404 — because the claim-started handler
-    /// reconciles the whole current holder set from the indexer at bucket-creation time, making
-    /// the deferral lossless without a weeks-long retry storm per property. A wallet without a
-    /// profile key is skipped, never retried (the investor appears on their next qualifying event
-    /// or a later reconciliation). Idempotent: viewer adds return the existing row and removes
-    /// are no-ops when absent. 404 only while the namespace is missing; 400 when the body is not
-    /// a valid <c>property_holder_changed</c> event.
-    /// </remarks>
-    // POST: webhooks/property_holder_changed_devnet
-    [HttpPost("property_holder_changed_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> PropertyHolderChangedDevnet(
-        [FromBody] PropertyHolderChangedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, HolderChangedEventName, StringComparison.Ordinal)
-            || payload.Action is not ("added" or "removed")
-            || string.IsNullOrWhiteSpace(payload.Investor)
-            || (payload.ListingId is null && string.IsNullOrWhiteSpace(payload.Property)))
-        {
-            return BadRequest("The body is not a valid 'property_holder_changed' webhook payload.");
-        }
-
-        var ns = await FindNamespaceAsync(payload.ListingId, payload.Property, ct);
-        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
-        {
-            return NotFound("No webhook-created namespace matches this listing yet.");
-        }
-
-        var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        if (bucket is null)
-        {
-            return Ok(new
-            {
-                status = "deferred",
-                reason = "the legal bucket does not exist yet; the claim-started reconciliation "
-                    + "adds every current holder when it is created"
-            });
-        }
-
-        var key = await ResolveViewerKeyAsync(payload.Investor, ct);
-        if (key is null)
-        {
-            return Ok(new
-            {
-                status = "skipped",
-                acted = false,
-                reason = "no profile X25519 key for the investor wallet"
-            });
-        }
-
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        // A bucket created before the claim webhook existed may lack the operator admin row the
-        // viewer-add caller check needs; adding it is idempotent.
-        await _memberships.AddAdminAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, ns.Creator, ct);
-        if (payload.Action == "added")
-        {
-            await _memberships.AddViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
-        }
-        else
-        {
-            await _memberships.RemoveViewerAsync(ns.Creator, ns.NamespaceId, bucket.BucketId, key, ct);
-        }
-        await transaction.CommitAsync(ct);
-
-        return Ok(new
-        {
-            status = "processed",
-            action = payload.Action,
-            bucketId = bucket.BucketId
-        });
-    }
-
-    // ---- Voting webhooks: on-chain governance announced into the legal-process bucket ---------
+    // ---- SPV lawyer terms voting webhooks ------------------------------------------------------
     //
-    // Seven events, two shapes: open/update messages (tagged voting/terms, voting/election,
-    // voting/proposal or voting/challenge, status "open") and result messages (tagged
-    // voting/result, carrying the outcome and the vote powers). The indexer's webhook payloads
-    // carry only instruction-derivable evidence (ids, PDAs, args — its mapper is pure and
-    // DB-less), so every handler first RESOLVES the display facts — rounds, expiries, quorums,
-    // tallies, the passed/failed outcome — from the indexer's own GraphQL mirror via
-    // IIndexerClient. That read is consistent for free: the event row and the account rows it
-    // reports commit in one indexer transaction. A resolution failure (indexer unreachable, or the
-    // expected row missing) answers 502 so delivery retries with backoff instead of posting a
-    // hollow announcement. One deliberate skip: a `proposal_created` whose Proposal PDA never
-    // survived its own transaction is an auto-approved (low-tier) spend — no vote ever opens, so
-    // nothing is announced.
-    //
-    // The message body is plaintext JSON — the server holds no bucket X25519 key, and the clients
-    // tolerate plaintext voting announcements; the body's content hash is the sha256 of the exact
-    // bytes stored, so a client can still verify integrity.
-    //
-    // Posting runs under a synthetic system identity (VotingSystemIdentity), installed as a
-    // bucket contributor by each handler — idempotently, so the deal_executed sweep removing
-    // every contributor cannot permanently evict it: the next voting webhook simply re-adds it.
-    // Because webhook-created legal buckets start locked (the pallet's Status::default()) and the
-    // only admin is the PropertyAsset PDA no wallet can sign for, the handler also unlocks the
-    // bucket server-side (ResumeWriting as the namespace creator) with a PLACEHOLDER encryption
-    // key before the first post. The domain has no "system writes while locked" bypass, and
-    // unlocking grants no capability the lifecycle does not already intend — the legal bucket's
-    // contributors are meant to write. The placeholder key means bucket content is NOT
-    // end-to-end-encrypted until a real key ceremony runs (which, the operator admin being a PDA,
-    // must itself be server-mediated); voting messages are plaintext by design either way.
-    //
-    // Idempotency: every handler builds its message body deterministically (same event -> same
-    // bytes) and skips the post when a message with the same tag and identical body already
-    // exists, so an at-least-once redelivery never duplicates a user-visible announcement, while
-    // a genuinely new event (a new round, a new proposal id) produces a different body and posts.
-    // 404 while the namespace or bucket is missing, so the indexer retries (deliveries across
-    // event types are unordered); 400 when the body is not a valid payload for the event.
+    // Announcements are plaintext JSON posted by the configured bucket admin directly to each
+    // encrypted lawyer-terms bucket. Deterministic bodies make redeliveries idempotent.
 
     /// <summary>
     /// Receives the <c>spv_case_claimed</c> event, creates the candidacy's encrypted lawyer-terms
-    /// bucket, and posts the one-per-round <c>voting/terms</c> announcement to both that bucket and
-    /// the property's legal-process bucket. Each candidacy gets its own bucket, key ceremony, admin
-    /// prompt, and the claiming lawyer's current terms PDF.
+    /// bucket, and posts the round's voting announcement there. A late candidacy also inherits a
+    /// result already posted to another terms bucket in the same round.
     /// </summary>
     // POST: webhooks/spv_case_claimed_devnet
     [HttpPost("spv_case_claimed_devnet")]
@@ -1200,18 +619,6 @@ public class WebhooksController : ControllerBase
         };
         var reference = $"voting/terms/{payload.PropertyId}/round/{payload.Round}/open";
         var description = $"SPV lawyer election round {payload.Round} opened";
-        var votingResult = await PostVotingMessageAsync(
-            payload.PropertyId, payload.Property,
-            tag: TermsVotingTag,
-            reference: reference,
-            description: description,
-            buildBody: buildBody,
-            ct);
-        if (votingResult is not OkObjectResult)
-        {
-            return votingResult;
-        }
-
         var termsVotingResult = await PostVotingMessageAsync(
             payload.PropertyId, payload.Property,
             tag: TermsVotingTag,
@@ -1228,22 +635,57 @@ public class WebhooksController : ControllerBase
         }
 
         var resultReference = $"voting/result/terms/{payload.PropertyId}/round/{payload.Round}";
-        var legalBucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
-        var finalized = legalBucket is null
-            ? null
-            : await _db.Messages.OrderByDescending(message => message.MessageId)
-                .FirstOrDefaultAsync(
-                    message => message.BucketId == legalBucket.BucketId
-                        && message.Tag == VotingResultTag && message.Reference == resultReference,
-                    ct);
+        var round = payload.Round.Value.ToString(CultureInfo.InvariantCulture);
+        var termsBucketIds = (await _db.Buckets.Where(bucket =>
+                bucket.NamespaceId == ns.NamespaceId && bucket.Category == LawyerTermsBucketCategory)
+            .ToListAsync(ct))
+            .Where(bucket => LawyerTermsRound(bucket) == round)
+            .Select(bucket => bucket.BucketId)
+            .ToList();
+        var finalized = await _db.Messages.OrderByDescending(message => message.MessageId)
+            .FirstOrDefaultAsync(
+                message => termsBucketIds.Contains(message.BucketId)
+                    && message.Tag == VotingResultTag && message.Reference == resultReference,
+                ct);
+        JsonObject? finalBody = null;
+        string? finalDescription = null;
         if (finalized?.IpfsContent is not null)
         {
-            var finalBody = JsonNode.Parse(finalized.IpfsContent)!.AsObject();
+            finalBody = JsonNode.Parse(finalized.IpfsContent)!.AsObject();
+            finalDescription = finalized.Description;
+        }
+        else
+        {
+            string? finalStatus = null;
+            if (election.Round > payload.Round)
+            {
+                finalStatus = "rejected";
+            }
+            else if (election.Round == payload.Round
+                && election.SpvLawyer is { Length: > 0 } lawyer
+                && lawyer != SystemDefaultPubkey)
+            {
+                finalStatus = "ratified";
+            }
+            if (finalStatus is not null)
+            {
+                finalBody = new JsonObject
+                {
+                    ["kind"] = "terms",
+                    ["listingId"] = payload.PropertyId.Value,
+                    ["round"] = payload.Round.Value,
+                    ["status"] = finalStatus
+                };
+            }
+        }
+
+        if (finalBody is not null)
+        {
             var termsFinalResult = await PostVotingMessageAsync(
                 payload.PropertyId, payload.Property,
                 tag: VotingResultTag,
                 reference: resultReference,
-                description: finalized.Description ?? $"SPV lawyer election round {payload.Round} closed",
+                description: finalDescription ?? $"SPV lawyer election round {payload.Round} closed",
                 buildBody: _ => finalBody,
                 ct,
                 bucketId: setup.BucketId!.Value,
@@ -1256,7 +698,7 @@ public class WebhooksController : ControllerBase
         }
 
         return WithLawyerTermsSetup(
-            votingResult, setup.BucketId!.Value, setup.Created, setup.HolderCount);
+            termsVotingResult, setup.BucketId!.Value, setup.Created, setup.HolderCount);
     }
 
     /// <summary>
@@ -1685,6 +1127,33 @@ public class WebhooksController : ControllerBase
             Request.Scheme)!;
     }
 
+    /// <summary>
+    /// The public URL a review bucket's document message carries: the API's own route for the review
+    /// snapshot stored at <c>terms-documents/by-listing/{listingId}/{role}-{contentHash}.pdf</c>.
+    /// Like <see cref="SnapshotReference"/> it prefers <c>PROFILE_API_PUBLIC_URL</c> over the
+    /// request's own origin, because the indexer's delivery — not the reader's request — is what
+    /// composes the reference.
+    /// </summary>
+    private string ReviewSnapshotReference(long listingId, string role, string contentHash)
+    {
+        var roleHash = $"{role}-{contentHash}";
+        var publicOrigin = _config["PROFILE_API_PUBLIC_URL"]?.Trim();
+        if (!string.IsNullOrWhiteSpace(publicOrigin))
+        {
+            var path = Url.Action(
+                nameof(TermsDocumentController.DownloadReviewSnapshotAsync),
+                "TermsDocument",
+                new { listingId, roleHash });
+            return $"{publicOrigin.TrimEnd('/')}{path}";
+        }
+
+        return Url.Action(
+            nameof(TermsDocumentController.DownloadReviewSnapshotAsync),
+            "TermsDocument",
+            new { listingId, roleHash },
+            Request.Scheme)!;
+    }
+
     private static bool IsCompactMessage(string? payload)
     {
         if (payload is null)
@@ -1725,7 +1194,9 @@ public class WebhooksController : ControllerBase
             .ToList();
         if (buckets.Count == 0)
         {
-            return null;
+            return ratified
+                ? null
+                : NotFound("No lawyer-terms bucket exists for this rejected election round yet.");
         }
 
         var admin = _config[BucketAdminAddressConfigKey]?.Trim();
@@ -2142,16 +1613,161 @@ public class WebhooksController : ControllerBase
     {
         try
         {
-            await LawyerReviewBucketSecretAsync(
+            var (failure, secretJwk) = await LawyerReviewBucketSecretAsync(
                 ns, bucket, admin,
                 BucketAdminKeyProvider.GetPrivateJwk(_config),
                 BucketAdminKeyProvider.GetPublicKey(_config), ct);
+            if (failure is null && secretJwk is not null)
+            {
+                await RepairLawyerReviewDocumentsAsync(bucket, secretJwk, ct);
+            }
         }
         catch (InvalidOperationException)
         {
             // No admin key material is configured, so nothing can be encrypted as admin yet.
         }
     }
+
+    /// <summary>
+    /// Repoints the bucket's document messages at the API's own URL for their snapshots, and
+    /// normalises a snapshot an earlier build left as a plaintext PDF into the ciphertext every
+    /// other snapshot is. The object-storage URLs those messages carry point at a host that sends no
+    /// <c>Access-Control-Allow-Origin</c> header, so the review page cannot read them at all — and a
+    /// plaintext PDF under a guessable key is both readable by anyone and rejected by the page as
+    /// "not an encrypted attachment".
+    ///
+    /// Only the admin-authored <c>lawyer/terms-document</c> messages whose reference already names a
+    /// review snapshot object are touched, and a snapshot that is already a compact JWE is never
+    /// re-encrypted: its bytes, its object and the message's hash stay as they are, so redelivering
+    /// the setup webhook after the repair changed nothing. Nothing a lawyer or a token holder wrote
+    /// is read, rewritten or moved.
+    /// </summary>
+    private async Task RepairLawyerReviewDocumentsAsync(
+        Bucket bucket, JsonObject bucketSecretJwk, CancellationToken ct)
+    {
+        var documents = await _db.Messages.Where(message => message.BucketId == bucket.BucketId
+                && message.Tag == LawyerTermsBucketProtocol.DocumentTag)
+            .ToListAsync(ct);
+        var changed = false;
+        foreach (var message in documents)
+        {
+            if (ParseReviewSnapshotReference(message.Reference)
+                is not (var listingId, var role, var storedHash))
+            {
+                continue;
+            }
+
+            byte[] stored;
+            try
+            {
+                stored = await _s3.DownloadObjectAsync(
+                    TermsDocumentController.Bucket,
+                    TermsDocumentController.ReviewSnapshotObjectKey(
+                        listingId, storedHash is null ? role : $"{role}-{storedHash}"),
+                    ct);
+            }
+            catch (Amazon.S3.AmazonS3Exception)
+            {
+                // The object the message points at is gone; a snapshot cannot be invented here, and
+                // a setup webhook must not fail over a repair it cannot complete.
+                continue;
+            }
+
+            var payload = Encoding.UTF8.GetString(stored);
+            string contentHash;
+            if (IsCompactMessage(payload))
+            {
+                // The normal case: the object already holds the ciphertext, so only the URL the
+                // message points readers at is wrong.
+                contentHash = storedHash ?? LawyerTermsBucketProtocol.ContentHash(stored)[2..]
+                    .ToLowerInvariant();
+                if (storedHash is null)
+                {
+                    // A key that carries no digest cannot be addressed by the route, so store the
+                    // untouched ciphertext under its own content-addressed key.
+                    using var content = new MemoryStream(stored, writable: false);
+                    await _s3.UploadImageAsync(
+                        TermsDocumentController.Bucket,
+                        TermsDocumentController.ReviewSnapshotObjectKey(listingId, role, contentHash),
+                        content,
+                        LawyerTermsBucketProtocol.KeySharingContentType);
+                }
+            }
+            else
+            {
+                // The legacy shape: a plaintext PDF. Encrypt it under this bucket's key and store
+                // the ciphertext content-addressed, exactly as the current build writes it.
+                payload = LawyerTermsBucketProtocol.EncryptMessage(
+                    stored,
+                    bucketSecretJwk,
+                    new Dictionary<string, string> { ["filename"] = message.Description ?? "terms.pdf" });
+                var encrypted = LawyerTermsBucketProtocol.ContentHash(payload);
+                contentHash = encrypted[2..].ToLowerInvariant();
+                using var content = new MemoryStream(Encoding.UTF8.GetBytes(payload), writable: false);
+                await _s3.UploadImageAsync(
+                    TermsDocumentController.Bucket,
+                    TermsDocumentController.ReviewSnapshotObjectKey(listingId, role, contentHash),
+                    content,
+                    LawyerTermsBucketProtocol.KeySharingContentType);
+                // The message's hash has to describe what its reference now serves, or the reader
+                // verifying the download against the hash fails on the repaired document.
+                message.ContentHash = encrypted;
+                changed = true;
+            }
+
+            var reference = ReviewSnapshotReference(listingId, role, contentHash);
+            if (message.Reference != reference)
+            {
+                message.Reference = reference;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// The listing, lawyer role and payload digest a review-snapshot reference points at, or
+    /// <c>null</c> when the reference is not one — a lawyer's or a holder's message, a missing-document
+    /// placeholder, or anything else, which the repair then leaves alone. Both shapes an earlier build
+    /// posted parse: the object-storage URL for the current content-addressed key
+    /// (<c>terms-documents/by-listing/22/spv-lawyer-5b52….pdf</c>) and the one for the older key that
+    /// carried no digest (<c>terms-documents/by-listing/23/spv-lawyer.pdf</c>), as does the API route
+    /// this build posts, which drops the <c>.pdf</c> suffix.
+    /// </summary>
+    private static (long ListingId, string Role, string? ContentHash)? ParseReviewSnapshotReference(
+        string? reference)
+    {
+        if (string.IsNullOrWhiteSpace(reference))
+        {
+            return null;
+        }
+
+        var path = reference;
+        if (Uri.TryCreate(reference, UriKind.Absolute, out var absolute))
+        {
+            path = absolute.AbsolutePath;
+        }
+
+        var match = ReviewSnapshotPathPattern.Match(path.TrimStart('/'));
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        return (
+            long.Parse(match.Groups["listing"].Value, CultureInfo.InvariantCulture),
+            match.Groups["role"].Value,
+            match.Groups["hash"].Success ? match.Groups["hash"].Value : null);
+    }
+
+    private static readonly Regex ReviewSnapshotPathPattern = new(
+        @"\A(?:api/)?terms-documents/by-listing/(?<listing>[0-9]+)/"
+        + @"(?<role>spv-lawyer|developer-lawyer)(?:-(?<hash>[0-9a-f]{64}))?(?:\.pdf)?\z",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     /// <summary>
     /// The bucket key the API encrypts lawyer-review messages with, repairing a review bucket whose
@@ -2300,14 +1916,13 @@ public class WebhooksController : ControllerBase
             bucketSecretJwk,
             new Dictionary<string, string> { ["filename"] = document.FileName });
         var pdfContentHash = LawyerTermsBucketProtocol.ContentHash(pdfPayload);
-        string snapshotUrl;
+        var snapshotHash = pdfContentHash[2..].ToLowerInvariant();
         try
         {
             using var content = new MemoryStream(Encoding.UTF8.GetBytes(pdfPayload), writable: false);
-            snapshotUrl = await _s3.UploadImageAsync(
+            await _s3.UploadImageAsync(
                 TermsDocumentController.Bucket,
-                TermsDocumentController.ReviewSnapshotObjectKey(
-                    listingId, role, pdfContentHash[2..].ToLowerInvariant()),
+                TermsDocumentController.ReviewSnapshotObjectKey(listingId, role, snapshotHash),
                 content,
                 LawyerTermsBucketProtocol.KeySharingContentType);
         }
@@ -2318,8 +1933,11 @@ public class WebhooksController : ControllerBase
                 $"Could not snapshot the {role} terms PDF: {ex.Message}"), null);
         }
 
+        // The object-storage URL UploadImageAsync returns points at a host that sends no
+        // Access-Control-Allow-Origin header, so a browser cannot fetch it — the message carries the
+        // API's own URL for the same object instead, as the terms buckets do.
         return (null, new MessageWriteRequest(
-            snapshotUrl,
+            ReviewSnapshotReference(listingId, role, snapshotHash),
             LawyerTermsBucketProtocol.DocumentTag,
             null,
             document.FileName,
@@ -3071,295 +2689,6 @@ public class WebhooksController : ControllerBase
         string.IsNullOrWhiteSpace(hash) || hash.All(character => character == '0');
 
     /// <summary>
-    /// Receives the <c>agent_election_opened</c> event (a letting agent stood for the property's
-    /// seat election — the indexer fires it per candidacy) and posts a <c>voting/election</c> open
-    /// message with the round plus the expiry resolved from the letting row. The deterministic
-    /// body collapses redeliveries AND later candidacies of the same round into one announcement:
-    /// same property + same round = same bytes = duplicate-guarded.
-    /// </summary>
-    // POST: webhooks/agent_election_opened_devnet
-    [HttpPost("agent_election_opened_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> AgentElectionOpenedDevnet(
-        [FromBody] AgentElectionOpenedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, AgentElectionOpenedEventName, StringComparison.Ordinal)
-            || payload.PropertyId is null
-            || payload.Round is null)
-        {
-            return BadRequest("The body is not a valid 'agent_election_opened' webhook payload.");
-        }
-
-        var resolve = await ResolveAsync(
-            ct, async c => await _indexer.GetPropertyLettingAsync(payload.PropertyId.Value, c));
-        if (resolve.Failed)
-        {
-            return resolve.Failure!;
-        }
-        var letting = resolve.Value!;
-
-        return await PostVotingMessageAsync(
-            payload.PropertyId, payload.Property,
-            tag: ElectionVotingTag,
-            reference: $"voting/election/{payload.PropertyId}/round/{payload.Round}/open",
-            description: $"Letting-agent election round {payload.Round} opened",
-            buildBody: listingId => new JsonObject
-            {
-                ["kind"] = "election",
-                ["listingId"] = listingId,
-                ["round"] = payload.Round.Value,
-                ["expiresAt"] = IndexerClient.Iso8601(letting.ElectionExpiry),
-                ["quorumBps"] = letting.ElectionQuorumBps,
-                ["status"] = "open"
-            },
-            ct);
-    }
-
-    /// <summary>
-    /// Receives the <c>proposal_created</c> event (the letting agent opened a spending proposal)
-    /// and posts a <c>voting/proposal</c> open message with the proposal id plus the expiry,
-    /// quorum and threshold resolved from the indexer. A low-tier spend is auto-approved BY THE
-    /// CHAIN in the same transaction, so its Proposal PDA never survives and no vote can ever be
-    /// cast — the handler answers 200 "ignored" instead of advertising a phantom vote. The
-    /// amount and details hash stay readable through the indexer GraphQL <c>proposals</c> query.
-    /// </summary>
-    // POST: webhooks/proposal_created_devnet
-    [HttpPost("proposal_created_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> ProposalCreatedDevnet(
-        [FromBody] ProposalCreatedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, ProposalCreatedEventName, StringComparison.Ordinal)
-            || payload.PropertyId is null
-            || payload.ProposalId is null)
-        {
-            return BadRequest("The body is not a valid 'proposal_created' webhook payload.");
-        }
-
-        var resolve = await ResolveAsync(
-            ct,
-            async c => await _indexer.GetOpenProposalAsync(
-                payload.PropertyId.Value, payload.ProposalId.Value, c),
-            allowMissing: true);
-        if (resolve.Failed)
-        {
-            return resolve.Failure!;
-        }
-        if (resolve.Value is null)
-        {
-            return Ok(new
-            {
-                status = "ignored",
-                reason = "auto-approved proposal leaves no vote open on-chain"
-            });
-        }
-        var proposal = resolve.Value;
-
-        return await PostVotingMessageAsync(
-            payload.PropertyId, payload.Letting,
-            tag: ProposalVotingTag,
-            reference: $"voting/proposal/{payload.PropertyId}/{payload.ProposalId}/open",
-            description: $"Spending proposal {payload.ProposalId} opened",
-            buildBody: listingId => new JsonObject
-            {
-                ["kind"] = "proposal",
-                ["listingId"] = listingId,
-                ["id"] = payload.ProposalId.Value,
-                ["expiresAt"] = IndexerClient.Iso8601(proposal.Expiry),
-                ["quorumBps"] = proposal.QuorumBps,
-                ["thresholdBps"] = proposal.ThresholdBps,
-                ["status"] = "open"
-            },
-            ct);
-    }
-
-    /// <summary>
-    /// Receives the <c>proposal_finalized</c> event (a spending proposal's vote closed and its
-    /// PDA closed) and posts a <c>voting/result</c> message. The outcome is derived from the
-    /// frozen tallies against the snapshotted quorum/threshold and the share supply — the same
-    /// rule the chain applied — since the payload carries only the closed PDA's key.
-    /// </summary>
-    // POST: webhooks/proposal_finalized_devnet
-    [HttpPost("proposal_finalized_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> ProposalFinalizedDevnet(
-        [FromBody] ProposalFinalizedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, ProposalFinalizedEventName, StringComparison.Ordinal)
-            || payload.PropertyId is null
-            || string.IsNullOrWhiteSpace(payload.Proposal))
-        {
-            return BadRequest("The body is not a valid 'proposal_finalized' webhook payload.");
-        }
-
-        var resolve = await ResolveAsync(
-            ct,
-            async c =>
-            {
-                var proposal = await _indexer.GetFinalizedProposalAsync(
-                    payload.PropertyId.Value, payload.Proposal, c);
-                var shareAmount = await _indexer.GetShareAmountAsync(payload.PropertyId.Value, c);
-                return proposal is null || shareAmount is null
-                    ? null
-                    : new VoteAndSupply<ProposalResultInfo>(proposal, shareAmount.Value);
-            });
-        if (resolve.Failed)
-        {
-            return resolve.Failure!;
-        }
-        var (proposal, shareAmount) = (resolve.Value!.Vote, resolve.Value.ShareAmount);
-        var status = IndexerClient.VotePassed(
-            proposal.TallyYes, proposal.TallyNo, proposal.TallyAbstain,
-            proposal.QuorumBps, proposal.ThresholdBps, shareAmount)
-            ? "passed"
-            : "failed";
-
-        return await PostVotingMessageAsync(
-            payload.PropertyId, payload.Property,
-            tag: VotingResultTag,
-            reference: $"voting/result/proposal/{payload.PropertyId}/{proposal.ProposalId}",
-            description: $"Spending proposal {proposal.ProposalId} {status}",
-            buildBody: listingId => new JsonObject
-            {
-                ["kind"] = "proposal",
-                ["listingId"] = listingId,
-                ["id"] = proposal.ProposalId,
-                ["status"] = status,
-                ["yes"] = proposal.TallyYes,
-                ["no"] = proposal.TallyNo,
-                ["abstain"] = proposal.TallyAbstain
-            },
-            ct);
-    }
-
-    /// <summary>
-    /// Receives the <c>challenge_created</c> event (a token holder challenged the letting agent)
-    /// and posts a <c>voting/challenge</c> open message with the challenge id plus the expiry and
-    /// quorum resolved from the indexer.
-    /// </summary>
-    // POST: webhooks/challenge_created_devnet
-    [HttpPost("challenge_created_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> ChallengeCreatedDevnet(
-        [FromBody] ChallengeCreatedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, ChallengeCreatedEventName, StringComparison.Ordinal)
-            || payload.PropertyId is null
-            || payload.ChallengeId is null)
-        {
-            return BadRequest("The body is not a valid 'challenge_created' webhook payload.");
-        }
-
-        var resolve = await ResolveAsync(
-            ct, async c => await _indexer.GetOpenChallengeAsync(
-                payload.PropertyId.Value, payload.ChallengeId.Value, c));
-        if (resolve.Failed)
-        {
-            return resolve.Failure!;
-        }
-        var challenge = resolve.Value!;
-
-        return await PostVotingMessageAsync(
-            payload.PropertyId, payload.Letting,
-            tag: ChallengeVotingTag,
-            reference: $"voting/challenge/{payload.PropertyId}/{payload.ChallengeId}/open",
-            description: $"Agent challenge {payload.ChallengeId} opened",
-            buildBody: listingId => new JsonObject
-            {
-                ["kind"] = "challenge",
-                ["listingId"] = listingId,
-                ["id"] = payload.ChallengeId.Value,
-                ["expiresAt"] = IndexerClient.Iso8601(challenge.Expiry),
-                ["quorumBps"] = challenge.QuorumBps,
-                ["status"] = "open"
-            },
-            ct);
-    }
-
-    /// <summary>
-    /// Receives the <c>challenge_finalized</c> event (a challenge's vote closed and its PDA
-    /// closed) and posts a <c>voting/result</c> message with the outcome — derived from the
-    /// frozen tallies like the proposal path — and the yes/no/abstain powers. A passed challenge
-    /// at the third strike also removes the agent on-chain; the seat's current state stays
-    /// readable through the indexer GraphQL <c>propertyLettings</c> query.
-    /// </summary>
-    // POST: webhooks/challenge_finalized_devnet
-    [HttpPost("challenge_finalized_devnet")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status502BadGateway)]
-    public async Task<IActionResult> ChallengeFinalizedDevnet(
-        [FromBody] ChallengeFinalizedPayload payload, CancellationToken ct)
-    {
-        if (payload is null
-            || !string.Equals(payload.Event, ChallengeFinalizedEventName, StringComparison.Ordinal)
-            || payload.PropertyId is null
-            || string.IsNullOrWhiteSpace(payload.Challenge))
-        {
-            return BadRequest("The body is not a valid 'challenge_finalized' webhook payload.");
-        }
-
-        var resolve = await ResolveAsync(
-            ct,
-            async c =>
-            {
-                var challenge = await _indexer.GetFinalizedChallengeAsync(
-                    payload.PropertyId.Value, payload.Challenge, c);
-                var shareAmount = await _indexer.GetShareAmountAsync(payload.PropertyId.Value, c);
-                return challenge is null || shareAmount is null
-                    ? null
-                    : new VoteAndSupply<ChallengeResultInfo>(challenge, shareAmount.Value);
-            });
-        if (resolve.Failed)
-        {
-            return resolve.Failure!;
-        }
-        var (challenge, shareAmount) = (resolve.Value!.Vote, resolve.Value.ShareAmount);
-        var status = IndexerClient.VotePassed(
-            challenge.TallyYes, challenge.TallyNo, challenge.TallyAbstain,
-            challenge.QuorumBps, null, shareAmount)
-            ? "passed"
-            : "failed";
-
-        return await PostVotingMessageAsync(
-            payload.PropertyId, payload.Property,
-            tag: VotingResultTag,
-            reference: $"voting/result/challenge/{payload.PropertyId}/{challenge.ChallengeId}",
-            description: $"Agent challenge {challenge.ChallengeId} {status}",
-            buildBody: listingId => new JsonObject
-            {
-                ["kind"] = "challenge",
-                ["listingId"] = listingId,
-                ["id"] = challenge.ChallengeId,
-                ["status"] = status,
-                ["yes"] = challenge.TallyYes,
-                ["no"] = challenge.TallyNo,
-                ["abstain"] = challenge.TallyAbstain
-            },
-            ct);
-    }
-
-    /// <summary>A finalized vote's frozen row plus the share supply its quorum is measured against.</summary>
-    private sealed record VoteAndSupply<T>(T Vote, long ShareAmount) where T : class;
-
-    /// <summary>
     /// Runs one enrichment query, translating its outcomes into the webhook vocabulary: a thrown
     /// <see cref="IndexerQueryException"/> (indexer down/erroring) or a missing expected row both
     /// become a 502, so the indexer's at-least-once delivery retries with backoff until the mirror
@@ -3395,35 +2724,8 @@ public class WebhooksController : ControllerBase
     }
 
     /// <summary>
-    /// Adds the membership-grant counters (<c>lawyerContributorAdded</c>, <c>holdersAdded</c>,
-    /// <c>holdersSkippedNoKey</c>) to a voting handler's Ok body, so the lawyer-election response
-    /// reports the announcement and the grants together. A non-Ok answer (the 404 retry paths)
-    /// passes through untouched.
-    /// </summary>
-    private static IActionResult WithMembershipCounts(
-        IActionResult result, bool lawyerContributorAdded, int holdersAdded, int holdersSkippedNoKey)
-    {
-        if (result is not OkObjectResult ok)
-        {
-            return result;
-        }
-
-        var body = JsonSerializer.SerializeToNode(ok.Value)!.AsObject();
-        body["lawyerContributorAdded"] = lawyerContributorAdded;
-        body["holdersAdded"] = holdersAdded;
-        body["holdersSkippedNoKey"] = holdersSkippedNoKey;
-        return new OkObjectResult(body);
-    }
-
-    /// <summary>
-    /// The shared flow behind every voting webhook: resolve the property's namespace and target
-    /// bucket (the legal bucket unless <paramref name="bucketId"/> selects a lawyer-terms bucket),
-    /// skip an exact duplicate, then post under the requested contributor. The default remains the
-    /// legal bucket's namespace-admin/system identity; lawyer-terms posts use their configured admin.
-    /// Membership grants and any legacy unlock are idempotent inside one transaction.
-    /// <paramref name="buildBody"/> receives the numeric listing id (the payload's
-    /// <c>property_id</c>, or the namespace's as a fallback) and returns the deterministic
-    /// plaintext JSON body.
+    /// Posts a deterministic plaintext voting message to an explicitly selected lawyer bucket.
+    /// Redeliveries with identical content are ignored.
     /// </summary>
     private async Task<IActionResult> PostVotingMessageAsync(
         long? propertyId,
@@ -3433,9 +2735,9 @@ public class WebhooksController : ControllerBase
         string description,
         Func<long, JsonObject> buildBody,
         CancellationToken ct,
-        long? bucketId = null,
-        string? contributor = null,
-        string? admin = null)
+        long bucketId,
+        string contributor,
+        string admin)
     {
         var ns = await FindNamespaceAsync(propertyId, propertyPda, ct);
         if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
@@ -3443,10 +2745,8 @@ public class WebhooksController : ControllerBase
             return NotFound("No webhook-created namespace matches this property yet.");
         }
 
-        var bucket = bucketId is { } targetId
-            ? await _db.Buckets.SingleOrDefaultAsync(
-                candidate => candidate.BucketId == targetId && candidate.NamespaceId == ns.NamespaceId, ct)
-            : await FindLegalBucketAsync(ns.NamespaceId, ct);
+        var bucket = await _db.Buckets.SingleOrDefaultAsync(
+            candidate => candidate.BucketId == bucketId && candidate.NamespaceId == ns.NamespaceId, ct);
         if (bucket is null)
         {
             return NotFound("The property's target voting bucket does not exist yet.");
@@ -3459,11 +2759,6 @@ public class WebhooksController : ControllerBase
         }
 
         var body = buildBody(listingId.Value).ToJsonString();
-        var poster = contributor ?? VotingSystemIdentity;
-        var operatorAdmin = admin ?? ns.Creator;
-
-        // Redelivery guard: the same event rebuilds the same body bytes, so an identical tagged
-        // message already in the bucket means this exact announcement was posted before.
         var duplicate = await _db.Messages
             .AnyAsync(m => m.BucketId == bucket.BucketId && m.Tag == tag && m.IpfsContent == body, ct);
         if (duplicate)
@@ -3477,25 +2772,12 @@ public class WebhooksController : ControllerBase
         }
 
         await using var transaction = await _db.Database.BeginTransactionAsync(ct);
-        // A bucket created before the claim webhook existed may lack the operator admin row the
-        // contributor-add and resume-writing caller checks need; adding it is idempotent.
         await _memberships.AddAdminAsync(
-            ns.Creator, ns.NamespaceId, bucket.BucketId, operatorAdmin, ct);
-        // The poster is idempotent too, which doubles as the guard against the deal_executed
-        // sweep: if it removed every contributor, the next voting webhook re-adds this one.
+            ns.Creator, ns.NamespaceId, bucket.BucketId, admin, ct);
         await _memberships.AddContributorAsync(
-            operatorAdmin, ns.NamespaceId, bucket.BucketId, poster, ct);
-        if (!bucket.IsWritable)
-        {
-            // See the group remark: the only admin is the PropertyAsset PDA, so unlocking can only
-            // ever happen server-side. The placeholder key is no E2E key — voting messages are
-            // plaintext by design.
-            await _buckets.ResumeWritingAsync(
-                operatorAdmin, ns.NamespaceId, bucket.BucketId, PlaceholderEncryptionKey, ct);
-        }
-
+            admin, ns.NamespaceId, bucket.BucketId, contributor, ct);
         var message = await _messages.WriteAsync(
-            poster,
+            contributor,
             ns.NamespaceId,
             bucket.BucketId,
             new MessageWriteRequest(
@@ -3547,16 +2829,6 @@ public class WebhooksController : ControllerBase
     }
 
     /// <summary>
-    /// The property's legal-process bucket, identified by the <see cref="LegalBucketCategory"/>
-    /// the claim-started webhook creates it with (there is at most one per namespace).
-    /// </summary>
-    private async Task<Bucket?> FindLegalBucketAsync(long namespaceId, CancellationToken ct)
-    {
-        return await _db.Buckets
-            .FirstOrDefaultAsync(b => b.NamespaceId == namespaceId && b.Category == LegalBucketCategory, ct);
-    }
-
-    /// <summary>
     /// The bucket viewer id (a 32-byte X25519 key) for a wallet, or null when the wallet has no
     /// usable one. Delegates to the shared <see cref="ViewerKeyResolver"/>: the profile keyed
     /// directly by the wallet first, then the <c>WalletMigrations</c> fallback. Base64url keys are
@@ -3565,14 +2837,6 @@ public class WebhooksController : ControllerBase
     /// </summary>
     private Task<string?> ResolveViewerKeyAsync(string wallet, CancellationToken ct) =>
         _viewerKeys.ResolveAsync(wallet, ct);
-
-    /// <summary>The bucket name, after the namespace's, clamped to the domain's 256-char bound.</summary>
-    private static string LegalBucketName(Namespace ns)
-    {
-        var baseName = string.IsNullOrWhiteSpace(ns.Name) ? $"namespace {ns.NamespaceId}" : ns.Name!;
-        var name = $"{baseName} - legal process";
-        return name.Length <= MaxBucketNameLen ? name : name[..MaxBucketNameLen];
-    }
 
     private static string OffersNamespaceCreatedEventKey(OffersNamespaceCreatedPayload payload)
     {
@@ -3584,35 +2848,23 @@ public class WebhooksController : ControllerBase
     }
 
     private const string EventName = "property_asset_registered";
-    private const string ClaimStartedEventName = "property_claim_started";
     private const string LawyerElectedEventName = "spv_lawyer_elected";
     private const string DeveloperLawyerAssignedEventName = "developer_lawyer_assigned";
     private const string DocumentsConfirmedEventName = "documents_confirmed";
     private const string SilentVerdictResolvedEventName = "silent_verdict_resolved";
     private const string DealExecutedEventName = "deal_executed";
-    private const string AgentAppointedEventName = "letting_agent_appointed";
-    private const string SharesTransferredEventName = "property_shares_transferred";
     private const string SpvCaseClaimedEventName = "spv_case_claimed";
     private const string SpvLawyerVoteCastEventName = "spv_lawyer_vote_cast";
     private const string LawyerTermsApprovedTag = "lawyer/terms-approved";
     private const string LawyerTermsRejectedTag = "lawyer/terms-rejected";
     private const string ApprovedTermsMessage = "Approved terms";
     private const string RejectedTermsMessage = "Rejected terms";
-    private const string AgentElectionOpenedEventName = "agent_election_opened";
-    private const string ProposalCreatedEventName = "proposal_created";
-    private const string ProposalFinalizedEventName = "proposal_finalized";
-    private const string ChallengeCreatedEventName = "challenge_created";
-    private const string ChallengeFinalizedEventName = "challenge_finalized";
-    private const string HolderChangedEventName = "property_holder_changed";
     private const string OffersNamespaceCreatedEventName = "offers_namespace_created";
 
     private const string BucketAdminAddressConfigKey = "BUCKET_ADMIN_ADDRESS";
 
     /// <summary>The all-zero pubkey: what an unassigned <c>LawyerAssignment.lawyer</c> reads as.</summary>
     private const string SystemDefaultPubkey = "11111111111111111111111111111111";
-
-    /// <summary>The bucket category marking a property's legal-process bucket.</summary>
-    private const string LegalBucketCategory = "legal-process";
 
     private const string LawyerTermsBucketCategory = "spv-lawyer-terms";
     private const string LawyerReviewBucketCategory = "lawyer-document-review";
@@ -3625,31 +2877,9 @@ public class WebhooksController : ControllerBase
     private const string DeveloperReviewDocumentFallback =
         "Developer Lawyer's terms document is not available. Please send it here.";
 
-    /// <summary>The tags the voting announcements are posted under (open per kind, one result tag).</summary>
     private const string TermsVotingTag = "voting/terms";
-    private const string ElectionVotingTag = "voting/election";
-    private const string ProposalVotingTag = "voting/proposal";
-    private const string ChallengeVotingTag = "voting/challenge";
     private const string VotingResultTag = "voting/result";
-
-    /// <summary>
-    /// The synthetic contributor identity the voting announcements are posted under. Not a wallet:
-    /// it exists only as a bucket-contributor row, satisfies no chain format (so it never receives
-    /// pushes), and no signature can ever be produced for it.
-    /// </summary>
-    private const string VotingSystemIdentity = "system:voting";
-
-    /// <summary>The content type of every voting announcement: the body is plaintext JSON.</summary>
     private const string VotingContentType = "application/json";
-
-    /// <summary>
-    /// The key a voting webhook unlocks a still-locked legal bucket with: 32 zero bytes, an obvious
-    /// placeholder. Bucket content is not end-to-end-encrypted under it; a real key ceremony has to
-    /// be server-mediated anyway, because the bucket's only admin is the PropertyAsset PDA.
-    /// </summary>
-    private const string PlaceholderEncryptionKey =
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
     /// <summary>The domain's bucket-name bound (InputValidator.MaxNameLen).</summary>
     private const int MaxBucketNameLen = 256;
 }
@@ -3702,50 +2932,6 @@ public sealed class PropertyAssetRegisteredPayload
     public DateTime? BlockTime { get; set; }
 
     /// <summary>The program that registered the asset, e.g. <c>marketplace</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
-/// <summary>
-/// The <c>property_claim_started</c> webhook payload the indexer POSTs verbatim (the first
-/// successful <c>claim_shares</c> on a listing, deduped to one event per listing). Field names
-/// are the indexer's snake_case wire names, pinned with <c>JsonPropertyName</c>.
-/// </summary>
-public sealed class PropertyClaimStartedPayload
-{
-    /// <summary>Always <c>property_claim_started</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary>The base58 Listing PDA — the event's dedup subject.</summary>
-    [JsonPropertyName("listing")]
-    public string? Listing { get; set; }
-
-    /// <summary>The base58 PropertyAsset PDA (the namespace's creator).</summary>
-    [JsonPropertyName("property")]
-    public string? Property { get; set; }
-
-    /// <summary>The on-chain listing id (the namespace's PropertyId).</summary>
-    [JsonPropertyName("listing_id")]
-    public long? ListingId { get; set; }
-
-    /// <summary>The base58 wallet of the investor whose claim opened the claim phase.</summary>
-    [JsonPropertyName("investor")]
-    public string? Investor { get; set; }
-
-    /// <summary>The slot the claim landed in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature of that first claim.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time of the claim, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
     [JsonPropertyName("program")]
     public string? Program { get; set; }
 }
@@ -4050,120 +3236,6 @@ public sealed class DealExecutedPayload
     public string? Program { get; set; }
 }
 
-/// <summary>
-/// The <c>letting_agent_appointed</c> webhook payload the indexer POSTs verbatim (the property
-/// program's <c>finalize_agent_election</c>). Field names are the indexer's snake_case wire names.
-/// </summary>
-public sealed class LettingAgentAppointedPayload
-{
-    /// <summary>Always <c>letting_agent_appointed</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary>
-    /// The on-chain asset id, assumed to equal the marketplace listing id (the namespace's
-    /// PropertyId); when no namespace carries it, the lookup falls back to the PropertyAsset PDA.
-    /// </summary>
-    [JsonPropertyName("asset_id")]
-    public long? AssetId { get; set; }
-
-    /// <summary>The base58 PropertyLetting PDA.</summary>
-    [JsonPropertyName("letting")]
-    public string? Letting { get; set; }
-
-    /// <summary>The base58 PropertyAsset PDA (the namespace's creator).</summary>
-    [JsonPropertyName("property")]
-    public string? Property { get; set; }
-
-    /// <summary>
-    /// The base58 LettingAgent ENTRY PDA of the winner — NOT the agent's wallet; the handler
-    /// resolves the wallet from the indexer's <c>lettingAgents</c> mirror (the row whose
-    /// <c>id</c> is this PDA). Null when the instruction omitted the optional account — a round
-    /// that seated no agent.
-    /// </summary>
-    [JsonPropertyName("winner_entry")]
-    public string? WinnerEntry { get; set; }
-
-    /// <summary>The slot the election finalized in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
-/// <summary>
-/// The <c>property_shares_transferred</c> webhook payload the indexer POSTs verbatim (one of
-/// <c>buy_relisted_shares</c>, <c>accept_offer</c>, <c>send_property_shares</c>). Field names are
-/// the indexer's snake_case wire names.
-/// </summary>
-public sealed class SharesTransferredPayload
-{
-    /// <summary>Always <c>property_shares_transferred</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary><c>relisted_purchase</c>, <c>offer_accepted</c>, or <c>direct_send</c>.</summary>
-    [JsonPropertyName("kind")]
-    public string? Kind { get; set; }
-
-    /// <summary>The base58 PropertyAsset PDA (the namespace's creator).</summary>
-    [JsonPropertyName("property")]
-    public string? Property { get; set; }
-
-    /// <summary>The base58 Listing PDA.</summary>
-    [JsonPropertyName("listing")]
-    public string? Listing { get; set; }
-
-    /// <summary>The base58 wallet of the seller/sender (loses read access).</summary>
-    [JsonPropertyName("from")]
-    public string? From { get; set; }
-
-    /// <summary>The base58 wallet of the buyer/receiver (gains read access).</summary>
-    [JsonPropertyName("to")]
-    public string? To { get; set; }
-
-    /// <summary>
-    /// The transferred amount — null for <c>offer_accepted</c>, where the amount lives in the
-    /// on-chain Offer account and the pure indexer mapper cannot read it.
-    /// </summary>
-    [JsonPropertyName("amount")]
-    public long? Amount { get; set; }
-
-    /// <summary>The on-chain asset id — null for <c>offer_accepted</c>.</summary>
-    [JsonPropertyName("asset_id")]
-    public long? AssetId { get; set; }
-
-    /// <summary>The base58 Offer PDA — set only for <c>offer_accepted</c>, else null.</summary>
-    [JsonPropertyName("offer")]
-    public string? Offer { get; set; }
-
-    /// <summary>The slot the transfer landed in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
 /// <summary>The <c>spv_lawyer_vote_cast</c> webhook payload posted by the indexer.</summary>
 public sealed class SpvLawyerVoteCastPayload
 {
@@ -4248,306 +3320,6 @@ public sealed class SpvCaseClaimedPayload
     public string? Cluster { get; set; }
 
     /// <summary>The slot the candidacy landed in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>marketplace</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
-/// <summary>
-/// The <c>agent_election_opened</c> webhook payload the indexer POSTs verbatim (the property
-/// program's <c>claim_property</c> — fires per candidacy, not just at round open).
-/// </summary>
-public sealed class AgentElectionOpenedPayload
-{
-    /// <summary>Always <c>agent_election_opened</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary>The property program's asset id — equals the marketplace listing id (the
-    /// namespace's PropertyId).</summary>
-    [JsonPropertyName("property_id")]
-    public long? PropertyId { get; set; }
-
-    /// <summary>The election round (1-based).</summary>
-    [JsonPropertyName("round")]
-    public int? Round { get; set; }
-
-    /// <summary>The base58 wallet of the agent this candidacy belongs to.</summary>
-    [JsonPropertyName("agent")]
-    public string? Agent { get; set; }
-
-    /// <summary>The base58 PropertyAsset PDA (the namespace's creator; the lookup fallback).</summary>
-    [JsonPropertyName("property")]
-    public string? Property { get; set; }
-
-    /// <summary>The base58 PropertyLetting PDA.</summary>
-    [JsonPropertyName("letting")]
-    public string? Letting { get; set; }
-
-    /// <summary>The base58 AgentCandidacy PDA the claim created.</summary>
-    [JsonPropertyName("candidacy")]
-    public string? Candidacy { get; set; }
-
-    /// <summary>The slot the candidacy landed in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
-/// <summary>
-/// The <c>proposal_created</c> webhook payload the indexer POSTs verbatim (the property
-/// program's <c>propose</c> — including the auto-approval path, where no Proposal PDA survives).
-/// </summary>
-public sealed class ProposalCreatedPayload
-{
-    /// <summary>Always <c>proposal_created</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
-    [JsonPropertyName("property_id")]
-    public long? PropertyId { get; set; }
-
-    /// <summary>The on-chain proposal id.</summary>
-    [JsonPropertyName("proposal_id")]
-    public long? ProposalId { get; set; }
-
-    /// <summary>The spending amount under vote (provenance; the message does not re-post it).</summary>
-    [JsonPropertyName("amount")]
-    public long? Amount { get; set; }
-
-    /// <summary>The 32-byte hash of the proposal details, base58 (provenance).</summary>
-    [JsonPropertyName("details_hash")]
-    public string? DetailsHash { get; set; }
-
-    /// <summary>The base58 PropertyLetting PDA.</summary>
-    [JsonPropertyName("letting")]
-    public string? Letting { get; set; }
-
-    /// <summary>The base58 Proposal PDA — absent on-chain by the time the event delivers when
-    /// the chain auto-approved the spend.</summary>
-    [JsonPropertyName("proposal")]
-    public string? Proposal { get; set; }
-
-    /// <summary>The slot the proposal was created in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
-/// <summary>
-/// The <c>proposal_finalized</c> webhook payload the indexer POSTs verbatim (a spending
-/// proposal closed — the payload names the CLOSED PDA whose frozen row has the outcome).
-/// </summary>
-public sealed class ProposalFinalizedPayload
-{
-    /// <summary>Always <c>proposal_finalized</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
-    [JsonPropertyName("property_id")]
-    public long? PropertyId { get; set; }
-
-    /// <summary>The base58 PropertyLetting PDA.</summary>
-    [JsonPropertyName("letting")]
-    public string? Letting { get; set; }
-
-    /// <summary>The base58 PropertyAsset PDA (the namespace's creator; the lookup fallback).</summary>
-    [JsonPropertyName("property")]
-    public string? Property { get; set; }
-
-    /// <summary>The base58 Proposal PDA that was finalized (and closed).</summary>
-    [JsonPropertyName("proposal")]
-    public string? Proposal { get; set; }
-
-    /// <summary>The slot the proposal finalized in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
-/// <summary>
-/// The <c>challenge_created</c> webhook payload the indexer POSTs verbatim (a token holder
-/// challenging the letting agent).
-/// </summary>
-public sealed class ChallengeCreatedPayload
-{
-    /// <summary>Always <c>challenge_created</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
-    [JsonPropertyName("property_id")]
-    public long? PropertyId { get; set; }
-
-    /// <summary>The on-chain challenge id.</summary>
-    [JsonPropertyName("challenge_id")]
-    public long? ChallengeId { get; set; }
-
-    /// <summary>The base58 wallet of the challenger.</summary>
-    [JsonPropertyName("challenger")]
-    public string? Challenger { get; set; }
-
-    /// <summary>The base58 PropertyLetting PDA.</summary>
-    [JsonPropertyName("letting")]
-    public string? Letting { get; set; }
-
-    /// <summary>The base58 Challenge PDA the challenge created.</summary>
-    [JsonPropertyName("challenge")]
-    public string? Challenge { get; set; }
-
-    /// <summary>The slot the challenge was created in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-/// <summary>
-/// The <c>challenge_finalized</c> webhook payload the indexer POSTs verbatim (a challenge's
-/// vote closed — the payload names the CLOSED PDA whose frozen row has the outcome; the
-/// optional agent entry is provenance for the seat affected).
-/// </summary>
-public sealed class ChallengeFinalizedPayload
-{
-    /// <summary>Always <c>challenge_finalized</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary>The property program's asset id (the namespace's PropertyId).</summary>
-    [JsonPropertyName("property_id")]
-    public long? PropertyId { get; set; }
-
-    /// <summary>The base58 PropertyLetting PDA.</summary>
-    [JsonPropertyName("letting")]
-    public string? Letting { get; set; }
-
-    /// <summary>The base58 PropertyAsset PDA (the namespace's creator; the lookup fallback).</summary>
-    [JsonPropertyName("property")]
-    public string? Property { get; set; }
-
-    /// <summary>The base58 Challenge PDA that was finalized (and closed).</summary>
-    [JsonPropertyName("challenge")]
-    public string? Challenge { get; set; }
-
-    /// <summary>The base58 LettingAgent ENTRY PDA of the seat holder at close — provenance,
-    /// not the wallet; null when the instruction omitted the optional account.</summary>
-    [JsonPropertyName("agent_entry")]
-    public string? AgentEntry { get; set; }
-
-    /// <summary>The slot the challenge finalized in.</summary>
-    [JsonPropertyName("slot")]
-    public long Slot { get; set; }
-
-    /// <summary>The base58 transaction signature.</summary>
-    [JsonPropertyName("tx_signature")]
-    public string? TxSignature { get; set; }
-
-    /// <summary>The block time, ISO-8601.</summary>
-    [JsonPropertyName("block_time")]
-    public DateTime? BlockTime { get; set; }
-
-    /// <summary>The program that produced the event, e.g. <c>property</c>.</summary>
-    [JsonPropertyName("program")]
-    public string? Program { get; set; }
-}
-
-/// <summary>
-/// The <c>property_holder_changed</c> webhook payload the indexer POSTs verbatim (the primary
-/// market's holder lifecycle: <c>reserve_shares</c> / <c>buy_property_shares</c> add,
-/// <c>unreserve_shares</c>, <c>release_reservation</c>, <c>close_cancelled_position</c> and the
-/// three <c>withdraw_*</c> exits remove). Field names are the indexer's snake_case wire names,
-/// pinned with <c>JsonPropertyName</c>.
-/// </summary>
-public sealed class PropertyHolderChangedPayload
-{
-    /// <summary>Always <c>property_holder_changed</c>.</summary>
-    [JsonPropertyName("event")]
-    public string? Event { get; set; }
-
-    /// <summary><c>added</c> (reserve/buy) or <c>removed</c> (cancel/release/withdraw).</summary>
-    [JsonPropertyName("action")]
-    public string? Action { get; set; }
-
-    /// <summary>The instruction that produced the event, e.g. <c>reserve_shares</c>.</summary>
-    [JsonPropertyName("reason")]
-    public string? Reason { get; set; }
-
-    /// <summary>The base58 wallet whose membership changed.</summary>
-    [JsonPropertyName("investor")]
-    public string? Investor { get; set; }
-
-    /// <summary>The base58 Listing PDA — null for <c>unreserve_shares</c> variants without one.</summary>
-    [JsonPropertyName("listing")]
-    public string? Listing { get; set; }
-
-    /// <summary>The base58 PropertyAsset PDA (the namespace's creator) — null when the instruction does not carry it.</summary>
-    [JsonPropertyName("property")]
-    public string? Property { get; set; }
-
-    /// <summary>The on-chain listing id (the namespace's PropertyId).</summary>
-    [JsonPropertyName("listing_id")]
-    public long? ListingId { get; set; }
-
-    /// <summary>The reserved/bought amount — set only on the two add paths.</summary>
-    [JsonPropertyName("amount")]
-    public long? Amount { get; set; }
-
-    /// <summary>The slot the change landed in.</summary>
     [JsonPropertyName("slot")]
     public long Slot { get; set; }
 

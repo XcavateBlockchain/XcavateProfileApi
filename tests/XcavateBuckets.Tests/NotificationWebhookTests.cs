@@ -10,8 +10,7 @@ namespace XcavateBuckets.Tests;
 
 /// <summary>
 /// The two notification webhooks (income-distributed fanout, direct-share-send receiver push)
-/// driven against the real controller over SQLite, like <see cref="VotingWebhookTests"/> does
-/// for the voting group. These pin the push copy and addressing, the holder fanout's
+/// driven against the real controller over SQLite. These pin the push copy and addressing, the holder fanout's
 /// profile-mapping (direct + wallet-migration fallback), the dedupe under at-least-once
 /// redelivery, the 502 retry contract when the indexer cannot answer, the best-effort property
 /// name, and the shared-secret gate (fail-closed when unconfigured).

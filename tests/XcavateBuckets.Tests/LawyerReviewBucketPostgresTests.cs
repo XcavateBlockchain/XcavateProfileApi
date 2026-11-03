@@ -235,10 +235,11 @@ public class LawyerReviewBucketPostgresTests
         foreach (var message in reviewMessages.Where(message =>
                      message.Tag == "lawyer/terms-document"))
         {
-            var path = new Uri(message.Reference!).AbsolutePath.TrimStart('/');
-            var slash = path.IndexOf('/');
-            var snapshot = await host.S3.DownloadObjectAsync(
-                path[..slash], path[(slash + 1)..], CancellationToken.None);
+            // The reference is the API's route for the snapshot, so it is read the way the review
+            // page reads it — through the API, which also proves the bucket's winner served bytes.
+            using var served = await host.Client.GetAsync(message.Reference!);
+            Assert.That(served.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            var snapshot = await served.Content.ReadAsByteArrayAsync();
             Assert.That(message.ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
                 System.Security.Cryptography.SHA256.HashData(snapshot))),
                 "the object at the message's reference is the payload the message hashes");

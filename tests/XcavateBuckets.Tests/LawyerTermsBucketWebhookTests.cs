@@ -91,27 +91,6 @@ public class LawyerTermsBucketWebhookTests
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
     }
 
-    private static async Task<long> SeedLegalBucketAsync(WebhooksHost host)
-    {
-        var json = new JsonObject
-        {
-            ["event"] = "property_claim_started",
-            ["listing"] = "ListingPDA111",
-            ["property"] = AssetPda,
-            ["listing_id"] = ListingId,
-            ["investor"] = "InvestorWallet111",
-            ["slot"] = 487_600_000,
-            ["tx_signature"] = "ClaimTx1111111111111111111111111111111111111111111",
-            ["program"] = "marketplace"
-        }.ToJsonString();
-        using var response = await host.Client.PostAsync(
-            $"/webhooks/property_claim_started_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
-            new StringContent(json, Encoding.UTF8, "application/json"));
-        var body = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
-        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
-        return body.GetProperty("bucketId").GetInt64();
-    }
-
     private static async Task SeedPrerequisitesAsync(
         WebhooksHost host,
         IReadOnlyList<string>? holders = null,
@@ -193,7 +172,6 @@ public class LawyerTermsBucketWebhookTests
     private static async Task<long> SeedTermsBucketAsync(WebhooksHost host)
     {
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (status, body) = await PostClaimAsync(host);
         Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
@@ -463,7 +441,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
 
         var (status, body) = await PostClaimAsync(host);
@@ -478,8 +455,7 @@ public class LawyerTermsBucketWebhookTests
             Viewers = await db.BucketViewers.Where(row => row.BucketId == bucketId)
                 .Select(row => row.ViewerId).ToListAsync(),
             Messages = await db.Messages.Where(row => row.BucketId == bucketId)
-                .OrderBy(row => row.MessageId).ToListAsync(),
-            LegalMessages = await db.Messages.Where(row => row.BucketId == legalBucketId).ToListAsync()
+                .OrderBy(row => row.MessageId).ToListAsync()
         });
 
         await Assert.MultipleAsync(async () =>
@@ -582,8 +558,6 @@ public class LawyerTermsBucketWebhookTests
                 Assert.That(vote.RootElement.GetProperty("round").GetInt32(), Is.EqualTo(1));
                 Assert.That(vote.RootElement.GetProperty("status").GetString(), Is.EqualTo("open"));
             }
-            Assert.That(state.LegalMessages.Single().Tag, Is.EqualTo("voting/terms"));
-            Assert.That(state.LegalMessages.Single().Contributor, Is.EqualTo("system:voting"));
         });
     }
 
@@ -592,7 +566,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, body) = await PostClaimAsync(host);
         var bucketId = body.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -624,7 +597,6 @@ public class LawyerTermsBucketWebhookTests
             webhookSecret: WebhookSecret,
             profileApiPublicUrl: "https://profile-api.xcavate.io/");
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, body) = await PostClaimAsync(host);
         var bucketId = body.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -643,7 +615,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, body) = await PostClaimAsync(host);
         var bucketId = body.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -689,7 +660,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
 
         var (firstStatus, first) = await PostClaimAsync(host);
@@ -718,7 +688,6 @@ public class LawyerTermsBucketWebhookTests
             webhookSecret: WebhookSecret,
             profileApiPublicUrl: "https://profile-api.xcavate.io");
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, first) = await PostClaimAsync(host);
         var bucketId = first.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -773,7 +742,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, first) = await PostClaimAsync(host);
         var bucketId = first.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -856,7 +824,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, first) = await PostClaimAsync(host);
         var bucketId = first.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -898,7 +865,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         await PostClaimAsync(host);
         await host.WithDbAsync(async db =>
@@ -930,11 +896,10 @@ public class LawyerTermsBucketWebhookTests
     }
 
     [Test]
-    public async Task A_second_lawyer_gets_a_distinct_bucket_without_a_second_round_announcement()
+    public async Task A_second_lawyer_gets_a_distinct_terms_bucket()
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         await PostClaimAsync(host);
         const string secondLawyer = "LawyerWallet222";
@@ -943,19 +908,16 @@ public class LawyerTermsBucketWebhookTests
 
         var (status, _) = await PostClaimAsync(
             host, lawyer: secondLawyer, candidacy: "CandidacyPDA222");
-        var legalMessageCount = await host.WithDbAsync(async db =>
-            await db.Messages.CountAsync(message => message.BucketId == legalBucketId));
 
         await Assert.MultipleAsync(async () =>
         {
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(await TermsBucketCountAsync(host), Is.EqualTo(2));
-            Assert.That(legalMessageCount, Is.EqualTo(1));
         });
     }
 
     [Test]
-    public async Task Terms_setup_survives_a_missing_legal_bucket_and_redelivery_finishes_the_vote()
+    public async Task Terms_redelivery_reuses_the_complete_bucket()
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
@@ -964,30 +926,65 @@ public class LawyerTermsBucketWebhookTests
         var (firstStatus, _) = await PostClaimAsync(host);
         var bucketId = (await host.BucketsAsync())
             .Single(bucket => bucket.Category == "spv-lawyer-terms").BucketId;
-        var legalBucketId = await SeedLegalBucketAsync(host);
         var (secondStatus, second) = await PostClaimAsync(host);
         var termsMessageCount = await host.WithDbAsync(async db =>
             await db.Messages.CountAsync(message => message.BucketId == bucketId));
-        var legalMessageCount = await host.WithDbAsync(async db =>
-            await db.Messages.CountAsync(message => message.BucketId == legalBucketId));
 
         Assert.Multiple(() =>
         {
-            Assert.That(firstStatus, Is.EqualTo(HttpStatusCode.NotFound));
+            Assert.That(firstStatus, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(secondStatus, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(second.GetProperty("lawyerTermsBucketCreated").GetBoolean(), Is.False);
             Assert.That(second.GetProperty("lawyerTermsBucketId").GetInt64(), Is.EqualTo(bucketId));
             Assert.That(termsMessageCount, Is.EqualTo(4));
-            Assert.That(legalMessageCount, Is.EqualTo(1));
         });
     }
 
     [Test]
-    public async Task Election_result_is_posted_to_legal_and_all_lawyer_terms_buckets_in_the_round()
+    public async Task Election_result_before_any_terms_bucket_is_recovered_by_a_late_claim()
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
+        await SeedPrerequisitesAsync(host);
+        host.Indexer.SpvElection = new SpvElectionInfo(1, Expiry, 1, Lawyer);
+        host.Indexer.SpvCandidacy = new SpvCandidacyInfo(Candidacy, 1, Lawyer);
+        var json = new JsonObject
+        {
+            ["event"] = "spv_lawyer_elected",
+            ["listing_id"] = ListingId,
+            ["property_id"] = ListingId,
+            ["listing"] = "ListingPDA111",
+            ["property"] = AssetPda,
+            ["cluster"] = "devnet",
+            ["winner_registry"] = "WinnerRegistryPDA111",
+            ["slot"] = 487_700_200,
+            ["tx_signature"] = "ElectedTx1111111111111111111111111111111111111111",
+            ["block_time"] = "2026-10-02T10:00:00+00:00",
+            ["program"] = "marketplace"
+        }.ToJsonString();
+
+        using var response = await host.Client.PostAsync(
+            $"/webhooks/spv_lawyer_elected_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+        var (claimStatus, claim) = await PostClaimAsync(host);
+        var bucketId = claim.GetProperty("lawyerTermsBucketId").GetInt64();
+        var result = await host.WithDbAsync(async db => await db.Messages.SingleAsync(message =>
+            message.BucketId == bucketId && message.Tag == "voting/result"));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(claimStatus, Is.EqualTo(HttpStatusCode.OK));
+            using var body = JsonDocument.Parse(result.IpfsContent!);
+            Assert.That(body.RootElement.GetProperty("status").GetString(), Is.EqualTo("ratified"));
+        });
+    }
+
+    [Test]
+    public async Task Election_result_is_posted_to_all_lawyer_terms_buckets_in_the_round()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, claim) = await PostClaimAsync(host);
         var termsBucketId = claim.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -1019,8 +1016,6 @@ public class LawyerTermsBucketWebhookTests
             new StringContent(json, Encoding.UTF8, "application/json"));
         var state = await host.WithDbAsync(async db => new
         {
-            LegalResult = await db.Messages.SingleAsync(message =>
-                message.BucketId == legalBucketId && message.Tag == "voting/result"),
             TermsResult = await db.Messages.SingleAsync(message =>
                 message.BucketId == termsBucketId && message.Tag == "voting/result"),
             LosingResult = await db.Messages.SingleAsync(message =>
@@ -1030,12 +1025,10 @@ public class LawyerTermsBucketWebhookTests
         Assert.Multiple(() =>
         {
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(state.LegalResult.Contributor, Is.EqualTo("system:voting"));
             Assert.That(state.TermsResult.Contributor, Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
             Assert.That(state.LosingResult.Contributor, Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
             Assert.That(state.TermsResult.Reference, Is.EqualTo("voting/result/terms/12/round/1"));
-            Assert.That(state.TermsResult.IpfsContent, Is.EqualTo(state.LegalResult.IpfsContent));
-            Assert.That(state.LosingResult.IpfsContent, Is.EqualTo(state.LegalResult.IpfsContent));
+            Assert.That(state.LosingResult.IpfsContent, Is.EqualTo(state.TermsResult.IpfsContent));
             using var result = JsonDocument.Parse(state.TermsResult.IpfsContent!);
             Assert.That(result.RootElement.GetProperty("status").GetString(), Is.EqualTo("ratified"));
             Assert.That(result.RootElement.GetProperty("round").GetInt32(), Is.EqualTo(1));
@@ -1047,7 +1040,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, firstClaim) = await PostClaimAsync(host);
         var roundOneBucketId = firstClaim.GetProperty("lawyerTermsBucketId").GetInt64();
@@ -1101,8 +1093,9 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
+        var (_, firstClaim) = await PostClaimAsync(host);
+        var firstBucketId = firstClaim.GetProperty("lawyerTermsBucketId").GetInt64();
         const string losingLawyer = "LawyerWallet222";
         await host.SeedViewerKeyAsync(losingLawyer, TestDb.Hash32);
         await host.SeedTermsDocumentAsync(losingLawyer, PdfBytes);
@@ -1139,8 +1132,8 @@ public class LawyerTermsBucketWebhookTests
             host, lawyer: losingLawyer, candidacy: "CandidacyPDA222");
         var state = await host.WithDbAsync(async db => new
         {
-            LegalResult = await db.Messages.SingleAsync(message =>
-                message.BucketId == legalBucketId && message.Tag == "voting/result"),
+            ExistingResult = await db.Messages.SingleAsync(message =>
+                message.BucketId == firstBucketId && message.Tag == "voting/result"),
             TermsMessages = await db.Messages.Where(message => message.BucketId == bucketId)
                 .OrderBy(message => message.MessageId).ToListAsync()
         });
@@ -1155,7 +1148,7 @@ public class LawyerTermsBucketWebhookTests
             Assert.That(state.TermsMessages[^1].Contributor,
                 Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
             Assert.That(state.TermsMessages[^1].IpfsContent,
-                Is.EqualTo(state.LegalResult.IpfsContent));
+                Is.EqualTo(state.ExistingResult.IpfsContent));
             using var result = JsonDocument.Parse(state.TermsMessages[^1].IpfsContent!);
             Assert.That(result.RootElement.GetProperty("status").GetString(),
                 Is.EqualTo(ratified ? "ratified" : "rejected"));
@@ -1168,7 +1161,6 @@ public class LawyerTermsBucketWebhookTests
         await using var host = await WebhooksHost.StartAsync(
             webhookSecret: WebhookSecret, bucketAdminAddress: "");
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
 
         var (status, _) = await PostClaimAsync(host);
@@ -1187,7 +1179,6 @@ public class LawyerTermsBucketWebhookTests
         await using var host = await WebhooksHost.StartAsync(
             webhookSecret: WebhookSecret, bucketAdminX25519Key: jwk);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
 
         var (status, _) = await PostClaimAsync(host);
@@ -1219,7 +1210,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host, document: false);
 
         var (status, _) = await PostClaimAsync(host);
@@ -1237,7 +1227,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host, holders: [HolderOne], missingKey: missingKey);
 
         var (status, _) = await PostClaimAsync(host);
@@ -1254,7 +1243,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         host.Indexer.ThrowOnHolders = true;
 
@@ -1272,7 +1260,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         host.S3.DownloadError = new AmazonS3Exception("simulated object storage failure");
 
@@ -1290,7 +1277,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
 
         var (noLawyer, _) = await PostClaimAsync(host, lawyer: null);
@@ -1311,7 +1297,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
 
         var (status, _) = await PostClaimAsync(host, presentedSecret: presentedSecret);
@@ -1344,7 +1329,6 @@ public class LawyerTermsBucketWebhookTests
         const string holderKey = "wGf64t6XctVDZW1Nbb3n_A6NFHgjsUCCKZplxaZ921A";
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         await host.SeedViewerKeyAsync(Lawyer, lawyerKey);
         await host.SeedViewerKeyAsync(HolderOne, holderKey);
@@ -1371,7 +1355,6 @@ public class LawyerTermsBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host,
             holders: [Lawyer, WebhooksHost.DefaultBucketAdminAddress, HolderOne]);
         await host.SeedViewerKeyAsync(HolderOne, TestDb.Key32);

@@ -14,14 +14,6 @@ public sealed class TestIndexerClient : IIndexerClient
     public SpvCandidacyInfo? SpvCandidacy { get; set; }
     public ListingLawyersInfo? ListingLawyers { get; set; }
     public ListingReviewInfo? ListingReview { get; set; }
-    public PropertyLettingInfo? PropertyLetting { get; set; }
-    public ProposalInfo? OpenProposal { get; set; }
-    public ProposalResultInfo? FinalizedProposal { get; set; }
-    public ChallengeInfo? OpenChallenge { get; set; }
-    public ChallengeResultInfo? FinalizedChallenge { get; set; }
-    public long? ShareAmount { get; set; } = 1_000;
-    public IReadOnlyList<string>? HolderWallets { get; set; } = [];
-    public string? LettingAgentWallet { get; set; }
 
     /// <summary>The income webhook's fanout set (the asset's current share holders).</summary>
     public IReadOnlyList<string>? ShareHolderWallets { get; set; } = [];
@@ -51,36 +43,6 @@ public sealed class TestIndexerClient : IIndexerClient
     public Task<ListingReviewInfo?> GetListingLawyerReviewAsync(long listingId, CancellationToken ct)
         => Respond(ListingReview);
 
-    public Task<PropertyLettingInfo?> GetPropertyLettingAsync(long assetId, CancellationToken ct)
-        => Respond(PropertyLetting);
-
-    public Task<ProposalInfo?> GetOpenProposalAsync(long assetId, long proposalId, CancellationToken ct)
-        => Respond(OpenProposal);
-
-    public Task<ProposalResultInfo?> GetFinalizedProposalAsync(
-        long assetId, string proposalPda, CancellationToken ct)
-        => Respond(FinalizedProposal);
-
-    public Task<ChallengeInfo?> GetOpenChallengeAsync(long assetId, long challengeId, CancellationToken ct)
-        => Respond(OpenChallenge);
-
-    public Task<ChallengeResultInfo?> GetFinalizedChallengeAsync(
-        long assetId, string challengePda, CancellationToken ct)
-        => Respond(FinalizedChallenge);
-
-    public Task<long?> GetShareAmountAsync(long assetId, CancellationToken ct)
-        => Respond(ShareAmount);
-
-    public Task<IReadOnlyList<string>> GetCurrentHolderWalletsAsync(long listingId, CancellationToken ct)
-    {
-        if (ThrowOnQuery || ThrowOnHolders)
-        {
-            throw new IndexerQueryException("the indexer is down (simulated)");
-        }
-
-        return Task.FromResult(HolderWallets ?? (IReadOnlyList<string>)[]);
-    }
-
     public Task<IReadOnlyList<string>> GetShareHolderWalletsAsync(long assetId, CancellationToken ct)
     {
         if (ThrowOnQuery || ThrowOnHolders)
@@ -93,9 +55,6 @@ public sealed class TestIndexerClient : IIndexerClient
 
     public Task<string?> GetPropertyAssetNameAsync(long assetId, CancellationToken ct)
         => Respond(PropertyAssetName);
-
-    public Task<string?> GetLettingAgentWalletAsync(string entryPda, CancellationToken ct)
-        => Respond(LettingAgentWallet);
 
     private Task<T?> Respond<T>(T? value)
         => ThrowOnQuery

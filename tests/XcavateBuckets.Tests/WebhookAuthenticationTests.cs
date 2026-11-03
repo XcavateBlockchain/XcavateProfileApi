@@ -12,19 +12,10 @@ public class WebhookAuthenticationTests
     {
         yield return "/webhooks/init_property_asset_devnet";
         yield return "/webhooks/offers_namespace_created_devnet";
-        yield return "/webhooks/property_claim_started_devnet";
         yield return "/webhooks/spv_lawyer_elected_devnet";
         yield return "/webhooks/developer_lawyer_assigned_devnet";
         yield return "/webhooks/deal_executed_devnet";
-        yield return "/webhooks/letting_agent_appointed_devnet";
-        yield return "/webhooks/shares_transferred_devnet";
-        yield return "/webhooks/property_holder_changed_devnet";
         yield return "/webhooks/spv_case_claimed_devnet";
-        yield return "/webhooks/agent_election_opened_devnet";
-        yield return "/webhooks/proposal_created_devnet";
-        yield return "/webhooks/proposal_finalized_devnet";
-        yield return "/webhooks/challenge_created_devnet";
-        yield return "/webhooks/challenge_finalized_devnet";
         yield return "/webhooks/income_distributed_devnet";
         yield return "/webhooks/shares_received_devnet";
     }

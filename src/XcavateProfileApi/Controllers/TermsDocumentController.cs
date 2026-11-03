@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using XcavateProfileApi.Data;
 using XcavateProfileApi.Middleware;
@@ -38,7 +39,27 @@ public class TermsDocumentController : ControllerBase
     /// creation attempt can never overwrite the snapshot the winning bucket's messages point at.
     /// </summary>
     internal static string ReviewSnapshotObjectKey(long listingId, string role, string contentHash) =>
-        $"terms-documents/by-listing/{listingId}/{role}-{contentHash}.pdf";
+        ReviewSnapshotObjectKey(listingId, $"{role}-{contentHash}");
+
+    /// <summary>
+    /// The same key from the <c>{role}-{contentHash}</c> segment the public download route carries,
+    /// so the URL a bucket message holds and the object it resolves to are composed in one place.
+    /// </summary>
+    internal static string ReviewSnapshotObjectKey(long listingId, string roleHash) =>
+        $"terms-documents/by-listing/{listingId}/{roleHash}.pdf";
+
+    /// <summary>
+    /// The only <c>{role}-{contentHash}</c> segments the review route resolves: one of the two
+    /// lawyer roles, then the lowercase hex digest of an encrypted payload. The segment goes into an
+    /// object key, so anything else — a traversal attempt, an uppercase digest, an unknown role — is
+    /// answered as "no such document" without storage being consulted at all.
+    /// </summary>
+    internal static bool IsReviewSnapshotSegment(string? roleHash) =>
+        roleHash is not null && ReviewSnapshotSegmentPattern.IsMatch(roleHash);
+
+    private static readonly Regex ReviewSnapshotSegmentPattern = new(
+        @"\A(?:spv-lawyer|developer-lawyer)-[0-9a-f]{64}\z",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private const string PdfExtension = ".pdf";
     private const string PdfContentType = "application/pdf";
@@ -84,6 +105,31 @@ public class TermsDocumentController : ControllerBase
     {
         var payload = await _s3Service.DownloadObjectAsync(
             Bucket, SnapshotObjectKey(candidacy), cancellationToken);
+        return File(payload, LawyerTermsBucketProtocol.KeySharingContentType);
+    }
+
+    /// <summary>
+    /// Gets one lawyer's review snapshot — the terms PDF as encrypted for that listing's review
+    /// bucket — served by the API rather than by object storage, so the browser's cross-origin fetch
+    /// gets the CORS headers and the <c>application/didcomm-encrypted+json</c> content type the
+    /// object storage does not attach. Public read: what it serves is ciphertext only the bucket's
+    /// key holders can open. 404 for a segment that is not a role and a content hash, exactly as for
+    /// a snapshot that was never written.
+    /// </summary>
+    // GET: api/terms-documents/by-listing/12/spv-lawyer-<64 hex>
+    [HttpGet("~/api/terms-documents/by-listing/{listingId}/{roleHash}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> DownloadReviewSnapshotAsync(
+        long listingId, string roleHash, CancellationToken cancellationToken)
+    {
+        if (!IsReviewSnapshotSegment(roleHash))
+        {
+            return NotFound();
+        }
+
+        var payload = await _s3Service.DownloadObjectAsync(
+            Bucket, ReviewSnapshotObjectKey(listingId, roleHash), cancellationToken);
         return File(payload, LawyerTermsBucketProtocol.KeySharingContentType);
     }
 

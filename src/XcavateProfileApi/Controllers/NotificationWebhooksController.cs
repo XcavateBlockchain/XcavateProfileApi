@@ -158,8 +158,7 @@ public class NotificationWebhooksController : ControllerBase
 
     /// <summary>
     /// Receives the <c>shares_transferred</c> event (a wallet directly sent property shares to
-    /// another wallet — the narrow ADR-41 sibling of the bucket-access
-    /// <c>property_shares_transferred</c> feed) and pushes "you received shares" to the
+    /// another wallet) and pushes "you received shares" to the
     /// RECEIVER, when the receiver's wallet maps to a registered profile. The property's display
     /// name is resolved from the indexer's <c>propertyAssets</c> mirror on a best-effort basis:
     /// a lookup failure omits the name from the copy rather than retrying the event.
@@ -435,8 +434,7 @@ public sealed class IncomeDistributedPayload
 
 /// <summary>
 /// The <c>shares_transferred</c> webhook payload the indexer POSTs verbatim (the marketplace
-/// program's <c>send_property_shares</c> — a direct wallet-to-wallet share send; the narrow
-/// notification sibling of <c>property_shares_transferred</c>'s <c>direct_send</c>). Field names
+/// program's <c>send_property_shares</c> — a direct wallet-to-wallet share send). Field names
 /// are the indexer's snake_case wire names, pinned with <c>JsonPropertyName</c>.
 /// </summary>
 public sealed class SharesReceivedPayload

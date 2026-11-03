@@ -119,27 +119,6 @@ public class LawyerReviewBucketWebhookTests
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
     }
 
-    internal static async Task<long> SeedLegalBucketAsync(WebhooksHost host)
-    {
-        var json = new JsonObject
-        {
-            ["event"] = "property_claim_started",
-            ["listing"] = "ListingPDA111",
-            ["property"] = AssetPda,
-            ["listing_id"] = ListingId,
-            ["investor"] = "InvestorWallet111",
-            ["slot"] = 487_600_000,
-            ["tx_signature"] = "ClaimTx1111111111111111111111111111111111111111111",
-            ["program"] = "marketplace"
-        }.ToJsonString();
-        using var response = await host.Client.PostAsync(
-            $"/webhooks/property_claim_started_devnet?secret={Uri.EscapeDataString(WebhookSecret)}",
-            new StringContent(json, Encoding.UTF8, "application/json"));
-        var body = JsonSerializer.Deserialize<JsonElement>(await response.Content.ReadAsStringAsync());
-        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
-        return body.GetProperty("bucketId").GetInt64();
-    }
-
     internal static async Task SeedPrerequisitesAsync(
         WebhooksHost host,
         IReadOnlyList<string>? holders = null,
@@ -150,7 +129,6 @@ public class LawyerReviewBucketWebhookTests
         holders ??= [HolderOne, HolderTwo];
         host.Indexer.SpvElection = new SpvElectionInfo(1, 1_790_000_000, 1, SpvLawyer);
         host.Indexer.ListingLawyers = new ListingLawyersInfo(SpvLawyer, DeveloperLawyer);
-        host.Indexer.HolderWallets = holders;
         host.Indexer.ShareHolderWallets = holders;
         foreach (var wallet in holders.Append(SpvLawyer).Append(DeveloperLawyer).Distinct())
         {
@@ -672,11 +650,10 @@ public class LawyerReviewBucketWebhookTests
     }
 
     [Test]
-    public async Task Deal_execution_posts_finalized_result_and_still_removes_legal_lawyers()
+    public async Task Deal_execution_posts_finalized_result()
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (setupStatus, setup) = await PostSpvAsync(host);
         Assert.That(setupStatus, Is.EqualTo(HttpStatusCode.OK));
@@ -692,15 +669,10 @@ public class LawyerReviewBucketWebhookTests
         var messages = await ReviewMessagesAsync(host, bucketId);
         var result = messages.Single(message =>
             message.Tag == "voting/result" && message.Reference!.EndsWith("/finalized"));
-        var legalContributors = await host.WithDbAsync(async db => await db.BucketContributors
-            .Where(row => row.BucketId == legalBucketId)
-            .Select(row => row.SubjectId)
-            .ToListAsync());
 
         Assert.Multiple(() =>
         {
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(legalContributors, Does.Not.Contain(SpvLawyer));
             Assert.That(result.Contributor, Is.EqualTo(WebhooksHost.DefaultBucketAdminAddress));
             Assert.That(result.Reference, Is.EqualTo("voting/result/terms/12/attempt/1/finalized"));
             Assert.That(result.Description,
@@ -713,11 +685,10 @@ public class LawyerReviewBucketWebhookTests
     }
 
     [Test]
-    public async Task Property_only_deal_uses_namespace_listing_id_for_legal_and_review_buckets()
+    public async Task Property_only_deal_uses_namespace_listing_id_for_the_review_bucket()
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (setupStatus, setup) = await PostSpvAsync(host);
         Assert.That(setupStatus, Is.EqualTo(HttpStatusCode.OK));
@@ -731,17 +702,28 @@ public class LawyerReviewBucketWebhookTests
 
         var (status, _) = await PostDealAsync(host, listingId: null);
         var messages = await ReviewMessagesAsync(host, bucketId);
-        var legalContributors = await host.WithDbAsync(async db => await db.BucketContributors
-            .Where(row => row.BucketId == legalBucketId)
-            .Select(row => row.SubjectId)
-            .ToListAsync());
 
         Assert.Multiple(() =>
         {
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(legalContributors, Does.Not.Contain(SpvLawyer));
             Assert.That(messages.Any(message => message.Reference
                 == "voting/result/terms/12/attempt/1/finalized"), Is.True);
+        });
+    }
+
+    [Test]
+    public async Task Deal_before_the_review_bucket_returns_404_for_retry()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        await SeedNamespaceAsync(host);
+
+        var (status, _) = await PostDealAsync(host);
+        var buckets = await host.BucketsAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.NotFound));
+            Assert.That(buckets, Is.Empty);
         });
     }
 
@@ -750,7 +732,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (setupStatus, setup) = await PostSpvAsync(host);
         Assert.That(setupStatus, Is.EqualTo(HttpStatusCode.OK));
@@ -771,15 +752,10 @@ public class LawyerReviewBucketWebhookTests
 
         var (status, _) = await PostDealAsync(host, listingId: null);
         var messages = await ReviewMessagesAsync(host, bucketId);
-        var legalContributors = await host.WithDbAsync(async db => await db.BucketContributors
-            .Where(row => row.BucketId == legalBucketId)
-            .Select(row => row.SubjectId)
-            .ToListAsync());
 
         Assert.Multiple(() =>
         {
             Assert.That(status, Is.EqualTo(HttpStatusCode.BadRequest));
-            Assert.That(legalContributors, Does.Contain(SpvLawyer));
             Assert.That(messages, Has.Count.EqualTo(4));
         });
     }
@@ -1031,14 +1007,19 @@ public class LawyerReviewBucketWebhookTests
         // The snapshot's object key is content-addressed with the digest of the payload stored at
         // it, so it is read back from the message's own reference instead of being guessed at —
         // which is exactly what stops a losing creation attempt's bytes from posing as the
-        // winning bucket's snapshot.
+        // winning bucket's snapshot. That reference is the API's own route rather than an
+        // object-storage URL, because the object host sends no CORS header a browser can read.
         Assert.That(message.Reference, Does.StartWith(
-            $"https://objects.test/xcavate-profile/terms-documents/by-listing/12/{role}-")
-            .And.EndsWith(".pdf"));
-        var path = new Uri(message.Reference!).AbsolutePath.TrimStart('/');
-        var slash = path.IndexOf('/');
+            $"http://localhost/api/terms-documents/by-listing/12/{role}-"));
+        Assert.That(message.Reference, Does.Not.Contain(".pdf"));
+        Assert.That(message.Reference, Does.Not.Contain("objects.test"));
+        var snapshotHash = message.ContentHash![2..].ToLowerInvariant();
         var snapshot = await host.S3.DownloadObjectAsync(
-            path[..slash], path[(slash + 1)..], CancellationToken.None);
+            "xcavate-profile",
+            $"terms-documents/by-listing/12/{role}-{snapshotHash}.pdf",
+            CancellationToken.None);
+        using var served = await host.Client.GetAsync(message.Reference);
+        var servedBytes = await served.Content.ReadAsByteArrayAsync();
         var key = await BucketKeyAsync(host, message.BucketId);
         var decrypted = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
             Encoding.UTF8.GetString(snapshot), key.PrivateKey, key.Kid);
@@ -1047,15 +1028,118 @@ public class LawyerReviewBucketWebhookTests
         {
             Assert.That(message.Tag, Is.EqualTo("lawyer/terms-document"));
             Assert.That(message.Reference, Is.EqualTo(
-                "https://objects.test/xcavate-profile/terms-documents/by-listing/12/"
-                + $"{role}-{message.ContentHash![2..].ToLowerInvariant()}.pdf"));
+                $"http://localhost/api/terms-documents/by-listing/12/{role}-{snapshotHash}"));
             Assert.That(message.Description, Is.EqualTo("terms.pdf"));
             Assert.That(message.ContentType, Is.EqualTo("application/pdf"));
             Assert.That(message.IpfsContent, Is.Null);
             Assert.That(decrypted, Is.EqualTo(pdf));
             Assert.That(message.ContentHash,
                 Is.EqualTo("0x" + Convert.ToHexString(SHA256.HashData(snapshot))));
+            Assert.That(served.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(served.Content.Headers.ContentType?.MediaType,
+                Is.EqualTo("application/didcomm-encrypted+json"));
+            Assert.That(servedBytes, Is.EqualTo(snapshot));
         });
+    }
+
+    /// <summary>
+    /// The review page fetches both snapshots from the browser, so their references have to be API
+    /// URLs — the object-storage host answers without an <c>Access-Control-Allow-Origin</c> header
+    /// and the fetch fails before the documents can be read at all.
+    /// </summary>
+    [Test]
+    public async Task Review_setup_references_both_snapshots_as_profile_api_urls()
+    {
+        await using var host = await WebhooksHost.StartAsync(
+            webhookSecret: WebhookSecret,
+            profileApiPublicUrl: "https://profile-api.xcavate.io/");
+        await SeedNamespaceAsync(host);
+        await SeedPrerequisitesAsync(host);
+
+        var (status, body) = await PostDeveloperJsonAsync(host);
+        var bucketId = body.GetProperty("lawyerReviewBucketId").GetInt64();
+        var documents = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId
+                && message.Tag == "lawyer/terms-document")
+            .OrderBy(message => message.MessageId)
+            .ToListAsync());
+
+        await Assert.MultipleAsync(async () =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(documents, Has.Count.EqualTo(2));
+            Assert.That(
+                documents.Select(message => message.Reference).ToList(),
+                Is.EqualTo(new[]
+                {
+                    "https://profile-api.xcavate.io/api/terms-documents/by-listing/12/spv-lawyer-"
+                        + documents[0].ContentHash![2..].ToLowerInvariant(),
+                    "https://profile-api.xcavate.io/api/terms-documents/by-listing/12/developer-lawyer-"
+                        + documents[1].ContentHash![2..].ToLowerInvariant()
+                }),
+                "both document references are the API's own URLs for the stored snapshots");
+            foreach (var message in documents)
+            {
+                Assert.That(message.Reference, Does.Not.Contain("objects.test"));
+                Assert.That(message.Reference, Does.Not.Contain("your-objectstorage.com"));
+                Assert.That(message.Reference, Does.Not.EndWith(".pdf"));
+                using var served = await host.Client.GetAsync(message.Reference);
+                Assert.That(served.StatusCode, Is.EqualTo(HttpStatusCode.OK),
+                    $"the reference {message.Reference} must be readable by the review page");
+                Assert.That(served.Content.Headers.ContentType?.MediaType,
+                    Is.EqualTo("application/didcomm-encrypted+json"));
+            }
+        });
+    }
+
+    [Test]
+    public async Task Review_snapshot_route_serves_the_stored_ciphertext()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedReviewBucketAsync(host);
+        var document = (await ReviewMessagesAsync(host, bucketId)).Single(message =>
+            message.Tag == "lawyer/terms-document"
+            && message.Reference!.Contains("/spv-lawyer-", StringComparison.Ordinal));
+        var objectKey =
+            $"terms-documents/by-listing/12/spv-lawyer-{document.ContentHash![2..].ToLowerInvariant()}.pdf";
+        var stored = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", objectKey, CancellationToken.None);
+
+        using var response = await host.Client.GetAsync(document.Reference);
+        var served = await response.Content.ReadAsByteArrayAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(response.Content.Headers.ContentType?.MediaType,
+                Is.EqualTo("application/didcomm-encrypted+json"));
+            Assert.That(served, Is.EqualTo(stored),
+                "the route serves the stored ciphertext byte-for-byte, never the plaintext PDF");
+        });
+    }
+
+    [TestCase("spv-lawyer")]
+    [TestCase("developer-lawyer")]
+    [TestCase("spv-lawyer-")]
+    [TestCase("spv-lawyer-000000000000000000000000000000000000000000000000000000000000000")]
+    [TestCase("spv-lawyer-00000000000000000000000000000000000000000000000000000000000000000")]
+    [TestCase("spv-lawyer-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
+    [TestCase("spv-lawyer-gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")]
+    [TestCase("SPV-Lawyer-0000000000000000000000000000000000000000000000000000000000000000")]
+    [TestCase("lawyer-0000000000000000000000000000000000000000000000000000000000000000")]
+    [TestCase("spv-lawyer-....-..-....-etc-passwd")]
+    [TestCase("spv-lawyer-0000000000000000000000000000000000000000000000000000000000000000/../")]
+    public async Task Review_snapshot_route_rejects_a_malformed_segment_without_touching_storage(
+        string roleHash)
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        host.S3.DownloadError = new InvalidOperationException(
+            "a segment that is not a role and a lowercase digest must never be resolved against storage");
+
+        using var response = await host.Client.GetAsync(
+            $"/api/terms-documents/by-listing/12/{roleHash}");
+
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.NotFound), roleHash);
     }
 
     [TestCase(false, true, 2, SpvFallback)]
@@ -1096,7 +1180,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
 
         var first = spvFirst ? await PostSpvAsync(host) : await PostDeveloperJsonAsync(host);
@@ -1104,8 +1187,6 @@ public class LawyerReviewBucketWebhookTests
         var bucketId = await ReviewBucketIdAsync(host);
         var messageCount = await host.WithDbAsync(async db => await db.Messages
             .CountAsync(message => message.BucketId == bucketId));
-        var legalMessageCount = await host.WithDbAsync(async db => await db.Messages
-            .CountAsync(message => message.BucketId == legalBucketId));
 
         Assert.Multiple(() =>
         {
@@ -1114,7 +1195,6 @@ public class LawyerReviewBucketWebhookTests
             Assert.That(first.Body.GetProperty("lawyerReviewBucketCreated").GetBoolean(), Is.True);
             Assert.That(second.Body.GetProperty("lawyerReviewBucketCreated").GetBoolean(), Is.False);
             Assert.That(messageCount, Is.EqualTo(4));
-            Assert.That(legalMessageCount, Is.EqualTo(1));
         });
     }
 
@@ -1123,7 +1203,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         await PostDeveloperJsonAsync(host);
         var bucketId = await ReviewBucketIdAsync(host);
@@ -1150,7 +1229,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (initialStatus, _) = await PostDeveloperAsync(host, cluster: null, propertyId: null);
         var bucketId = await ReviewBucketIdAsync(host);
@@ -1413,7 +1491,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, setup) = await PostSpvAsync(host);
         var bucketId = setup.GetProperty("lawyerReviewBucketId").GetInt64();
@@ -1665,7 +1742,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        var legalBucketId = await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, setup) = await PostSpvAsync(host);
         var bucketId = setup.GetProperty("lawyerReviewBucketId").GetInt64();
@@ -1678,16 +1754,10 @@ public class LawyerReviewBucketWebhookTests
         var (dealStatus, _) = await PostDealAsync(host);
 
         var messages = await ReviewMessagesAsync(host, bucketId);
-        var legalContributors = await host.WithDbAsync(async db => await db.BucketContributors
-            .Where(row => row.BucketId == legalBucketId)
-            .Select(row => row.SubjectId)
-            .ToListAsync());
 
         await Assert.MultipleAsync(async () =>
         {
             Assert.That(dealStatus, Is.EqualTo(HttpStatusCode.OK));
-            Assert.That(legalContributors, Does.Not.Contain(SpvLawyer));
-            Assert.That(legalContributors, Does.Not.Contain(DeveloperLawyer));
             Assert.That(messages.Single(message =>
                     message.Tag == "voting/result"
                     && message.Reference!.EndsWith("/finalized")).Reference,
@@ -1776,7 +1846,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host);
         var (_, setup) = await PostSpvAsync(host);
         var bucketId = setup.GetProperty("lawyerReviewBucketId").GetInt64();
@@ -1991,6 +2060,177 @@ public class LawyerReviewBucketWebhookTests
                 message.Tag == "didcomm/key-sharing-v1"), Is.EqualTo(2));
             Assert.That(await DecryptMessageAsync(host, messages[5]), Is.EqualTo("Approved terms"));
             Assert.That(await BucketEncryptionKeyAsync(host, bucketId), Is.EqualTo(convergedKey));
+        });
+    }
+
+    /// <summary>
+    /// The bucket-56 shape: an earlier build stored the review snapshot as a plaintext PDF under a
+    /// key carrying no digest, and posted the object-storage URL for it. The review page cannot read
+    /// that URL cross-origin and rejects the bytes as "not an encrypted attachment" — so the lawyers
+    /// cannot compute the document hash, and cannot approve, reject or finalize. A setup redelivery
+    /// has to encrypt the PDF under the bucket's own key, store it content-addressed, and repoint the
+    /// message at the API's URL for it, then stay put on every delivery after that.
+    /// </summary>
+    [Test]
+    public async Task Legacy_plaintext_snapshot_is_encrypted_and_repointed_on_redelivery()
+    {
+        await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
+        var bucketId = await SeedReviewBucketAsync(host);
+        var bucketKey = await BucketEncryptionKeyAsync(host, bucketId);
+        var before = await ReviewMessagesAsync(host, bucketId);
+        var spv = before.Single(message => message.Tag == "lawyer/terms-document"
+            && message.Reference!.Contains("/spv-lawyer-", StringComparison.Ordinal));
+        var developerBefore = before.Single(message => message.Tag == "lawyer/terms-document"
+            && message.Reference!.Contains("/developer-lawyer-", StringComparison.Ordinal));
+        const string legacyKey = "terms-documents/by-listing/12/spv-lawyer.pdf";
+        await host.WithDbAsync(async db =>
+        {
+            var message = await db.Messages.SingleAsync(row => row.MessageId == spv.MessageId);
+            message.Reference =
+                $"https://xcavate-profile.fsn1.your-objectstorage.com/{legacyKey}";
+            message.ContentHash = "0x" + Convert.ToHexString(SHA256.HashData(SpvPdf));
+            await db.SaveChangesAsync();
+            return true;
+        });
+        using (var plaintext = new MemoryStream(SpvPdf, writable: false))
+        {
+            await host.S3.UploadImageAsync(
+                "xcavate-profile", legacyKey, plaintext, "application/pdf");
+        }
+
+        var (status, _) = await PostDeveloperAsync(host);
+        var after = await ReviewMessagesAsync(host, bucketId);
+        var repaired = after.Single(message => message.MessageId == spv.MessageId);
+        var contentHash = repaired.ContentHash![2..].ToLowerInvariant();
+        var ciphertext = await host.S3.DownloadObjectAsync(
+            "xcavate-profile",
+            $"terms-documents/by-listing/12/spv-lawyer-{contentHash}.pdf",
+            CancellationToken.None);
+        var ciphertextText = Encoding.UTF8.GetString(ciphertext);
+        var key = await BucketKeyAsync(host, bucketId);
+        var decrypted = LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+            ciphertextText, key.PrivateKey, key.Kid);
+        using var header = JsonDocument.Parse(
+            Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(
+                ciphertextText.Split('.')[0]));
+        using var served = await host.Client.GetAsync(repaired.Reference);
+        var servedBytes = await served.Content.ReadAsByteArrayAsync();
+        var developer = after.Single(message => message.MessageId == developerBefore.MessageId);
+
+        await Assert.MultipleAsync(async () =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(after, Has.Count.EqualTo(4), "the repair adds no messages");
+            Assert.That(await BucketEncryptionKeyAsync(host, bucketId), Is.EqualTo(bucketKey),
+                "the repair reuses the bucket key it already holds");
+            Assert.That(ciphertextText.Split('.'), Has.Length.EqualTo(5),
+                "the stored snapshot is now a compact JWE, not a plaintext PDF");
+            Assert.That(header.RootElement.GetProperty("filename").GetString(),
+                Is.EqualTo("terms.pdf"));
+            Assert.That(decrypted, Is.EqualTo(SpvPdf));
+            Assert.That(repaired.Reference, Is.EqualTo(
+                $"http://localhost/api/terms-documents/by-listing/12/spv-lawyer-{contentHash}"));
+            Assert.That(repaired.Description, Is.EqualTo("terms.pdf"));
+            Assert.That(repaired.ContentType, Is.EqualTo("application/pdf"));
+            Assert.That(repaired.IpfsContent, Is.Null);
+            Assert.That(repaired.ContentHash,
+                Is.EqualTo("0x" + Convert.ToHexString(SHA256.HashData(ciphertext))),
+                "the hash describes what the repointed reference now serves");
+            Assert.That(served.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(served.Content.Headers.ContentType?.MediaType,
+                Is.EqualTo("application/didcomm-encrypted+json"));
+            Assert.That(servedBytes, Is.EqualTo(ciphertext));
+            Assert.Multiple(() =>
+            {
+                Assert.That(developer.Reference, Is.EqualTo(developerBefore.Reference));
+                Assert.That(developer.ContentHash, Is.EqualTo(developerBefore.ContentHash));
+                Assert.That(developer.IpfsContent, Is.EqualTo(developerBefore.IpfsContent));
+                Assert.That(after.Count(message =>
+                    message.Tag == "didcomm/key-sharing-v1"), Is.EqualTo(1));
+            });
+        });
+
+        // And the repair has converged: a second delivery writes no object and rewrites no message.
+        var uploadCount = host.S3.Uploads.Count;
+        var (secondStatus, _) = await PostDeveloperAsync(host);
+        var again = await ReviewMessagesAsync(host, bucketId);
+
+        await Assert.MultipleAsync(async () =>
+        {
+            Assert.That(secondStatus, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(again, Has.Count.EqualTo(4));
+            Assert.That(again.Select(message => message.Reference),
+                Is.EqualTo(after.Select(message => message.Reference)));
+            Assert.That(again.Select(message => message.ContentHash),
+                Is.EqualTo(after.Select(message => message.ContentHash)));
+            Assert.That(again.Select(message => message.IpfsContent),
+                Is.EqualTo(after.Select(message => message.IpfsContent)));
+            Assert.That(host.S3.Uploads, Has.Count.EqualTo(uploadCount),
+                "a converged repair uploads nothing");
+            Assert.That(await BucketEncryptionKeyAsync(host, bucketId), Is.EqualTo(bucketKey));
+        });
+    }
+
+    /// <summary>
+    /// The bucket-58 shape: the snapshot is already the right ciphertext under its content-addressed
+    /// key, and only the message's reference is wrong — an object-storage URL no browser may read
+    /// cross-origin. A setup redelivery moves nothing and re-encrypts nothing; it repoints the URL.
+    /// </summary>
+    [Test]
+    public async Task Legacy_object_storage_reference_is_repointed_without_touching_the_snapshot()
+    {
+        await using var host = await WebhooksHost.StartAsync(
+            webhookSecret: WebhookSecret,
+            profileApiPublicUrl: "https://profile-api.xcavate.io");
+        var bucketId = await SeedReviewBucketAsync(host);
+        var before = await ReviewMessagesAsync(host, bucketId);
+        var spv = before.Single(message => message.Tag == "lawyer/terms-document"
+            && message.Reference!.Contains("/spv-lawyer-", StringComparison.Ordinal));
+        var objectKey =
+            $"terms-documents/by-listing/12/spv-lawyer-{spv.ContentHash![2..].ToLowerInvariant()}.pdf";
+        var stored = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", objectKey, CancellationToken.None);
+        await host.WithDbAsync(async db =>
+        {
+            var message = await db.Messages.SingleAsync(row => row.MessageId == spv.MessageId);
+            message.Reference =
+                $"https://xcavate-profile.fsn1.your-objectstorage.com/{objectKey}";
+            await db.SaveChangesAsync();
+            return true;
+        });
+        var uploadCount = host.S3.Uploads.Count;
+
+        var (status, _) = await PostDeveloperAsync(host);
+        var after = await ReviewMessagesAsync(host, bucketId);
+        var repaired = after.Single(message => message.MessageId == spv.MessageId);
+        var afterStored = await host.S3.DownloadObjectAsync(
+            "xcavate-profile", objectKey, CancellationToken.None);
+
+        await Assert.MultipleAsync(async () =>
+        {
+            Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(after, Has.Count.EqualTo(4));
+            Assert.That(repaired.Reference, Is.EqualTo(
+                "https://profile-api.xcavate.io/api/terms-documents/by-listing/12/spv-lawyer-"
+                + spv.ContentHash![2..].ToLowerInvariant()));
+            Assert.That(repaired.ContentHash, Is.EqualTo(spv.ContentHash),
+                "an already-encrypted snapshot keeps the hash its bytes already carry");
+            Assert.That(afterStored, Is.EqualTo(stored), "the stored snapshot is not rewritten");
+            Assert.That(host.S3.Uploads, Has.Count.EqualTo(uploadCount));
+            using var served = await host.Client.GetAsync(repaired.Reference);
+            Assert.That(served.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(await served.Content.ReadAsByteArrayAsync(), Is.EqualTo(stored));
+        });
+
+        var (secondStatus, _) = await PostDeveloperAsync(host);
+        var again = await ReviewMessagesAsync(host, bucketId);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(secondStatus, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(again.Select(message => message.Reference),
+                Is.EqualTo(after.Select(message => message.Reference)));
+            Assert.That(host.S3.Uploads, Has.Count.EqualTo(uploadCount));
         });
     }
 
@@ -2313,7 +2553,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         host.Indexer.SpvElection = new SpvElectionInfo(1, 1_790_000_000, 1, SpvLawyer);
         host.Indexer.ListingLawyers = new ListingLawyersInfo(SpvLawyer, SystemDefaultPubkey);
 
@@ -2332,7 +2571,6 @@ public class LawyerReviewBucketWebhookTests
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
-        await SeedLegalBucketAsync(host);
         await SeedPrerequisitesAsync(host, missingKey: DeveloperLawyer);
 
         var (status, _) = await PostSpvAsync(host);
