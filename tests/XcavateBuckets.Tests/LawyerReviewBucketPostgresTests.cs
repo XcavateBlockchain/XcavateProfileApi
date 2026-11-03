@@ -1,5 +1,8 @@
 using System.Data.Common;
 using System.Net;
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
@@ -27,7 +30,7 @@ public class LawyerReviewBucketPostgresTests
         }
 
         WebhooksHost? host = null;
-        var barrier = new BucketInsertBarrier();
+        var barrier = new BucketCreationLockBarrier();
         try
         {
             var connectionString = new NpgsqlConnectionStringBuilder(adminConnection)
@@ -39,8 +42,8 @@ public class LawyerReviewBucketPostgresTests
                 postgresConnectionString: connectionString,
                 bucketInterceptor: barrier);
             await LawyerReviewBucketWebhookTests.SeedNamespaceAsync(host);
-            await LawyerReviewBucketWebhookTests.SeedPrerequisitesAsync(
-                host, spvDocument: false, developerDocument: false);
+            // Both lawyers have a real terms PDF, so every creation attempt would snapshot one.
+            await LawyerReviewBucketWebhookTests.SeedPrerequisitesAsync(host);
 
             var responses = await Task.WhenAll(
                 LawyerReviewBucketWebhookTests.PostDeveloperAsync(host),
@@ -48,16 +51,40 @@ public class LawyerReviewBucketPostgresTests
             var buckets = (await host.BucketsAsync())
                 .Where(bucket => bucket.Category == "lawyer-document-review")
                 .ToList();
-            var messageCount = await host.WithDbAsync(async db => await db.Messages.CountAsync());
+            var messages = await host.WithDbAsync(async db => await db.Messages
+                .OrderBy(message => message.MessageId)
+                .ToListAsync());
+            var snapshotKeys = host.S3.Uploads
+                .Select(upload => upload.Key)
+                .Where(key => key.StartsWith("terms-documents/by-listing/", StringComparison.Ordinal))
+                .ToList();
+
+            // The winner's own bucket key must open the snapshots its messages reference: a loser
+            // that had snapshotted under its own discarded key would fail this.
+            var bucketId = buckets.Single().BucketId;
+            var reviewMessages = messages
+                .Where(message => message.BucketId == bucketId)
+                .ToList();
+            var decrypted = await DecryptSnapshotsAsync(host, reviewMessages, bucketId);
 
             Assert.Multiple(() =>
             {
                 Assert.That(responses.Select(response => response.Status),
                     Is.All.EqualTo(HttpStatusCode.OK));
-                Assert.That(barrier.Arrivals, Is.EqualTo(2), "both requests must race at bucket insertion");
+                Assert.That(barrier.Arrivals, Is.EqualTo(2),
+                    "both requests must race at the review bucket's creation lock");
                 Assert.That(buckets, Has.Count.EqualTo(1));
                 Assert.That(buckets.Select(bucket => bucket.EncryptionKey).Distinct().Count(), Is.EqualTo(1));
-                Assert.That(messageCount, Is.EqualTo(4));
+                Assert.That(reviewMessages, Has.Count.EqualTo(4));
+                Assert.That(snapshotKeys, Has.Count.EqualTo(2),
+                    "only the winning creation may snapshot the two terms PDFs");
+                Assert.That(
+                    decrypted.Select(Encoding.UTF8.GetString),
+                    Is.EquivalentTo(new[]
+                    {
+                        Encoding.UTF8.GetString(LawyerReviewBucketWebhookTests.SpvPdf),
+                        Encoding.UTF8.GetString(LawyerReviewBucketWebhookTests.DeveloperPdf)
+                    }));
             });
         }
         finally
@@ -179,9 +206,56 @@ public class LawyerReviewBucketPostgresTests
         }
     }
 
-    private sealed class BucketInsertBarrier : DbCommandInterceptor
+    /// <summary>
+    /// Reads each document message's snapshot object back from the reference it carries and
+    /// decrypts it with the bucket's own key, so a snapshot written under some other creation
+    /// attempt's key cannot pass.
+    /// </summary>
+    private static async Task<List<byte[]>> DecryptSnapshotsAsync(
+        WebhooksHost host,
+        IReadOnlyList<XcavateBuckets.Domain.Entities.Message> reviewMessages,
+        long bucketId)
     {
-        private readonly TaskCompletionSource _bothInserts =
+        var keySharing = await host.WithDbAsync(async db => await db.Messages
+            .Where(message => message.BucketId == bucketId
+                && message.Tag == "didcomm/key-sharing-v1")
+            .OrderByDescending(message => message.MessageId)
+            .Select(message => message.IpfsContent)
+            .SingleAsync());
+        var plaintext = LawyerTermsBucketProtocolTests.DecryptForRecipient(
+            keySharing!, WebhooksHost.DefaultBucketAdminPrivateKey);
+        using var document = JsonDocument.Parse(plaintext);
+        var secret = document.RootElement.GetProperty("keys")[0];
+        var privateKey = WebEncoders.Base64UrlDecode(secret.GetProperty("d").GetString()!);
+        var kid = secret.TryGetProperty("kid", out var kidElement)
+            ? kidElement.GetString()
+            : null;
+
+        var decrypted = new List<byte[]>();
+        foreach (var message in reviewMessages.Where(message =>
+                     message.Tag == "lawyer/terms-document"))
+        {
+            var path = new Uri(message.Reference!).AbsolutePath.TrimStart('/');
+            var slash = path.IndexOf('/');
+            var snapshot = await host.S3.DownloadObjectAsync(
+                path[..slash], path[(slash + 1)..], CancellationToken.None);
+            Assert.That(message.ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(snapshot))),
+                "the object at the message's reference is the payload the message hashes");
+            decrypted.Add(LawyerTermsBucketProtocolTests.DecryptCompactMessage(
+                Encoding.UTF8.GetString(snapshot), privateKey, kid));
+        }
+
+        return decrypted;
+    }
+
+    /// <summary>
+    /// Holds both concurrent creations at the review bucket's advisory lock until both have
+    /// arrived, so the database's own lock — not the test's timing — is what serialises them.
+    /// </summary>
+    private sealed class BucketCreationLockBarrier : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource _bothArrived =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _arrivals;
 
@@ -193,7 +267,7 @@ public class LawyerReviewBucketPostgresTests
             InterceptionResult<DbDataReader> result,
             CancellationToken cancellationToken = default)
         {
-            await WaitForBothInsertsAsync(command.CommandText);
+            await WaitForBothAsync(command.CommandText);
             return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
         }
 
@@ -203,23 +277,21 @@ public class LawyerReviewBucketPostgresTests
             InterceptionResult<int> result,
             CancellationToken cancellationToken = default)
         {
-            await WaitForBothInsertsAsync(command.CommandText);
+            await WaitForBothAsync(command.CommandText);
             return await base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
         }
 
-        private async Task WaitForBothInsertsAsync(string commandText)
+        private async Task WaitForBothAsync(string commandText)
         {
-            var bucketInsert = commandText.Contains("INSERT INTO buckets", StringComparison.Ordinal)
-                || commandText.Contains("INSERT INTO \"buckets\"", StringComparison.Ordinal);
-            if (!bucketInsert)
+            if (!commandText.Contains("pg_advisory_xact_lock", StringComparison.Ordinal))
             {
                 return;
             }
             if (Interlocked.Increment(ref _arrivals) == 2)
             {
-                _bothInserts.TrySetResult();
+                _bothArrived.TrySetResult();
             }
-            await _bothInserts.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            await _bothArrived.Task.WaitAsync(TimeSpan.FromSeconds(15));
         }
     }
 }

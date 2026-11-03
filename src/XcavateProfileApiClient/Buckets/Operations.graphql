@@ -49,6 +49,7 @@ query GetNamespaceById($id: ID!) {
       bucketId
       name
       category
+      properties
       isWritable
     }
   }

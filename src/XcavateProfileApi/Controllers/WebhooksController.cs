@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Solnet.Wallet.Utilities;
 using XcavateBuckets.Domain;
 using XcavateBuckets.Domain.Data;
 using XcavateBuckets.Domain.Entities;
@@ -603,21 +604,144 @@ public class WebhooksController : ControllerBase
     }
 
     /// <summary>
-    /// Receives the <c>deal_executed</c> event (the sale settled on-chain) and removes the
-    /// lawyers from the property's legal bucket: every contributor, and every admin except the
-    /// operator admin (the namespace creator). Token-holder viewers are deliberately untouched —
-    /// they still own tokens after the sale.
+    /// Receives a lawyer's on-chain document verdict, posts their encrypted Terms-style verdict
+    /// message, and reconciles the review bucket's admin voting-status messages to the two seats.
+    /// Each accepted verdict is appended to the bucket's verdict ledger in the same transaction as
+    /// its message, and the announcements are derived by replaying that ledger, so a split closes
+    /// and reopens the round the same way whichever seat's webhook arrives first — and a verdict
+    /// still lands once the listing has left the indexer's review mirror, using the bucket's
+    /// immutable seats. A payload whose <c>log_evidence</c> is not <c>decoded</c> carries no
+    /// post-instruction status and is reconciled from the ledger alone.
+    /// </summary>
+    [HttpPost("documents_confirmed_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> LawyerDocumentsConfirmedDevnet(
+        [FromBody] LawyerDocumentsConfirmedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, DocumentsConfirmedEventName, StringComparison.Ordinal)
+            || payload.ListingId is null
+            || !ValidLawyerReviewMetadata(payload.ListingId, payload.PropertyId, payload.Cluster)
+            || string.IsNullOrWhiteSpace(payload.Lawyer)
+            || payload.Lawyer.Length > 128
+            || payload.Approve is null
+            || string.IsNullOrWhiteSpace(payload.TxSignature)
+            || payload.TxSignature.Length > 128
+            || string.IsNullOrWhiteSpace(payload.InstructionPath)
+            || payload.InstructionPath.Length > 64
+            || !TryNormalizeDocumentsHash(payload.DocumentsHash, out var documentsHash))
+        {
+            return BadRequest("The body is not a valid 'documents_confirmed' webhook payload.");
+        }
+
+        var resolved = await ResolveReviewAsync(
+            payload.ListingId.Value, payload.Property, ct);
+        if (resolved.Failure is not null)
+        {
+            return resolved.Failure;
+        }
+
+        var (_, ns, bucket, review) = resolved;
+        var bucketSpv = LawyerReviewSeat(bucket!, "spv_lawyer") ?? review?.SpvLawyer;
+        var bucketDeveloper = LawyerReviewSeat(bucket!, "developer_lawyer") ?? review?.DeveloperLawyer;
+        if (string.IsNullOrWhiteSpace(bucketSpv) && string.IsNullOrWhiteSpace(bucketDeveloper)
+            || payload.Lawyer != bucketSpv && payload.Lawyer != bucketDeveloper)
+        {
+            return BadRequest("The confirming lawyer is not assigned to this listing's review.");
+        }
+
+        var verdict = await PostLawyerReviewVerdictAsync(
+            ns!, bucket!, review, bucketSpv!, bucketDeveloper!, documentsHash, payload, ct);
+        if (verdict.Failure is not null)
+        {
+            return verdict.Failure;
+        }
+
+        var status = await PostLawyerReviewStateAsync(
+            ns!, bucket!, review, ReadVerdictLedger(bucket!),
+            EventListingStatus(payload.LogEvidence, payload.Status), documentsHash, ct);
+        if (status.Failure is not null)
+        {
+            return status.Failure;
+        }
+
+        return Ok(new
+        {
+            status = verdict.Posted || status.Posted ? "posted" : "ignored",
+            bucketId = bucket!.BucketId
+        });
+    }
+
+    /// <summary>
+    /// Receives another on-chain transition affecting an existing lawyer review (for example a
+    /// silent verdict) and reconciles the admin status message without inventing a lawyer verdict.
+    /// </summary>
+    [HttpPost("silent_verdict_resolved_devnet")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> LawyerReviewStatusChangedDevnet(
+        [FromBody] LawyerReviewStatusChangedPayload payload, CancellationToken ct)
+    {
+        if (payload is null
+            || !string.Equals(payload.Event, SilentVerdictResolvedEventName, StringComparison.Ordinal)
+            || payload.ListingId is null
+            || !ValidLawyerReviewMetadata(payload.ListingId, payload.PropertyId, payload.Cluster)
+            || string.IsNullOrWhiteSpace(payload.TxSignature)
+            || payload.TxSignature.Length > 128
+            || string.IsNullOrWhiteSpace(payload.InstructionPath)
+            || payload.InstructionPath.Length > 64)
+        {
+            return BadRequest("The body is not a valid 'silent_verdict_resolved' webhook payload.");
+        }
+
+        var resolved = await ResolveReviewAsync(
+            payload.ListingId.Value, payload.Property, ct);
+        if (resolved.Failure is not null)
+        {
+            return resolved.Failure;
+        }
+
+        var status = await PostLawyerReviewStateAsync(
+            resolved.Namespace!, resolved.Bucket!, resolved.Review,
+            ReadVerdictLedger(resolved.Bucket!),
+            EventListingStatus(payload.LogEvidence, payload.Status), null, ct);
+        if (status.Failure is not null)
+        {
+            return status.Failure;
+        }
+
+        return Ok(new
+        {
+            status = status.Posted ? "posted" : "ignored",
+            bucketId = resolved.Bucket!.BucketId
+        });
+    }
+
+    /// <summary>
+    /// Receives the <c>deal_executed</c> event (the sale settled on-chain), removes the
+    /// lawyers from the property's legal bucket, and posts the finalized status to an existing
+    /// lawyer document-review bucket. Token-holder viewers are deliberately untouched — they
+    /// still own tokens after the sale.
     /// </summary>
     /// <remarks>
-    /// Idempotent: membership removals are no-ops when the member is already gone, so a
-    /// redelivery re-runs harmlessly and answers 200. 404 while the namespace or bucket is
-    /// missing; 400 when the body is not a valid <c>deal_executed</c> event.
+    /// Idempotent: membership removals are no-ops when the member is already gone, and the
+    /// deterministic finalization message is duplicate-guarded. 404 while the namespace or legal
+    /// bucket is missing; 400 when the body is not a valid <c>deal_executed</c> event.
     /// </remarks>
     // POST: webhooks/deal_executed_devnet
     [HttpPost("deal_executed_devnet")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status502BadGateway)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> DealExecutedDevnet(
         [FromBody] DealExecutedPayload payload, CancellationToken ct)
     {
@@ -632,6 +756,12 @@ public class WebhooksController : ControllerBase
         if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
         {
             return NotFound("No webhook-created namespace matches this listing yet.");
+        }
+
+        var listingId = payload.ListingId ?? ns.PropertyId;
+        if (listingId is null)
+        {
+            return BadRequest("Neither the payload nor the namespace carries a numeric listing id.");
         }
 
         var bucket = await FindLegalBucketAsync(ns.NamespaceId, ct);
@@ -670,12 +800,36 @@ public class WebhooksController : ControllerBase
         }
         await transaction.CommitAsync(ct);
 
+        var reviewBucket = await _db.Buckets.FirstOrDefaultAsync(
+            candidate => candidate.NamespaceId == ns.NamespaceId
+                && candidate.Category == LawyerReviewBucketCategory
+                && candidate.Name == LawyerReviewBucketName(ns),
+            ct);
+        if (reviewBucket is not null)
+        {
+            var resolved = await ResolveReviewAsync(
+                listingId.Value, payload.Property, ct);
+            if (resolved.Failure is not null)
+            {
+                return resolved.Failure;
+            }
+
+            var reviewStatus = await PostLawyerReviewStateAsync(
+                ns, reviewBucket, resolved.Review, ReadVerdictLedger(reviewBucket),
+                ListingStatusToken(payload.Status), null, ct);
+            if (reviewStatus.Failure is not null)
+            {
+                return reviewStatus.Failure;
+            }
+        }
+
         return Ok(new
         {
             status = "lawyers_removed",
             removedContributors,
             removedAdmins,
-            bucketId = bucket.BucketId
+            bucketId = bucket.BucketId,
+            lawyerReviewBucketId = reviewBucket?.BucketId
         });
     }
 
@@ -1707,6 +1861,16 @@ public class WebhooksController : ControllerBase
                 null, false, null);
         }
 
+        string adminViewerKey;
+        try
+        {
+            adminViewerKey = BucketAdminKeyProvider.GetPublicKey(_config);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return (StatusCode(StatusCodes.Status503ServiceUnavailable, ex.Message), null, false, null);
+        }
+
         var ns = await FindNamespaceAsync(listingId, property, ct);
         if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
         {
@@ -1723,7 +1887,32 @@ public class WebhooksController : ControllerBase
         if (existing is not null)
         {
             await BackfillLawyerReviewMetadataAsync(existing, listingId, cluster, ct);
+            await RepairLawyerReviewBucketAsync(ns, existing, admin, ct);
             return (null, existing.BucketId, false, null);
+        }
+
+        // Creation is serialised per review bucket so two triggers arriving together cannot each
+        // mint a key and snapshot both PDFs under it: whoever loses the lock re-reads under it,
+        // adopts the winner's row, and never touches the winner's snapshot objects.
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        if (_db.Database.IsNpgsql())
+        {
+            await _db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtext({0}))",
+                new[] { (object)($"{ns.NamespaceId}:{name}") }, ct);
+        }
+
+        var raced = await _db.Buckets.FirstOrDefaultAsync(
+            bucket => bucket.NamespaceId == ns.NamespaceId
+                && bucket.Category == LawyerReviewBucketCategory
+                && bucket.Name == name,
+            ct);
+        if (raced is not null)
+        {
+            await BackfillLawyerReviewMetadataAsync(raced, listingId, cluster, ct);
+            await RepairLawyerReviewBucketAsync(ns, raced, admin, ct);
+            await transaction.CommitAsync(ct);
+            return (null, raced.BucketId, false, null);
         }
 
         var lawyerResolve = await ResolveAsync(
@@ -1770,13 +1959,16 @@ public class WebhooksController : ControllerBase
             }
             viewers.Add(new(wallet, key));
         }
+        viewers.Add(new(admin, adminViewerKey));
 
+        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(admin, viewers);
         var spvDocument = await PrepareLawyerReviewDocumentAsync(
             listingId,
             "spv-lawyer",
             lawyers.SpvLawyer,
             SpvReviewDocumentFallback,
             $"lawyer-review/{listingId}/spv-document-missing",
+            keySharing.SecretJwk,
             ct);
         if (spvDocument.Failure is not null)
         {
@@ -1788,13 +1980,12 @@ public class WebhooksController : ControllerBase
             lawyers.DeveloperLawyer,
             DeveloperReviewDocumentFallback,
             $"lawyer-review/{listingId}/developer-document-missing",
+            keySharing.SecretJwk,
             ct);
         if (developerDocument.Failure is not null)
         {
             return (developerDocument.Failure, null, false, null);
         }
-
-        var keySharing = LawyerTermsBucketProtocol.CreateKeySharing(admin, viewers);
         var properties = new List<KeyValuePair<string, string>>
         {
             new("kind", "lawyer_document_review"),
@@ -1812,7 +2003,6 @@ public class WebhooksController : ControllerBase
             properties.Add(new("cluster", cluster));
         }
 
-        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
         try
         {
             var bucket = await _buckets.CreateAsync(
@@ -1836,6 +2026,8 @@ public class WebhooksController : ControllerBase
                     admin, ns.NamespaceId, bucket.BucketId, viewer.Value, ct);
             }
 
+            var promptPayload = LawyerTermsBucketProtocol.EncryptMessage(
+                LawyerReviewPrompt, keySharing.SecretJwk);
             await _buckets.ResumeWritingAsync(
                 admin, ns.NamespaceId, bucket.BucketId, keySharing.PublicKey, ct);
             await _messages.WriteAsync(
@@ -1858,10 +2050,10 @@ public class WebhooksController : ControllerBase
                 new MessageWriteRequest(
                     $"lawyer-review/{listingId}/prompt",
                     LawyerReviewPromptTag,
-                    LawyerReviewPrompt,
+                    promptPayload,
                     "Review both lawyers' terms documents",
-                    "text/plain",
-                    LawyerTermsBucketProtocol.ContentHash(LawyerReviewPrompt),
+                    "text/plain;charset=utf-8",
+                    LawyerTermsBucketProtocol.ContentHash(promptPayload),
                     null),
                 ct);
             await _messages.WriteAsync(
@@ -1939,6 +2131,130 @@ public class WebhooksController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Repairs a review bucket an earlier build created — a prompt written in the clear, or a key
+    /// the operator admin was never handed a copy of — so a setup redelivery converges instead of
+    /// leaving the bucket where the API cannot write to it. A setup webhook never fails over a
+    /// repair that cannot be made: the webhook that actually needs the key reports it.
+    /// </summary>
+    private async Task RepairLawyerReviewBucketAsync(
+        Namespace ns, Bucket bucket, string admin, CancellationToken ct)
+    {
+        try
+        {
+            await LawyerReviewBucketSecretAsync(
+                ns, bucket, admin,
+                BucketAdminKeyProvider.GetPrivateJwk(_config),
+                BucketAdminKeyProvider.GetPublicKey(_config), ct);
+        }
+        catch (InvalidOperationException)
+        {
+            // No admin key material is configured, so nothing can be encrypted as admin yet.
+        }
+    }
+
+    /// <summary>
+    /// The bucket key the API encrypts lawyer-review messages with, repairing a review bucket whose
+    /// stored key-sharing message the admin cannot decrypt — a bucket created before the operator
+    /// admin was among the key recipients, or whose prompt was written in the clear.
+    ///
+    /// A key the admin can already decrypt is used exactly as it is: never rotated, so every
+    /// message already in the bucket stays readable by everyone who could read it. When the admin
+    /// cannot decrypt, the original key-sharing message and every existing message are left
+    /// byte-for-byte untouched and a fresh key-sharing message covering the admin plus the bucket's
+    /// current viewer keys is appended, which is what lets the API author verdicts as admin again.
+    /// </summary>
+    private async Task<(IActionResult? Failure, JsonObject? SecretJwk)> LawyerReviewBucketSecretAsync(
+        Namespace ns,
+        Bucket bucket,
+        string admin,
+        JsonObject adminPrivateJwk,
+        string adminViewerKey,
+        CancellationToken ct)
+    {
+        var keySharing = await _db.Messages
+            .OrderByDescending(message => message.MessageId)
+            .FirstOrDefaultAsync(
+                message => message.BucketId == bucket.BucketId
+                    && message.Tag == LawyerTermsBucketProtocol.KeySharingTag,
+                ct);
+        if (string.IsNullOrWhiteSpace(keySharing?.IpfsContent))
+        {
+            return (NotFound("The lawyer review bucket key is not ready."), null);
+        }
+
+        try
+        {
+            var secret = LawyerTermsBucketProtocol.DecryptKeySharing(
+                keySharing.IpfsContent, adminPrivateJwk);
+            await EncryptPlainReviewPromptAsync(bucket, secret, ct);
+            return (null, secret);
+        }
+        catch (Exception ex) when (ex is CryptographicException or JsonException
+            or FormatException or System.Collections.Generic.KeyNotFoundException)
+        {
+            // Legacy bucket: the operator admin was never given a copy of its key.
+        }
+
+        var viewerKeys = await _db.BucketViewers
+            .Where(viewer => viewer.BucketId == bucket.BucketId)
+            .Select(viewer => viewer.ViewerId)
+            .ToListAsync(ct);
+        var recipients = viewerKeys
+            .Append(adminViewerKey)
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Distinct(StringComparer.Ordinal)
+            .Select((key, index) => new KeyValuePair<string, string>($"viewer-{index}", key))
+            .ToList();
+        var replacement = LawyerTermsBucketProtocol.CreateKeySharing(admin, recipients);
+        await _memberships.AddAdminAsync(ns.Creator!, ns.NamespaceId, bucket.BucketId, admin, ct);
+        await _memberships.AddContributorAsync(admin, ns.NamespaceId, bucket.BucketId, admin, ct);
+        // The message lands before the bucket's key moves: interrupted between the two, the
+        // admin already holds a readable copy of the new key and the next delivery finishes the job.
+        await _messages.WriteAsync(
+            admin,
+            ns.NamespaceId,
+            bucket.BucketId,
+            new MessageWriteRequest(
+                replacement.Reference,
+                LawyerTermsBucketProtocol.KeySharingTag,
+                replacement.Body,
+                "Lawyer review bucket encryption key",
+                LawyerTermsBucketProtocol.KeySharingContentType,
+                replacement.ContentHash,
+                null),
+            ct);
+        await _buckets.ResumeWritingAsync(
+            admin, ns.NamespaceId, bucket.BucketId, replacement.PublicKey, ct);
+        await EncryptPlainReviewPromptAsync(bucket, replacement.SecretJwk, ct);
+        return (null, replacement.SecretJwk);
+    }
+
+    /// <summary>
+    /// Encrypts the review prompt if an earlier build wrote it in the clear. It is the one existing
+    /// message the server may rewrite — its plaintext is a constant it authored — so every message
+    /// a lawyer or a token holder wrote stays byte-for-byte as it was.
+    /// </summary>
+    private async Task EncryptPlainReviewPromptAsync(
+        Bucket bucket, JsonObject secretJwk, CancellationToken ct)
+    {
+        var prompt = await _db.Messages.FirstOrDefaultAsync(
+            message => message.BucketId == bucket.BucketId
+                && message.Tag == LawyerReviewPromptTag,
+            ct);
+        if (prompt?.IpfsContent is not { } stored || IsCompactMessage(stored))
+        {
+            return;
+        }
+
+        var promptPayload = LawyerTermsBucketProtocol.EncryptMessage(
+            LawyerReviewPrompt, secretJwk);
+        prompt.IpfsContent = promptPayload;
+        prompt.ContentType = "text/plain;charset=utf-8";
+        prompt.ContentHash = LawyerTermsBucketProtocol.ContentHash(promptPayload);
+        await _db.SaveChangesAsync(ct);
+    }
+
     private async Task<(IActionResult? Failure, MessageWriteRequest? Message)>
         PrepareLawyerReviewDocumentAsync(
             long listingId,
@@ -1946,19 +2262,21 @@ public class WebhooksController : ControllerBase
             string wallet,
             string fallback,
             string fallbackReference,
+            JsonObject bucketSecretJwk,
             CancellationToken ct)
     {
         var document = await _profileDb.LawyerTermsDocuments.AsNoTracking()
             .FirstOrDefaultAsync(row => row.Ss58Address == wallet, ct);
         if (document is null)
         {
+            var fallbackPayload = LawyerTermsBucketProtocol.EncryptMessage(fallback, bucketSecretJwk);
             return (null, new MessageWriteRequest(
                 fallbackReference,
                 LawyerReviewDocumentMissingTag,
+                fallbackPayload,
                 fallback,
-                fallback,
-                "text/plain",
-                LawyerTermsBucketProtocol.ContentHash(fallback),
+                "text/plain;charset=utf-8",
+                LawyerTermsBucketProtocol.ContentHash(fallbackPayload),
                 null));
         }
 
@@ -1977,15 +2295,21 @@ public class WebhooksController : ControllerBase
                 $"Could not download the {role} terms PDF: {ex.Message}"), null);
         }
 
+        var pdfPayload = LawyerTermsBucketProtocol.EncryptMessage(
+            pdf,
+            bucketSecretJwk,
+            new Dictionary<string, string> { ["filename"] = document.FileName });
+        var pdfContentHash = LawyerTermsBucketProtocol.ContentHash(pdfPayload);
         string snapshotUrl;
         try
         {
-            using var content = new MemoryStream(pdf, writable: false);
+            using var content = new MemoryStream(Encoding.UTF8.GetBytes(pdfPayload), writable: false);
             snapshotUrl = await _s3.UploadImageAsync(
                 TermsDocumentController.Bucket,
-                TermsDocumentController.ReviewSnapshotObjectKey(listingId, role),
+                TermsDocumentController.ReviewSnapshotObjectKey(
+                    listingId, role, pdfContentHash[2..].ToLowerInvariant()),
                 content,
-                document.ContentType);
+                LawyerTermsBucketProtocol.KeySharingContentType);
         }
         catch (Amazon.S3.AmazonS3Exception ex)
         {
@@ -2000,7 +2324,7 @@ public class WebhooksController : ControllerBase
             null,
             document.FileName,
             document.ContentType,
-            LawyerTermsBucketProtocol.ContentHash(pdf),
+            pdfContentHash,
             null));
     }
 
@@ -2035,6 +2359,716 @@ public class WebhooksController : ControllerBase
         }
         return new OkObjectResult(body);
     }
+
+    /// <summary>
+    /// Resolves the three things a review webhook needs: the indexer's mirror of the on-chain
+    /// review, the property's namespace, and its document-review bucket. A missing mirror row is
+    /// not an error — a verdict or settlement can arrive after the listing left the indexer's
+    /// active set, and the bucket's immutable seats plus its verdict ledger carry the state — but
+    /// the namespace and bucket are prerequisites, so their absence stays a retryable 404.
+    /// </summary>
+    private async Task<(IActionResult? Failure, Namespace? Namespace, Bucket? Bucket, ListingReviewInfo? Review)>
+        ResolveReviewAsync(long listingId, string? property, CancellationToken ct)
+    {
+        var resolve = await ResolveAsync(
+            ct,
+            async c => await _indexer.GetListingLawyerReviewAsync(listingId, c),
+            allowMissing: true,
+            what: "the listing lawyer review");
+        if (resolve.Failed)
+        {
+            return (resolve.Failure, null, null, null);
+        }
+
+        var ns = await FindNamespaceAsync(listingId, property, ct);
+        if (ns is null || string.IsNullOrWhiteSpace(ns.Creator))
+        {
+            return (NotFound("No webhook-created namespace matches this property yet."), null, null, null);
+        }
+
+        var bucket = await _db.Buckets.FirstOrDefaultAsync(
+            candidate => candidate.NamespaceId == ns.NamespaceId
+                && candidate.Category == LawyerReviewBucketCategory
+                && candidate.Name == LawyerReviewBucketName(ns),
+            ct);
+        if (bucket is null)
+        {
+            return (NotFound("The property's lawyer document-review bucket does not exist yet."),
+                null, null, null);
+        }
+
+        return (null, ns, bucket, resolve.Value!);
+    }
+
+    private async Task<(IActionResult? Failure, bool Posted)> PostLawyerReviewVerdictAsync(
+        Namespace ns,
+        Bucket bucket,
+        ListingReviewInfo? review,
+        string bucketSpv,
+        string bucketDeveloper,
+        string documentsHash,
+        LawyerDocumentsConfirmedPayload payload,
+        CancellationToken ct)
+    {
+        var approved = payload.Approve!.Value;
+        var verdict = approved ? "approved" : "rejected";
+        var tag = approved ? LawyerTermsApprovedTag : LawyerTermsRejectedTag;
+        var reference = $"lawyer-review/{payload.ListingId}/{verdict}/"
+            + $"{payload.TxSignature}:{payload.InstructionPath}";
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        if (_db.Database.IsNpgsql())
+        {
+            await _db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtext({0}))", new[] { (object)reference }, ct);
+        }
+
+        var duplicate = await _db.Messages.AnyAsync(
+            message => message.BucketId == bucket.BucketId
+                && message.Reference == reference
+                && message.Tag == tag
+                && message.Contributor == payload.Lawyer,
+            ct);
+        if (duplicate)
+        {
+            return (null, false);
+        }
+        if (!ReviewVerdictMatches(
+                review, bucketSpv, bucketDeveloper, documentsHash, payload, ReadVerdictLedger(bucket)))
+        {
+            return (BadRequest("The confirmation does not match the lawyer's indexed verdict and document hash."), false);
+        }
+
+        var admin = _config[BucketAdminAddressConfigKey]?.Trim();
+        if (string.IsNullOrWhiteSpace(admin))
+        {
+            return (StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                $"The bucket admin address ({BucketAdminAddressConfigKey}) is not configured."), false);
+        }
+
+        string adminViewerKey;
+        JsonObject adminPrivateJwk;
+        try
+        {
+            adminViewerKey = BucketAdminKeyProvider.GetPublicKey(_config);
+            adminPrivateJwk = BucketAdminKeyProvider.GetPrivateJwk(_config);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return (StatusCode(StatusCodes.Status503ServiceUnavailable, ex.Message), false);
+        }
+
+        var (secretFailure, bucketSecret) = await LawyerReviewBucketSecretAsync(
+            ns, bucket, admin, adminPrivateJwk, adminViewerKey, ct);
+        if (bucketSecret is null)
+        {
+            return (secretFailure
+                ?? StatusCode(StatusCodes.Status503ServiceUnavailable,
+                    "The lawyer review bucket key is not ready."), false);
+        }
+
+        string encrypted;
+        string publicKey;
+        var plaintext = approved ? ApprovedTermsMessage : RejectedTermsMessage;
+        try
+        {
+            encrypted = LawyerTermsBucketProtocol.EncryptMessage(plaintext, bucketSecret);
+            publicKey = bucketSecret["x"]!.GetValue<string>();
+        }
+        catch (Exception ex) when (ex is CryptographicException or JsonException
+            or FormatException or System.Collections.Generic.KeyNotFoundException)
+        {
+            return (StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                "The bucket admin cannot decrypt the lawyer review bucket key."), false);
+        }
+
+        await _memberships.AddAdminAsync(ns.Creator!, ns.NamespaceId, bucket.BucketId, admin, ct);
+        await _memberships.AddContributorAsync(
+            admin, ns.NamespaceId, bucket.BucketId, payload.Lawyer!, ct);
+        if (!bucket.IsWritable)
+        {
+            await _buckets.ResumeWritingAsync(
+                admin, ns.NamespaceId, bucket.BucketId, publicKey, ct);
+        }
+
+        await _messages.WriteAsync(
+            payload.Lawyer!,
+            ns.NamespaceId,
+            bucket.BucketId,
+            new MessageWriteRequest(
+                reference,
+                tag,
+                encrypted,
+                plaintext,
+                "text/plain;charset=utf-8",
+                LawyerTermsBucketProtocol.ContentHash(encrypted),
+                null),
+            ct);
+
+        // The ledger entry commits with the verdict message, so the announcement replay and the
+        // encrypted verdicts can never disagree. The duplicate check above means a redelivery
+        // cannot double-append, and the bucket-scoped lock serialises two seats ruling at once.
+        if (_db.Database.IsNpgsql())
+        {
+            await _db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtext({0}))",
+                new[] { (object)$"lawyer-review-ledger:{bucket.BucketId}" }, ct);
+        }
+
+        var storedProperties = await _db.Buckets.AsNoTracking()
+            .Where(candidate => candidate.BucketId == bucket.BucketId)
+            .Select(candidate => candidate.Properties)
+            .SingleAsync(ct);
+        var appended = AppendVerdictLedger(storedProperties, new LawyerReviewVerdict(
+            VerdictIdentity(payload.TxSignature!, payload.InstructionPath!),
+            payload.Lawyer == bucketSpv,
+            approved,
+            documentsHash,
+            EventListingStatus(payload.LogEvidence, payload.Status),
+            payload.Slot));
+        if (appended is not null)
+        {
+            bucket.Properties = appended;
+            await _db.SaveChangesAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+        return (null, true);
+    }
+
+    private async Task<(IActionResult? Failure, bool Posted)> PostLawyerReviewStateAsync(
+        Namespace ns,
+        Bucket bucket,
+        ListingReviewInfo? review,
+        IReadOnlyList<LawyerReviewVerdict> ledger,
+        string? eventStatus,
+        string? currentDocumentsHash,
+        CancellationToken ct)
+    {
+        var admin = _config[BucketAdminAddressConfigKey]?.Trim();
+        if (string.IsNullOrWhiteSpace(admin))
+        {
+            return (StatusCode(
+                StatusCodes.Status503ServiceUnavailable,
+                $"The bucket admin address ({BucketAdminAddressConfigKey}) is not configured."), false);
+        }
+
+        var round = ResolveLawyerReviewRound(
+            review, ledger, eventStatus, currentDocumentsHash);
+        var attempt = round.Attempt;
+        var documentsHash = round.DocumentsHash;
+        var messages = new List<(string Tag, string Reference, string Description, string Status,
+            int Round, string? DocumentsHash, bool Open)>();
+        if (round.RejectedAttempt is { } closedAttempt)
+        {
+            messages.Add((
+                VotingResultTag,
+                $"voting/result/terms/{ns.PropertyId}/attempt/{closedAttempt}",
+                $"Lawyer document review attempt {closedAttempt} rejected",
+                "rejected",
+                closedAttempt,
+                round.RejectedDocumentsHash,
+                false));
+        }
+
+        if (string.Equals(round.Status, "SOLD_OUT", StringComparison.Ordinal)
+            && round.RejectedAttempt != attempt)
+        {
+            // The attempt that a split just closed is never also announced as opening.
+            messages.Add((
+                TermsVotingTag,
+                $"voting/terms/{ns.PropertyId}/attempt/{attempt}/open",
+                $"Lawyer document review attempt {attempt} opened",
+                "open",
+                attempt,
+                documentsHash,
+                true));
+        }
+        else if (round.Status is "LEGAL" or "FINALIZED" or "CANCELLED" or "EXPIRED" or "REFUNDING")
+        {
+            // The announcement card carries nothing but this status, so each terminal listing status
+            // needs its own: a settlement is not a repeat of the Legal it follows, and a round that
+            // ran out of time or was refunded is not a rejection. The references stay as they were —
+            // they are idempotency keys — only the reported outcome becomes specific.
+            var outcome = round.Status switch
+            {
+                "LEGAL" => "ratified",
+                "FINALIZED" => "finalized",
+                "CANCELLED" => "cancelled",
+                "EXPIRED" => "expired",
+                _ => "refunded"
+            };
+            var finalized = round.Status == "FINALIZED";
+            messages.Add((
+                VotingResultTag,
+                $"voting/result/terms/{ns.PropertyId}/attempt/{attempt}{(finalized ? "/finalized" : "")}",
+                $"Lawyer document review attempt {attempt} {outcome}",
+                outcome,
+                attempt,
+                documentsHash,
+                false));
+        }
+
+        var posted = false;
+        foreach (var message in messages)
+        {
+            var result = await PostVotingMessageAsync(
+                ns.PropertyId,
+                ns.Creator,
+                message.Tag,
+                message.Reference,
+                message.Description,
+                listingId =>
+                {
+                    var body = new JsonObject
+                    {
+                        ["kind"] = "terms",
+                        ["listingId"] = listingId,
+                        ["round"] = message.Round,
+                        ["status"] = message.Status,
+                        ["listingStatus"] = round.Status
+                    };
+                    if (message.DocumentsHash is not null)
+                    {
+                        body["documentsHash"] = message.DocumentsHash;
+                    }
+                    if (message.Open && review is not null)
+                    {
+                        body["expiresAt"] = IndexerClient.Iso8601(review.LegalDeadline);
+                    }
+                    return body;
+                },
+                ct,
+                bucketId: bucket.BucketId,
+                contributor: admin,
+                admin: admin);
+            if (result is not OkObjectResult ok)
+            {
+                return (result, false);
+            }
+
+            var responseBody = JsonSerializer.SerializeToNode(ok.Value)!.AsObject();
+            posted |= responseBody["status"]?.GetValue<string>() == "posted";
+        }
+
+        return (null, posted);
+    }
+
+    private static string? CurrentReviewDocumentsHash(ListingReviewInfo review)
+    {
+        var hashes = new[] { review.SpvDocumentsHash, review.DeveloperDocumentsHash }
+            .Where(hash => !MissingDocumentsHash(hash))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        return hashes.Count == 1 ? hashes[0] : null;
+    }
+
+    /// <summary>
+    /// One lawyer's on-chain <c>confirm_documents</c> verdict, appended to the review bucket's
+    /// metadata in the same transaction as its verdict message. The identity digests the
+    /// (tx_signature, instruction_path) pair the webhook contract identifies an instruction with —
+    /// one transaction can carry two verdicts — so a redelivery cannot double-append; the full pair
+    /// stays human-readable in the verdict message's reference.
+    /// </summary>
+    private sealed record LawyerReviewVerdict(
+        string Identity,
+        bool Spv,
+        bool Approve,
+        string DocumentsHash,
+        string? Status,
+        long Slot);
+
+    /// <summary>The review round as the verdict ledger replays it.</summary>
+    private sealed record LawyerReviewReplay(
+        int Attempt,
+        bool Open,
+        bool Ratified,
+        string? DocumentsHash,
+        int? SplitAttempt,
+        string? SplitHash,
+        LawyerReviewVerdict? Spv,
+        LawyerReviewVerdict? Developer);
+
+    /// <summary>The review-bucket metadata property carrying the verdict ledger.</summary>
+    private const string VerdictLedgerProperty = "verdict_ledger";
+
+    private static string VerdictIdentity(string txSignature, string instructionPath) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{txSignature}:{instructionPath}")))[..16].ToLowerInvariant();
+
+    private static IReadOnlyList<LawyerReviewVerdict> ReadVerdictLedger(Bucket bucket)
+    {
+        if (string.IsNullOrWhiteSpace(bucket.Properties))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var properties = JsonDocument.Parse(bucket.Properties);
+            if (!properties.RootElement.TryGetProperty(
+                    VerdictLedgerProperty, out var ledger)
+                || ledger.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            var entries = new List<LawyerReviewVerdict>();
+            foreach (var entry in ledger.EnumerateArray())
+            {
+                if (entry.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var identity = entry.TryGetProperty("i", out var key)
+                    ? key.GetString()
+                    : null;
+                var hash = entry.TryGetProperty("h", out var hashElement)
+                    ? hashElement.GetString()
+                    : null;
+                if (string.IsNullOrEmpty(identity) || string.IsNullOrEmpty(hash)
+                    || !entry.TryGetProperty("l", out var seat)
+                    || !entry.TryGetProperty("a", out var approve))
+                {
+                    continue;
+                }
+
+                entries.Add(new LawyerReviewVerdict(
+                    identity!,
+                    seat.ValueKind == JsonValueKind.Number && seat.GetInt32() == 1,
+                    approve.ValueKind == JsonValueKind.True,
+                    hash!,
+                    entry.TryGetProperty("s", out var status)
+                        && status.ValueKind == JsonValueKind.String
+                        ? status.GetString()
+                        : null,
+                    entry.TryGetProperty("t", out var slot)
+                        && slot.ValueKind == JsonValueKind.Number
+                        ? slot.GetInt64()
+                        : 0));
+            }
+
+            return entries;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Appends one verdict to the ledger JSON, returning <c>null</c> when the entry is already
+    /// there (a redelivery) or the stored properties cannot be parsed.
+    /// </summary>
+    private static string? AppendVerdictLedger(string? properties, LawyerReviewVerdict verdict)
+    {
+        JsonObject parsed;
+        try
+        {
+            parsed = string.IsNullOrWhiteSpace(properties)
+                ? new JsonObject()
+                : JsonNode.Parse(properties)!.AsObject();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        if (parsed[VerdictLedgerProperty] is not JsonArray ledger)
+        {
+            ledger = new JsonArray();
+            parsed[VerdictLedgerProperty] = ledger;
+        }
+
+        if (ledger.Any(node => node?["i"]?.GetValue<string>() == verdict.Identity))
+        {
+            return null;
+        }
+
+        ledger.Add(new JsonObject
+        {
+            ["i"] = verdict.Identity,
+            ["l"] = verdict.Spv ? 1 : 0,
+            ["a"] = verdict.Approve,
+            ["h"] = verdict.DocumentsHash,
+            ["s"] = verdict.Status,
+            ["t"] = verdict.Slot
+        });
+        return parsed.ToJsonString();
+    }
+
+    /// <summary>
+    /// Replays the marketplace's two-seat document rule over the ledger: identical approvals settle
+    /// the round as Legal, identical rejections cancel the sale, and a split either closes the
+    /// attempt and reopens it with both seats and both hashes cleared (first split) or cancels the
+    /// sale (second split). Only which seat ruled, with what verdict, against which hash matters —
+    /// the arrival order of the webhooks carrying them does not.
+    /// </summary>
+    private static LawyerReviewReplay ReplayVerdictLedger(
+        IReadOnlyList<LawyerReviewVerdict> ledger)
+    {
+        var attempt = 1;
+        var open = true;
+        var ratified = false;
+        LawyerReviewVerdict? spv = null;
+        LawyerReviewVerdict? developer = null;
+        string? documentsHash = null;
+        int? splitAttempt = null;
+        string? splitHash = null;
+        foreach (var verdict in ledger.OrderBy(entry => entry.Slot))
+        {
+            if (verdict.Spv)
+            {
+                // The chain rejects a second verdict from a seat that has already ruled, so a
+                // repeat entry adds nothing to the replay.
+                if (spv is null)
+                {
+                    spv = verdict;
+                }
+            }
+            else if (developer is null)
+            {
+                developer = verdict;
+            }
+
+            documentsHash = verdict.DocumentsHash;
+            if (spv is null || developer is null)
+            {
+                continue;
+            }
+
+            if (spv.Approve && developer.Approve)
+            {
+                ratified = true;
+                open = false;
+                break;
+            }
+
+            splitAttempt = attempt;
+            splitHash = verdict.DocumentsHash;
+            if (!spv.Approve && !developer.Approve)
+            {
+                open = false;
+                break;
+            }
+
+            if (attempt == 1)
+            {
+                attempt = 2;
+                spv = null;
+                developer = null;
+                documentsHash = null;
+                continue;
+            }
+
+            open = false;
+            break;
+        }
+
+        return new LawyerReviewReplay(
+            attempt, open, ratified, documentsHash, splitAttempt, splitHash, spv, developer);
+    }
+
+    /// <summary>
+    /// Resolves what the review's announcement state is, from event-time evidence first: the
+    /// program's own post-instruction status when the indexer decoded the log, then the replayed
+    /// verdict ledger, and only then the GraphQL mirror — which lags, and which is the sole witness
+    /// for buckets whose verdicts landed before the ledger existed.
+    /// </summary>
+    private static (int Attempt, string Status, string? DocumentsHash, int? RejectedAttempt,
+        string? RejectedDocumentsHash) ResolveLawyerReviewRound(
+            ListingReviewInfo? review,
+            IReadOnlyList<LawyerReviewVerdict> ledger,
+            string? eventStatus,
+            string? currentDocumentsHash)
+    {
+        var replay = ReplayVerdictLedger(ledger);
+        var mirrorAttempt = review?.SecondAttempt is true ? 2 : 1;
+        // A mirror already reporting the round resolved states a listing transition the chain
+        // never undoes, so only the program's own decoded log outranks it. A mirror still
+        // reporting SOLD_OUT may merely be lagging behind the verdicts, so there the replay wins.
+        var mirrorStatus = review?.Status;
+        var mirrorResolved = mirrorStatus
+            is "LEGAL" or "FINALIZED" or "CANCELLED" or "EXPIRED" or "REFUNDING";
+        var status = eventStatus
+            ?? (mirrorResolved
+                ? mirrorStatus!
+                : ledger.Count > 0
+                    ? replay.Open ? "SOLD_OUT" : replay.Ratified ? "LEGAL" : "CANCELLED"
+                    : mirrorStatus ?? "SOLD_OUT");
+        var documentsHash = ledger.Count > 0
+            ? replay.DocumentsHash
+            : review is null ? null : CurrentReviewDocumentsHash(review);
+        int? rejectedAttempt = replay.SplitAttempt;
+        string? rejectedDocumentsHash = replay.SplitHash;
+        if (rejectedAttempt is null
+            && currentDocumentsHash is not null
+            && mirrorAttempt == 2
+            && string.Equals(status, "SOLD_OUT", StringComparison.Ordinal))
+        {
+            // A bucket whose attempt-one split predates the ledger: the mirror's second-attempt
+            // flag is the only surviving witness, so announce the closure it implies.
+            rejectedAttempt = 1;
+            rejectedDocumentsHash = currentDocumentsHash;
+            documentsHash = review is null ? null : CurrentReviewDocumentsHash(review);
+        }
+
+        return (Math.Max(replay.Attempt, mirrorAttempt), status, documentsHash,
+            rejectedAttempt, rejectedDocumentsHash);
+    }
+
+    /// <summary>
+    /// A listing status from the webhook wire (PascalCase, e.g. <c>SoldOut</c>) in the upper-case
+    /// token the announcements use, or <c>null</c> for a status the announcements do not model.
+    /// </summary>
+    private static string? ListingStatusToken(string? status) =>
+        string.IsNullOrWhiteSpace(status)
+            ? null
+            : status.Trim().ToUpperInvariant() switch
+            {
+                "LEGAL" => "LEGAL",
+                "FINALIZED" => "FINALIZED",
+                "CANCELLED" => "CANCELLED",
+                "EXPIRED" => "EXPIRED",
+                "REFUNDING" => "REFUNDING",
+                "SOLDOUT" or "SOLD_OUT" => "SOLD_OUT",
+                _ => null
+            };
+
+    /// <summary>
+    /// The post-instruction listing status the program emitted, in the form the announcements use.
+    /// Only a decoded log carries it: a <c>missing</c> or <c>malformed</c> log still delivers a
+    /// verdict, but says nothing about how the round resolved.
+    /// </summary>
+    private static string? EventListingStatus(string? logEvidence, string? status) =>
+        string.Equals(logEvidence, "decoded", StringComparison.OrdinalIgnoreCase)
+            ? ListingStatusToken(status)
+            : null;
+
+    /// <summary>
+    /// Whether the ledger proves this verdict is the one the chain would accept right now: the
+    /// seat must still be open this attempt, and the other seat — if it already ruled — must have
+    /// confirmed the same document hash (the program's own <c>AlreadyConfirmed</c> and
+    /// <c>DocumentsMismatch</c> checks). Event-time evidence outranks a lagging mirror.
+    /// </summary>
+    private static bool LedgerPermitsVerdict(
+        IReadOnlyList<LawyerReviewVerdict> ledger,
+        bool spv,
+        string documentsHash)
+    {
+        var replay = ReplayVerdictLedger(ledger);
+        if (!replay.Open)
+        {
+            return false;
+        }
+
+        var seat = spv ? replay.Spv : replay.Developer;
+        if (seat is not null)
+        {
+            return false;
+        }
+
+        var other = spv ? replay.Developer : replay.Spv;
+        return other is null
+            || string.Equals(other.DocumentsHash, documentsHash, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ReviewVerdictMatches(
+        ListingReviewInfo? review,
+        string bucketSpv,
+        string bucketDeveloper,
+        string documentsHash,
+        LawyerDocumentsConfirmedPayload payload,
+        IReadOnlyList<LawyerReviewVerdict> ledger)
+    {
+        var spv = payload.Lawyer == bucketSpv;
+        // The ledger vouches only for a verdict it holds history for: the first verdict of a round
+        // is still the mirror's to confirm.
+        if (ledger.Count > 0 && LedgerPermitsVerdict(ledger, spv, documentsHash))
+        {
+            return true;
+        }
+
+        // With no mirror row at all — the listing has left the indexer's active set — the caller's
+        // match against the bucket's immutable seats is the evidence that survives.
+        if (review is null)
+        {
+            return true;
+        }
+
+        var mirrorLawyer = spv ? review.SpvLawyer : review.DeveloperLawyer;
+        if (string.IsNullOrWhiteSpace(mirrorLawyer) || mirrorLawyer == SystemDefaultPubkey)
+        {
+            return payload.Lawyer == (spv ? bucketSpv : bucketDeveloper);
+        }
+
+        var status = spv ? review.SpvDocumentStatus : review.DeveloperDocumentStatus;
+        var mirrorHash = spv ? review.SpvDocumentsHash : review.DeveloperDocumentsHash;
+        if (review.SecondAttempt
+            && review.Status == "SOLD_OUT"
+            && status == "PENDING"
+            && MissingDocumentsHash(mirrorHash))
+        {
+            return true;
+        }
+
+        var expectedStatus = payload.Approve!.Value ? "APPROVED" : "REJECTED";
+        return status == expectedStatus
+            && string.Equals(mirrorHash, documentsHash, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? LawyerReviewSeat(Bucket bucket, string propertyName)
+    {
+        if (string.IsNullOrWhiteSpace(bucket.Properties))
+        {
+            return null;
+        }
+        try
+        {
+            using var properties = JsonDocument.Parse(bucket.Properties);
+            return properties.RootElement.TryGetProperty(propertyName, out var seat)
+                && seat.ValueKind == JsonValueKind.String
+                    ? seat.GetString()
+                    : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryNormalizeDocumentsHash(string? value, out string normalized)
+    {
+        normalized = string.Empty;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        try
+        {
+            var bytes = Encoders.Base58.DecodeData(value);
+            if (bytes.Length != 32
+                || bytes.All(byteValue => byteValue == 0)
+                || Encoders.Base58.EncodeData(bytes) != value)
+            {
+                return false;
+            }
+
+            normalized = Convert.ToHexString(bytes).ToLowerInvariant();
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool MissingDocumentsHash(string? hash) =>
+        string.IsNullOrWhiteSpace(hash) || hash.All(character => character == '0');
 
     /// <summary>
     /// Receives the <c>agent_election_opened</c> event (a letting agent stood for the property's
@@ -2553,13 +3587,17 @@ public class WebhooksController : ControllerBase
     private const string ClaimStartedEventName = "property_claim_started";
     private const string LawyerElectedEventName = "spv_lawyer_elected";
     private const string DeveloperLawyerAssignedEventName = "developer_lawyer_assigned";
+    private const string DocumentsConfirmedEventName = "documents_confirmed";
+    private const string SilentVerdictResolvedEventName = "silent_verdict_resolved";
     private const string DealExecutedEventName = "deal_executed";
     private const string AgentAppointedEventName = "letting_agent_appointed";
     private const string SharesTransferredEventName = "property_shares_transferred";
     private const string SpvCaseClaimedEventName = "spv_case_claimed";
     private const string SpvLawyerVoteCastEventName = "spv_lawyer_vote_cast";
     private const string LawyerTermsApprovedTag = "lawyer/terms-approved";
+    private const string LawyerTermsRejectedTag = "lawyer/terms-rejected";
     private const string ApprovedTermsMessage = "Approved terms";
+    private const string RejectedTermsMessage = "Rejected terms";
     private const string AgentElectionOpenedEventName = "agent_election_opened";
     private const string ProposalCreatedEventName = "proposal_created";
     private const string ProposalFinalizedEventName = "proposal_finalized";
@@ -2822,6 +3860,137 @@ public sealed class DeveloperLawyerAssignedPayload
     public string? Program { get; set; }
 }
 
+/// <summary>The instruction evidence for one assigned lawyer's document verdict.</summary>
+public sealed class LawyerDocumentsConfirmedPayload
+{
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    [JsonPropertyName("listing_id")]
+    public long? ListingId { get; set; }
+
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    [JsonPropertyName("cluster")]
+    public string? Cluster { get; set; }
+
+    [JsonPropertyName("lawyer")]
+    public string? Lawyer { get; set; }
+
+    [JsonPropertyName("approve")]
+    public bool? Approve { get; set; }
+
+    [JsonPropertyName("documents_hash")]
+    public string? DocumentsHash { get; set; }
+
+    /// <summary>The wire-contract version. Version 2 adds the log-evidence and outcome fields.</summary>
+    [JsonPropertyName("payload_version")]
+    public int? PayloadVersion { get; set; }
+
+    /// <summary>
+    /// Whether the indexer decoded the on-chain <c>DocumentsConfirmed</c> log for this
+    /// instruction: <c>decoded</c>, <c>missing</c>, or <c>malformed</c>. The indexer never
+    /// withholds delivery, so the latter two arrive and are accepted — they just carry no
+    /// authoritative post-instruction status.
+    /// </summary>
+    [JsonPropertyName("log_evidence")]
+    public string? LogEvidence { get; set; }
+
+    /// <summary>
+    /// The indexer's own reading of the round: <c>approved</c>, <c>cancelled</c>, or
+    /// <c>unresolved</c>.
+    /// </summary>
+    [JsonPropertyName("review_outcome")]
+    public string? ReviewOutcome { get; set; }
+
+    /// <summary>
+    /// The listing status <em>after</em> the verdict instruction executed, straight from the
+    /// program's emitted event. Non-null only when <see cref="LogEvidence"/> is
+    /// <c>decoded</c>; event-time truth that outranks the GraphQL mirror.
+    /// </summary>
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
+
+    [JsonPropertyName("listing")]
+    public string? Listing { get; set; }
+
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    [JsonPropertyName("instruction_path")]
+    public string? InstructionPath { get; set; }
+
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
+/// <summary>The instruction evidence for another transition affecting a lawyer review.</summary>
+public sealed class LawyerReviewStatusChangedPayload
+{
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    [JsonPropertyName("listing_id")]
+    public long? ListingId { get; set; }
+
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    [JsonPropertyName("cluster")]
+    public string? Cluster { get; set; }
+
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
+
+    [JsonPropertyName("silent_lawyer")]
+    public string? SilentLawyer { get; set; }
+
+    /// <summary>The wire-contract version. Version 2 adds the log-evidence and outcome fields.</summary>
+    [JsonPropertyName("payload_version")]
+    public int? PayloadVersion { get; set; }
+
+    /// <summary>Whether the indexer decoded the program's log: <c>decoded</c>, <c>missing</c>, or
+    /// <c>malformed</c>. Only a decoded row's <see cref="Status"/> is authoritative.</summary>
+    [JsonPropertyName("log_evidence")]
+    public string? LogEvidence { get; set; }
+
+    /// <summary>The indexer's reading of the round: <c>approved</c>, <c>cancelled</c>, or
+    /// <c>unresolved</c>.</summary>
+    [JsonPropertyName("review_outcome")]
+    public string? ReviewOutcome { get; set; }
+
+    [JsonPropertyName("listing")]
+    public string? Listing { get; set; }
+
+    [JsonPropertyName("property")]
+    public string? Property { get; set; }
+
+    [JsonPropertyName("slot")]
+    public long Slot { get; set; }
+
+    [JsonPropertyName("tx_signature")]
+    public string? TxSignature { get; set; }
+
+    [JsonPropertyName("instruction_path")]
+    public string? InstructionPath { get; set; }
+
+    [JsonPropertyName("block_time")]
+    public DateTime? BlockTime { get; set; }
+
+    [JsonPropertyName("program")]
+    public string? Program { get; set; }
+}
+
 /// <summary>
 /// The <c>deal_executed</c> webhook payload the indexer POSTs verbatim (marketplace
 /// <c>execute_deal</c> — the sale settled). Field names are the indexer's snake_case wire names.
@@ -2835,6 +4004,18 @@ public sealed class DealExecutedPayload
     /// <summary>The on-chain listing id (the namespace's PropertyId).</summary>
     [JsonPropertyName("listing_id")]
     public long? ListingId { get; set; }
+
+    /// <summary>The on-chain property id. Absent from the legacy property-only shape.</summary>
+    [JsonPropertyName("property_id")]
+    public long? PropertyId { get; set; }
+
+    /// <summary>The cluster the event came from. Absent from the legacy shape.</summary>
+    [JsonPropertyName("cluster")]
+    public string? Cluster { get; set; }
+
+    /// <summary>The listing status after <c>execute_deal</c> — <c>Finalized</c> on v2 rows.</summary>
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
 
     /// <summary>The base58 Listing PDA.</summary>
     [JsonPropertyName("listing")]

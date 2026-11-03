@@ -795,6 +795,10 @@ them — with their `.snupkg` symbol packages — to NuGet.org. Versioning is `1
 branch builds and the git tag for releases. The tests run first because a push to NuGet.org cannot
 be withdrawn.
 
+Publishing uses NuGet.org trusted publishing (OIDC): the job exchanges a short-lived token via
+`NuGet/login@v1` instead of a stored API key. This requires a policy on nuget.org granting this
+repo's `nuget.yml` (environment `XcavateProfile`) permission for both packages.
+
 ### Required GitHub secrets
 
 | Secret | Description |
@@ -804,7 +808,7 @@ be withdrawn.
 | `HETZNER_POSTGRES_HOST`, `_PORT`, `_DB`, `_USER`, `_PASSWORD` | Database |
 | `HETZNER_S3_ENDPOINT`, `_REGION`, `_ACCESS_KEY`, `_SECRET_KEY` | Object storage |
 | `HETZNER_ADMIN_ADDRESSES` | Admin address list |
-| `NUGET_API_KEY` | NuGet publishing |
+| `NUGET_USER` | nuget.org username for OIDC trusted publishing (no API key is stored) |
 
 ### Reverse proxy configuration
 

@@ -21,6 +21,18 @@ public sealed record SpvCandidacyInfo(string Id, int Round, string Lawyer);
 /// <summary>The two lawyer wallets assigned to a marketplace listing.</summary>
 public sealed record ListingLawyersInfo(string SpvLawyer, string DeveloperLawyer);
 
+/// <summary>The two assigned lawyers' document verdicts and the listing's legal-review state.</summary>
+public sealed record ListingReviewInfo(
+    string SpvLawyer,
+    string SpvDocumentStatus,
+    string SpvDocumentsHash,
+    string DeveloperLawyer,
+    string DeveloperDocumentStatus,
+    string DeveloperDocumentsHash,
+    bool SecondAttempt,
+    string Status,
+    long LegalDeadline);
+
 /// <summary>The property's letting seat as the indexer mirrors it (property <c>PropertyLetting</c>).</summary>
 public sealed record PropertyLettingInfo(
     string Agent, long ElectionExpiry, long ElectionRound, int ElectionQuorumBps, int GovernanceStrikes);
@@ -64,6 +76,9 @@ public interface IIndexerClient
 
     /// <summary>Both lawyer wallets assigned to the listing, or null if the listing is absent.</summary>
     Task<ListingLawyersInfo?> GetListingLawyersAsync(long listingId, CancellationToken ct);
+
+    /// <summary>The listing's complete two-lawyer document-review state, or null if absent.</summary>
+    Task<ListingReviewInfo?> GetListingLawyerReviewAsync(long listingId, CancellationToken ct);
 
     /// <summary>The property's letting seat row, or null if absent.</summary>
     Task<PropertyLettingInfo?> GetPropertyLettingAsync(long assetId, CancellationToken ct);
@@ -193,6 +208,37 @@ public class IndexerClient(
             : new ListingLawyersInfo(
                 node.Value.GetProperty("spvLawyer").GetString() ?? string.Empty,
                 node.Value.GetProperty("developerLawyer").GetString() ?? string.Empty);
+    }
+
+    public async Task<ListingReviewInfo?> GetListingLawyerReviewAsync(long listingId, CancellationToken ct)
+    {
+        var nodes = await QueryAsync(
+            """
+            query($id: I64!) {
+              listings(listingId: $id, first: 1, offset: 0) {
+                nodes {
+                  spvLawyer spvLawyerDocStatus spvLawyerDocumentsHash
+                  developerLawyer developerLawyerDocStatus developerLawyerDocumentsHash
+                  secondAttempt status legalDeadline
+                }
+              }
+            }
+            """,
+            new { id = I64Var(listingId) }, "listings", ct);
+
+        var node = FirstNode(nodes);
+        return node is null
+            ? null
+            : new ListingReviewInfo(
+                node.Value.GetProperty("spvLawyer").GetString() ?? string.Empty,
+                node.Value.GetProperty("spvLawyerDocStatus").GetString() ?? string.Empty,
+                node.Value.GetProperty("spvLawyerDocumentsHash").GetString() ?? string.Empty,
+                node.Value.GetProperty("developerLawyer").GetString() ?? string.Empty,
+                node.Value.GetProperty("developerLawyerDocStatus").GetString() ?? string.Empty,
+                node.Value.GetProperty("developerLawyerDocumentsHash").GetString() ?? string.Empty,
+                node.Value.GetProperty("secondAttempt").GetBoolean(),
+                node.Value.GetProperty("status").GetString() ?? string.Empty,
+                LongOf(node.Value, "legalDeadline"));
     }
 
     public async Task<PropertyLettingInfo?> GetPropertyLettingAsync(long assetId, CancellationToken ct)

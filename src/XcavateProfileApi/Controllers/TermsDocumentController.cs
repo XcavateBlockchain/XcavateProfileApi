@@ -31,8 +31,14 @@ public class TermsDocumentController : ControllerBase
     internal static string SnapshotObjectKey(string candidacy) =>
         $"terms-documents/by-candidacy/{candidacy}.pdf";
 
-    internal static string ReviewSnapshotObjectKey(long listingId, string role) =>
-        $"terms-documents/by-listing/{listingId}/{role}.pdf";
+    /// <summary>
+    /// The review snapshot's object key, content-addressed with the digest of the encrypted
+    /// payload stored at it. A retried upload of the same bytes lands on the same key, while a
+    /// concurrent upload encrypted under a different bucket key lands on its own — so a losing
+    /// creation attempt can never overwrite the snapshot the winning bucket's messages point at.
+    /// </summary>
+    internal static string ReviewSnapshotObjectKey(long listingId, string role, string contentHash) =>
+        $"terms-documents/by-listing/{listingId}/{role}-{contentHash}.pdf";
 
     private const string PdfExtension = ".pdf";
     private const string PdfContentType = "application/pdf";

@@ -13,6 +13,7 @@ public sealed class TestIndexerClient : IIndexerClient
     public SpvElectionInfo? SpvElection { get; set; }
     public SpvCandidacyInfo? SpvCandidacy { get; set; }
     public ListingLawyersInfo? ListingLawyers { get; set; }
+    public ListingReviewInfo? ListingReview { get; set; }
     public PropertyLettingInfo? PropertyLetting { get; set; }
     public ProposalInfo? OpenProposal { get; set; }
     public ProposalResultInfo? FinalizedProposal { get; set; }
@@ -46,6 +47,9 @@ public sealed class TestIndexerClient : IIndexerClient
 
     public Task<ListingLawyersInfo?> GetListingLawyersAsync(long listingId, CancellationToken ct)
         => Respond(ListingLawyers);
+
+    public Task<ListingReviewInfo?> GetListingLawyerReviewAsync(long listingId, CancellationToken ct)
+        => Respond(ListingReview);
 
     public Task<PropertyLettingInfo?> GetPropertyLettingAsync(long assetId, CancellationToken ct)
         => Respond(PropertyLetting);

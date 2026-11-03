@@ -173,6 +173,43 @@ public class GeneratedClientTests
     }
 
     [Test]
+    public async Task Generated_client_reads_bucket_properties_through_the_namespace()
+    {
+        var alice = NewAccount(0x31);
+        await using var host = await GraphQLHost.StartAsync();
+        var (client, provider) = CreateClient(host, alice);
+        await using var _ = provider;
+
+        var ns = await client.CreateNamespace.ExecuteAsync(
+            new NamespaceMetadataInput { Name = "legal-review" });
+        ns.EnsureNoErrors();
+        var created = await client.CreateBucket.ExecuteAsync(
+            ns.Data!.CreateNamespace.NamespaceId,
+            new BucketMetadataInput
+            {
+                Name = "42 Main Street - Lawyer document review",
+                Category = "lawyer-document-review",
+                Properties = new List<PropertyInput>
+                {
+                    new() { Key = "property_id", Value = "12" },
+                    new() { Key = "cluster", Value = "mainnet" },
+                    new() { Key = "spv_lawyer", Value = "SpvLawyerWallet111" },
+                    new() { Key = "developer_lawyer", Value = "DeveloperLawyerWallet111" }
+                }
+            });
+        created.EnsureNoErrors();
+
+        var read = await client.GetNamespaceById.ExecuteAsync(ns.Data.CreateNamespace.Id);
+        read.EnsureNoErrors();
+        var bucket = read.Data!.Namespace!.Buckets.Single();
+
+        Assert.That(
+            bucket.Properties,
+            Is.EqualTo(
+                """{"cluster":"mainnet","developer_lawyer":"DeveloperLawyerWallet111","property_id":"12","spv_lawyer":"SpvLawyerWallet111"}"""));
+    }
+
+    [Test]
     public async Task Generated_client_runs_the_lifecycle_of_a_bucket_without_a_namespace()
     {
         var alice = NewAccount(0x31);
