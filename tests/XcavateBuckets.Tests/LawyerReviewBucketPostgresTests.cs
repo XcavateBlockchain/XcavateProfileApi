@@ -76,6 +76,13 @@ public class LawyerReviewBucketPostgresTests
                 Assert.That(buckets, Has.Count.EqualTo(1));
                 Assert.That(buckets.Select(bucket => bucket.EncryptionKey).Distinct().Count(), Is.EqualTo(1));
                 Assert.That(reviewMessages, Has.Count.EqualTo(4));
+                Assert.That(reviewMessages.Select(message => message.Tag), Is.EqualTo(new[]
+                {
+                    "didcomm/key-sharing-v1",
+                    "lawyer/terms-document",
+                    "lawyer/terms-document",
+                    "lawyer/document-review"
+                }));
                 Assert.That(snapshotKeys, Has.Count.EqualTo(2),
                     "only the winning creation may snapshot the two terms PDFs");
                 Assert.That(

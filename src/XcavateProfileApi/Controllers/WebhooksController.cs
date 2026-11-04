@@ -1515,6 +1515,10 @@ public class WebhooksController : ControllerBase
                     null),
                 ct);
             await _messages.WriteAsync(
+                admin, ns.NamespaceId, bucket.BucketId, spvDocument.Message!, ct);
+            await _messages.WriteAsync(
+                admin, ns.NamespaceId, bucket.BucketId, developerDocument.Message!, ct);
+            await _messages.WriteAsync(
                 admin,
                 ns.NamespaceId,
                 bucket.BucketId,
@@ -1527,10 +1531,6 @@ public class WebhooksController : ControllerBase
                     LawyerTermsBucketProtocol.ContentHash(promptPayload),
                     null),
                 ct);
-            await _messages.WriteAsync(
-                admin, ns.NamespaceId, bucket.BucketId, spvDocument.Message!, ct);
-            await _messages.WriteAsync(
-                admin, ns.NamespaceId, bucket.BucketId, developerDocument.Message!, ct);
             await transaction.CommitAsync(ct);
 
             return (null, bucket.BucketId, true, holders.Count);

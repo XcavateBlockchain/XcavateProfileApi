@@ -986,15 +986,15 @@ public class LawyerReviewBucketWebhookTests
                 Assert.That(keySharing.RootElement.GetProperty("recipients").GetArrayLength(), Is.EqualTo(5));
                 Assert.That(state.Messages[0].IpfsContent, Does.Not.Contain("\"d\""));
             }
-            Assert.That(state.Messages[1].Tag, Is.EqualTo("lawyer/document-review"));
-            Assert.That(state.Messages[1].Reference, Is.EqualTo("lawyer-review/12/prompt"));
-            Assert.That(state.Messages[1].ContentType, Is.EqualTo("text/plain;charset=utf-8"));
-            Assert.That(state.Messages[1].IpfsContent, Does.Not.Contain(ReviewPrompt));
-            Assert.That(await DecryptMessageAsync(host, state.Messages[1]), Is.EqualTo(ReviewPrompt));
-            Assert.That(state.Messages[1].ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(state.Messages[1].IpfsContent!)))));
-            await AssertDocumentAsync(host, state.Messages[2], "spv-lawyer", SpvPdf);
-            await AssertDocumentAsync(host, state.Messages[3], "developer-lawyer", DeveloperPdf);
+            await AssertDocumentAsync(host, state.Messages[1], "spv-lawyer", SpvPdf);
+            await AssertDocumentAsync(host, state.Messages[2], "developer-lawyer", DeveloperPdf);
+            Assert.That(state.Messages[3].Tag, Is.EqualTo("lawyer/document-review"));
+            Assert.That(state.Messages[3].Reference, Is.EqualTo("lawyer-review/12/prompt"));
+            Assert.That(state.Messages[3].ContentType, Is.EqualTo("text/plain;charset=utf-8"));
+            Assert.That(state.Messages[3].IpfsContent, Does.Not.Contain(ReviewPrompt));
+            Assert.That(await DecryptMessageAsync(host, state.Messages[3]), Is.EqualTo(ReviewPrompt));
+            Assert.That(state.Messages[3].ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(state.Messages[3].IpfsContent!)))));
         });
     }
 
@@ -1142,10 +1142,10 @@ public class LawyerReviewBucketWebhookTests
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.NotFound), roleHash);
     }
 
-    [TestCase(false, true, 2, SpvFallback)]
-    [TestCase(true, false, 3, DeveloperFallback)]
-    public async Task Missing_pdfs_send_exact_fallbacks(
-        bool spvDocument, bool developerDocument, int messageIndex, string fallback)
+    [TestCase(false, true)]
+    [TestCase(true, false)]
+    [TestCase(false, false)]
+    public async Task Missing_pdfs_send_exact_fallbacks(bool spvDocument, bool developerDocument)
     {
         await using var host = await WebhooksHost.StartAsync(webhookSecret: WebhookSecret);
         await SeedNamespaceAsync(host);
@@ -1157,20 +1157,44 @@ public class LawyerReviewBucketWebhookTests
             .Where(message => message.BucketId == bucketId)
             .OrderBy(message => message.MessageId)
             .ToListAsync());
-        var role = messageIndex == 2 ? "spv" : "developer";
+        var expectedTags = new[]
+        {
+            "didcomm/key-sharing-v1",
+            spvDocument ? "lawyer/terms-document" : "lawyer/terms-document-missing",
+            developerDocument ? "lawyer/terms-document" : "lawyer/terms-document-missing",
+            "lawyer/document-review"
+        };
+        var expectedFallbacks = new List<(int Index, string Role, string Text)>();
+        if (!spvDocument)
+        {
+            expectedFallbacks.Add((1, "spv", SpvFallback));
+        }
+        if (!developerDocument)
+        {
+            expectedFallbacks.Add((2, "developer", DeveloperFallback));
+        }
 
         await Assert.MultipleAsync(async () =>
         {
             Assert.That(status, Is.EqualTo(HttpStatusCode.OK));
             Assert.That(messages, Has.Count.EqualTo(4));
-            Assert.That(messages[messageIndex].Tag, Is.EqualTo("lawyer/terms-document-missing"));
-            Assert.That(messages[messageIndex].Reference,
-                Is.EqualTo($"lawyer-review/12/{role}-document-missing"));
-            Assert.That(messages[messageIndex].ContentType, Is.EqualTo("text/plain;charset=utf-8"));
-            Assert.That(messages[messageIndex].IpfsContent, Does.Not.Contain(fallback));
-            Assert.That(await DecryptMessageAsync(host, messages[messageIndex]), Is.EqualTo(fallback));
-            Assert.That(messages[messageIndex].ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(messages[messageIndex].IpfsContent!)))));
+            Assert.That(messages.Select(message => message.Tag), Is.EqualTo(expectedTags));
+            Assert.That(messages.Select(message => message.Contributor), Is.All.EqualTo(
+                WebhooksHost.DefaultBucketAdminAddress));
+            Assert.That(messages[3].Reference, Is.EqualTo("lawyer-review/12/prompt"));
+            Assert.That(await DecryptMessageAsync(host, messages[3]), Is.EqualTo(ReviewPrompt));
+            foreach (var fallback in expectedFallbacks)
+            {
+                var message = messages[fallback.Index];
+                Assert.That(message.Tag, Is.EqualTo("lawyer/terms-document-missing"));
+                Assert.That(message.Reference,
+                    Is.EqualTo($"lawyer-review/12/{fallback.Role}-document-missing"));
+                Assert.That(message.ContentType, Is.EqualTo("text/plain;charset=utf-8"));
+                Assert.That(message.IpfsContent, Does.Not.Contain(fallback.Text));
+                Assert.That(await DecryptMessageAsync(host, message), Is.EqualTo(fallback.Text));
+                Assert.That(message.ContentHash, Is.EqualTo("0x" + Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(message.IpfsContent!)))));
+            }
         });
     }
 
@@ -1265,8 +1289,8 @@ public class LawyerReviewBucketWebhookTests
             Assert.That(messages, Has.Count.EqualTo(4));
             Assert.That(messages.Count(message =>
                 message.Tag == "didcomm/key-sharing-v1"), Is.EqualTo(1));
-            Assert.That(messages[1].IpfsContent, Does.Not.Contain(ReviewPrompt));
-            Assert.That(await DecryptMessageAsync(host, messages[1]), Is.EqualTo(ReviewPrompt));
+            Assert.That(messages[3].IpfsContent, Does.Not.Contain(ReviewPrompt));
+            Assert.That(await DecryptMessageAsync(host, messages[3]), Is.EqualTo(ReviewPrompt));
             using var properties = JsonDocument.Parse(bucket.Properties!);
             Assert.That(properties.RootElement.GetProperty("kind").GetString(),
                 Is.EqualTo("lawyer_document_review"));

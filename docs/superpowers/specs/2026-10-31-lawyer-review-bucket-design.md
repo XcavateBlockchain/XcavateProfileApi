@@ -10,7 +10,7 @@ Once a listing has both a ratified SPV lawyer and an assigned developer lawyer, 
 - Handle either lawyer transition being indexed and delivered first.
 - Create one deterministic lawyer document-review bucket per property namespace.
 - Install the configured bucket admin, claimed-holder viewers, lawyer contributors/viewers, and real X25519 key sharing.
-- Send the key-sharing, instruction, SPV document, and developer document messages in that order.
+- Send the key-sharing, SPV document, developer document, and instruction messages in that order, all authored by the bucket admin.
 - Make redelivery and retries reuse the completed bucket without duplicate messages or key rotation.
 - Wire configuration through the existing durable-outbox, Compose, and GitHub Actions patterns.
 
@@ -55,9 +55,9 @@ The shared ensure operation:
 4. Resolves current positive claimed `shareHoldings` wallets through the existing `GetShareHolderWalletsAsync` method. This matches the established definition of claimed property-token holders and excludes mere reservations.
 5. Resolves X25519 viewer keys for all claimed holders and both lawyers, deduplicating wallets and keys. A missing required key answers 404 before bucket writes. The admin is both admin and contributor so it can author messages; claimed holders receive viewer memberships only, while the two lawyers are contributors and have their X25519 keys added as viewers. Role unions remain idempotent if wallets overlap.
 6. Creates a fresh bucket key with the existing `LawyerTermsBucketProtocol.CreateKeySharing`, installs the public key with `ResumeWritingAsync`, and writes the encrypted private-key-sharing message first.
-7. Writes the exact admin instruction second:
+7. Writes the SPV lawyer's document second and developer lawyer's document third. For each, use the wallet's current `LawyerTermsDocument`; download and snapshot the bytes under a stable per-listing/role object key, then reference the snapshot with its original filename, PDF content type, and SHA-256 hash. Reuse the existing `lawyer/terms-document` tag so current document consumers recognize both PDFs.
+8. Writes the exact admin instruction fourth, after both documents:
    `The SPV Lawyer and Developer Lawyer must now review each other's documents and finalize the terms. Please feel free to discuss any questions here.`
-8. Writes the SPV lawyer's document third and developer lawyer's document fourth. For each, use the wallet's current `LawyerTermsDocument`; download and snapshot the bytes under a stable per-listing/role object key, then reference the snapshot with its original filename, PDF content type, and SHA-256 hash. Reuse the existing `lawyer/terms-document` tag so current document consumers recognize both PDFs.
 9. If a document row is absent, write the exact required fallback as a plaintext admin message instead:
    - `SPV Lawyer's terms document is not available. Please send it here.`
    - `Developer Lawyer's terms document is not available. Please send it here.`

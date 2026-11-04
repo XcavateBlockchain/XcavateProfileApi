@@ -91,7 +91,7 @@
 - [ ] **Step 2: Run the new suite and verify RED**
   Run `dotnet test tests/XcavateBuckets.Tests --filter LawyerReviewBucketWebhookTests`; expect failures for the missing developer route and absent review bucket.
 - [ ] **Step 3: Implement the shared ensure flow**
-  Validate admin and namespace, reuse an existing deterministic bucket, resolve and validate both lawyer seats, enumerate/deduplicate claimed holders, and resolve all required viewer keys before writes. Preload available PDFs and snapshot them under deterministic role keys; absent rows produce the exact fallback while storage errors return 502. Create bucket/memberships/key/messages in one transaction. The message order is key sharing, prompt, SPV PDF/fallback, developer PDF/fallback; the admin authors all four.
+  Validate admin and namespace, reuse an existing deterministic bucket, resolve and validate both lawyer seats, enumerate/deduplicate claimed holders, and resolve all required viewer keys before writes. Preload available PDFs and snapshot them under deterministic role keys; absent rows produce the exact fallback while storage errors return 502. Create bucket/memberships/key/messages in one transaction. The message order is key sharing, SPV PDF/fallback, developer PDF/fallback, prompt; the admin authors all four.
 - [ ] **Step 4: Wire both triggers**
   Add the authenticated developer-assignment action and snake_case payload model. Invoke the same ensure flow from the successful/ratified SPV-election path after existing membership work, returning any setup failure so Indexer retries. Add response fields `lawyerReviewBucketId`, `lawyerReviewBucketCreated`, and `lawyerReviewHolderCount` without removing existing fields.
 - [ ] **Step 5: Run focused and regression tests**
